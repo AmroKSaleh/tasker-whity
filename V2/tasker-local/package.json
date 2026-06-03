@@ -1,0 +1,22 @@
+{
+  "name": "@tasker/local",
+  "version": "0.1.0",
+  "description": "Local server and parser for .tasker/ project directories — powers npx tasker",
+  "type": "module",
+  "main": "src/parser.js",
+  "exports": {
+    ".": "./src/parser.js",
+    "./server": "./src/server.js"
+  },
+  "bin": {
+    "tasker": "bin/tasker.js"
+  },
+  "scripts": {
+    "test": "node src/parser.test.js",
+    "start": "node bin/tasker.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2"
+  },
+  "engines": { "node": ">=18" }
+}

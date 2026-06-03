@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "name": "Blog Post Workflow",
+  "prefix": "BPW",
+  "next_short_id": 31,
+  "sections": [
+    { "id": "backlog",  "name": "Backlog",  "order": 10 },
+    { "id": "planning", "name": "Planning", "order": 20 },
+    { "id": "writing",  "name": "Writing",  "order": 30 },
+    { "id": "review",   "name": "Review",   "order": 40 },
+    { "id": "publish",  "name": "Publish",  "order": 50 }
+  ],
+  "groups": [
+    { "id": "research",     "name": "Research",      "section": "planning", "order": 10 },
+    { "id": "audience",     "name": "Audience",      "section": "planning", "order": 20 },
+    { "id": "drafting",     "name": "Drafting",      "section": "writing",  "order": 10 },
+    { "id": "seo",          "name": "SEO",           "section": "writing",  "order": 20 },
+    { "id": "editing",      "name": "Editing",       "section": "review",   "order": 10 },
+    { "id": "fact-checking","name": "Fact-checking", "section": "review",   "order": 20 },
+    { "id": "distribution", "name": "Distribution",  "section": "publish",  "order": 10 },
+    { "id": "promotion",    "name": "Promotion",     "section": "publish",  "order": 20 }
+  ],
+  "flows": {
+    "BPW-4": "Publishing Pipeline"
+  }
+}

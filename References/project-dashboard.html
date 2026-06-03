@@ -1,0 +1,1311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Waqtak Project Dashboard</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&family=Roboto+Mono:wght@400&display=swap" rel="stylesheet">
+<style>
+  /* ── MD3 Dark Tokens ── */
+  :root {
+    --bg:              #FFFBFE;
+    --surf-low:        #F7F2FA;
+    --surf:            #F3EDF7;
+    --surf-high:       #ECE6F0;
+    --surf-top:        #E6E0E9;
+    --primary:         #6750A4;
+    --on-primary:      #FFFFFF;
+    --primary-cont:    #EADDFF;
+    --on-primary-cont: #21005D;
+    --secondary:       #625B71;
+    --on-surface:      #1C1B1F;
+    --on-surf-var:     #49454F;
+    --outline:         #79747E;
+    --outline-var:     #CAC4D0;
+    --c-green:  #386A20; --c-green-c:  rgba(56,106,32,.1);
+    --c-red:    #B3261E; --c-red-c:    rgba(179,38,30,.1);
+    --c-orange: #7D5700; --c-orange-c: rgba(125,87,0,.1);
+    --c-blue:   #005AC1; --c-blue-c:   rgba(0,90,193,.1);
+    --c-teal:   #006A60; --c-teal-c:   rgba(0,106,96,.1);
+    --c-purple: #6750A4; --c-purple-c: rgba(103,80,164,.1);
+    --s-sm: 4px; --s-md: 8px; --s-lg: 12px; --s-xl: 16px; --s-pill: 100px;
+    --e1: rgba(0,0,0,.04); --e2: rgba(0,0,0,.08);
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Roboto', system-ui, sans-serif; background: var(--bg); color: var(--on-surface); line-height: 1.6; min-height: 100vh; font-size: 14px; }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--outline-var); border-radius: var(--s-pill); }
+  ::-webkit-scrollbar-thumb:hover { background: var(--outline); }
+
+  /* ── Header ── */
+  .header { text-align: center; padding: 2.5rem 2rem 2rem; background: var(--surf-low); border-bottom: 1px solid var(--outline-var); }
+  .header h1 { font-size: 2rem; font-weight: 500; letter-spacing: -.25px; color: var(--primary); margin-bottom: .4rem; }
+  .header p { color: var(--on-surf-var); font-size: .875rem; }
+
+  /* ── Tabs ── */
+  .tab-nav { position: sticky; top: 0; z-index: 200; background: var(--surf-low); border-bottom: 1px solid var(--outline-var); display: flex; gap: 0; overflow-x: auto; padding: 0 1.5rem; }
+  .tab-nav::-webkit-scrollbar { height: 3px; }
+  .tab-nav::-webkit-scrollbar-thumb { background: var(--outline-var); }
+  .tab-btn { padding: .9rem 1.25rem; font-size: .875rem; font-weight: 500; font-family: 'Roboto', sans-serif; color: var(--on-surf-var); cursor: pointer; border-bottom: 3px solid transparent; white-space: nowrap; transition: color .2s, background .2s; user-select: none; background: none; border-top: none; border-left: none; border-right: none; letter-spacing: .1px; }
+  .tab-btn:hover { color: var(--on-surface); background: var(--e1); }
+  .tab-btn.active { color: var(--primary); border-bottom-color: var(--primary); }
+
+  /* ── Tab panels ── */
+  .tab-panel { display: none; padding: 1.5rem 2rem 4rem; max-width: 980px; margin: 0 auto; }
+  .tab-panel.active { display: block; }
+
+  /* ── Progress ── */
+  .progress-wrap { padding: 1rem 0 1.5rem; margin-bottom: 1.5rem; }
+  .progress-row { display: flex; justify-content: space-between; align-items: center; margin-bottom: .6rem; }
+  .progress-stats { font-size: .875rem; color: var(--on-surf-var); }
+  .progress-stats strong { color: var(--primary); font-weight: 500; }
+  .progress-track { width: 100%; height: 8px; background: var(--outline-var); border-radius: var(--s-pill); overflow: hidden; }
+  .progress-fill { height: 100%; width: 0%; background: linear-gradient(90deg, var(--primary-cont), var(--primary)); border-radius: var(--s-pill); transition: width .5s cubic-bezier(.34,1.56,.64,1); }
+
+  /* ── Summary cards ── */
+  .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: .75rem; margin-bottom: 1.5rem; }
+  .summary-card { background: var(--surf); border-radius: var(--s-lg); padding: 1rem .75rem; text-align: center; }
+  .summary-card .num { font-size: 1.5rem; font-weight: 700; letter-spacing: -.5px; }
+  .summary-card .lbl { font-size: .7rem; color: var(--on-surf-var); text-transform: uppercase; letter-spacing: .6px; margin-top: .2rem; }
+  .c-total  { color: var(--primary); }
+  .c-rush   { color: var(--c-red); }
+  .c-high   { color: var(--c-orange); }
+  .c-medium { color: var(--c-blue); }
+  .c-low    { color: var(--secondary); }
+  .c-done   { color: var(--c-green); }
+  .c-blocked{ color: var(--c-orange); }
+
+  /* ── Controls ── */
+  .controls { display: flex; gap: .5rem; flex-wrap: wrap; margin-bottom: 1.5rem; align-items: center; }
+  .controls button { padding: .45rem .9rem; border: 1px solid var(--outline-var); border-radius: var(--s-pill); background: transparent; color: var(--on-surf-var); font-size: .8rem; font-family: 'Roboto', sans-serif; font-weight: 500; cursor: pointer; transition: all .2s; letter-spacing: .1px; }
+  .controls button:hover { background: var(--e2); border-color: var(--outline); color: var(--on-surface); }
+  .filter-group { display: flex; gap: .35rem; margin-left: auto; flex-wrap: wrap; }
+  .filter-group button.active { background: var(--primary-cont); border-color: var(--primary-cont); color: var(--on-primary-cont); }
+
+  /* ── Focus banner ── */
+  .focus-banner { background: var(--c-red-c); border: 1px solid rgba(242,184,181,.25); color: var(--c-red); border-radius: var(--s-lg); padding: 1rem 1.25rem; font-size: .875rem; font-weight: 500; margin-bottom: 1.5rem; }
+
+  /* ── Sections ── */
+  .section { margin-bottom: 1rem; background: var(--surf-low); border: 1px solid var(--outline-var); border-radius: var(--s-xl); overflow: hidden; }
+  .section-header { display: flex; align-items: center; gap: .75rem; padding: 1rem 1.5rem; background: var(--surf); cursor: pointer; user-select: none; border-bottom: 1px solid var(--outline-var); transition: background .2s; }
+  .section-header:hover { background: var(--surf-high); }
+  .section-header .arrow { color: var(--on-surf-var); font-size: .7rem; transition: transform .25s cubic-bezier(.34,1.56,.64,1); }
+  .section-header.open .arrow { transform: rotate(90deg); }
+  .section-header h2 { font-size: 1rem; font-weight: 500; flex: 1; letter-spacing: .1px; color: var(--on-surface); }
+  .section-meta { font-size: .72rem; color: var(--on-surf-var); background: var(--surf-top); padding: .2rem .6rem; border-radius: var(--s-pill); }
+  .section-body { display: none; }
+  .section-body.open { display: block; }
+  .cluster-header { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .9px; color: var(--on-surf-var); padding: .75rem 1.5rem .35rem; border-bottom: 1px solid rgba(0,0,0,.07); }
+
+  /* ── Items ── */
+  .item { display: flex; align-items: flex-start; gap: .85rem; padding: .85rem 1.5rem; border-bottom: 1px solid rgba(0,0,0,.07); transition: background .15s; }
+  .item:last-child { border-bottom: none; }
+  .item:hover { background: var(--e1); }
+  .item input[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 20px; height: 20px; min-width: 20px; border: 2px solid var(--outline); border-radius: var(--s-sm); cursor: pointer; position: relative; top: 2px; transition: all .2s; flex-shrink: 0; }
+  .item input[type="checkbox"]:checked { background: var(--primary); border-color: var(--primary); }
+  .item input[type="checkbox"]:checked::after { content: '\2713'; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--on-primary); font-size: 12px; font-weight: 700; }
+  .item input[type="checkbox"]:disabled { opacity: .25; cursor: default; }
+  .item.checked .item-text { text-decoration: line-through; color: var(--on-surf-var); }
+  .item-content { flex: 1; min-width: 0; }
+  .item-top { display: flex; align-items: flex-start; gap: .4rem; flex-wrap: wrap; }
+  .item-text { font-size: .875rem; flex: 1; cursor: pointer; line-height: 1.5; color: var(--on-surface); }
+  .item-detail { font-size: .8rem; color: var(--on-surf-var); margin-top: .3rem; line-height: 1.6; }
+
+  /* ── Tags (MD3 Assist Chips) ── */
+  .tag { font-size: .65rem; padding: .18rem .55rem; border-radius: var(--s-pill); font-weight: 600; text-transform: uppercase; letter-spacing: .4px; white-space: nowrap; flex-shrink: 0; margin-top: 2px; border: 1px solid transparent; }
+  .tag.rush,  .tag.urgent, .tag.p1, .tag.here { background: var(--c-red-c);    color: var(--c-red);    border-color: rgba(242,184,181,.3); }
+  .tag.high,  .tag.blocked,.tag.p2            { background: var(--c-orange-c); color: var(--c-orange); border-color: rgba(255,186,145,.3); }
+  .tag.medium,.tag.schema, .tag.p3            { background: var(--c-blue-c);   color: var(--c-blue);   border-color: rgba(147,202,237,.3); }
+  .tag.low,   .tag.p4                         { background: var(--c-purple-c); color: var(--secondary);border-color: rgba(204,194,220,.3); }
+  .tag.abed,  .tag.arabic                     { background: var(--c-teal-c);   color: var(--c-teal);   border-color: rgba(128,203,196,.3); }
+  .tag.seo,   .tag.stage1, .tag.done-tag      { background: var(--c-green-c);  color: var(--c-green);  border-color: rgba(168,213,162,.3); }
+  .tag.stage2                                  { background: var(--c-blue-c);   color: var(--c-blue);   border-color: rgba(147,202,237,.3); }
+  .tag.arch,  .tag.stage3, .tag.website        { background: var(--c-purple-c); color: var(--primary);  border-color: rgba(208,188,255,.3); }
+  .tag.info,  .tag.you                         { background: rgba(0,0,0,.06); color: var(--on-surf-var); border-color: var(--outline-var); }
+
+  /* ── Item ID ── */
+  .item-id { font-size: .6rem; font-family: 'Roboto Mono', monospace; color: var(--on-surf-var); background: var(--surf-high); border: 1px solid var(--outline-var); border-radius: var(--s-sm); padding: .1rem .35rem; white-space: nowrap; flex-shrink: 0; margin-top: 3px; letter-spacing: .3px; opacity: .7; }
+
+  /* ── Now Panel ── */
+  .now-primary { display: flex; gap: 1.1rem; align-items: flex-start; background: var(--primary-cont); border-radius: var(--s-xl); padding: 1.5rem 1.75rem; margin-bottom: 1rem; transition: filter .2s; }
+  .now-primary:hover { filter: brightness(1.08); }
+  .now-primary.checked .now-text { text-decoration: line-through; opacity: .6; }
+  .now-card { display: flex; gap: .85rem; align-items: flex-start; background: var(--surf); border: 1px solid var(--outline-var); border-radius: var(--s-lg); padding: 1rem 1.25rem; margin-bottom: .5rem; transition: background .15s; }
+  .now-card:hover { background: var(--surf-high); }
+  .now-card.checked .now-text { text-decoration: line-through; color: var(--on-surf-var); }
+  .now-primary input[type="checkbox"], .now-card input[type="checkbox"] { appearance: none; -webkit-appearance: none; width: 22px; height: 22px; min-width: 22px; border: 2px solid var(--outline); border-radius: var(--s-sm); cursor: pointer; position: relative; top: 2px; transition: all .2s; flex-shrink: 0; }
+  .now-primary input[type="checkbox"] { border-color: var(--on-primary-cont); }
+  .now-primary input[type="checkbox"]:checked { background: var(--on-primary-cont); border-color: var(--on-primary-cont); }
+  .now-card input[type="checkbox"]:checked { background: var(--primary); border-color: var(--primary); }
+  .now-primary input[type="checkbox"]:checked::after { content: '\2713'; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--primary-cont); font-size: 13px; font-weight: 700; }
+  .now-card input[type="checkbox"]:checked::after { content: '\2713'; position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%); color: var(--on-primary); font-size: 13px; font-weight: 700; }
+  .now-content { flex: 1; min-width: 0; }
+  .now-top { display: flex; align-items: flex-start; gap: .5rem; flex-wrap: wrap; }
+  .now-text { flex: 1; line-height: 1.5; }
+  .now-primary .now-text { font-size: 1.05rem; font-weight: 500; color: var(--on-primary-cont); }
+  .now-card .now-text { font-size: .875rem; color: var(--on-surface); }
+  .now-section-label { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--on-surf-var); padding: 1.5rem 0 .5rem; }
+  .now-empty { text-align: center; padding: 4rem 1rem; color: var(--on-surf-var); font-size: .9rem; }
+  .now-empty span { font-size: 2.5rem; display: block; margin-bottom: 1rem; }
+  .now-do-label { font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; color: var(--primary); margin-bottom: .6rem; }
+
+  /* ── In-Progress Sidebar ── */
+  .tab-layout { display: grid; grid-template-columns: 1fr 260px; gap: 1.5rem; align-items: start; }
+  .ip-sidebar { position: sticky; top: 110px; background: var(--surf-low); border: 1px solid var(--outline-var); border-radius: var(--s-xl); overflow: hidden; max-height: calc(100vh - 130px); overflow-y: auto; }
+  .ip-sidebar-header { padding: .7rem 1.1rem; font-size: .7rem; font-weight: 700; text-transform: uppercase; letter-spacing: .8px; color: var(--c-orange); border-bottom: 1px solid var(--outline-var); background: var(--c-orange-c); position: sticky; top: 0; }
+  .ip-empty { padding: 1.5rem 1rem; font-size: .8rem; color: var(--on-surf-var); text-align: center; }
+  .ip-chip { display: flex; align-items: center; gap: .5rem; padding: .6rem 1rem; border-bottom: 1px solid rgba(0,0,0,.07); transition: background .15s; }
+  .ip-chip:last-child { border-bottom: none; }
+  .ip-chip:hover { background: var(--e1); }
+  .ip-chip-text { font-size: .8rem; color: var(--on-surface); flex: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; line-height: 1.4; }
+  .ip-remove { width: 20px; height: 20px; min-width: 20px; border: none; background: none; color: var(--on-surf-var); cursor: pointer; font-size: 1rem; padding: 0; border-radius: var(--s-pill); display: flex; align-items: center; justify-content: center; transition: all .15s; line-height: 1; }
+  .ip-remove:hover { color: var(--c-red); background: var(--c-red-c); }
+  .ip-btn { width: 18px; height: 18px; min-width: 18px; border: 1.5px solid var(--outline); border-radius: var(--s-sm); background: none; cursor: pointer; display: flex; align-items: center; justify-content: center; font-size: .5rem; color: var(--on-surf-var); transition: all .2s; position: relative; top: 2px; padding: 0; line-height: 1; flex-shrink: 0; }
+  .ip-btn:hover { border-color: var(--c-orange); color: var(--c-orange); background: var(--c-orange-c); }
+  .ip-btn.active { background: var(--c-orange-c); border-color: var(--c-orange); color: var(--c-orange); }
+  .ip-btn:disabled { opacity: .2; cursor: default; }
+  .ip-btn:disabled:hover { border-color: var(--outline); color: var(--on-surf-var); background: none; }
+
+  /* ── Now sub-tabs ── */
+  .now-subtab-nav { display: flex; gap: 0; border-bottom: 1px solid var(--outline-var); margin-bottom: 1.5rem; }
+  .now-subtab-btn { padding: .65rem 1.25rem; font-size: .875rem; font-weight: 500; font-family: 'Roboto', sans-serif; color: var(--on-surf-var); cursor: pointer; border-bottom: 3px solid transparent; margin-bottom: -1px; background: none; border-top: none; border-left: none; border-right: none; transition: all .15s; white-space: nowrap; user-select: none; letter-spacing: .1px; }
+  .now-subtab-btn:hover { color: var(--on-surface); background: var(--e1); }
+  .now-subtab-btn.active { color: var(--c-orange); border-bottom-color: var(--c-orange); }
+  .now-subtab-count { display: inline-block; background: var(--c-orange-c); color: var(--c-orange); border-radius: var(--s-pill); font-size: .65rem; padding: .05rem .4rem; margin-left: .35rem; font-weight: 700; }
+  .now-ip-card { display: flex; align-items: center; gap: .85rem; background: var(--surf); border: 1px solid var(--outline-var); border-radius: var(--s-lg); padding: .85rem 1.25rem; margin-bottom: .5rem; transition: background .15s; }
+  .now-ip-card:hover { background: var(--surf-high); }
+  .now-ip-text { flex: 1; font-size: .875rem; color: var(--on-surface); line-height: 1.5; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Waqtak — Project Dashboard</h1>
+  <p>Last updated: May 4, 2026 &nbsp;·&nbsp; 6 active task lists &nbsp;·&nbsp; <strong style="color:var(--primary)">▶ Now</strong> always shows what to work on next</p>
+</div>
+
+<div class="tab-nav">
+  <button class="tab-btn" onclick="switchTab('now',this)">▶ Now</button>
+  <button class="tab-btn active" onclick="switchTab('master',this)">Master</button>
+  <button class="tab-btn" onclick="switchTab('website',this)">waqtak Website</button>
+  <button class="tab-btn" onclick="switchTab('content',this)">waqtak Content</button>
+  <button class="tab-btn" onclick="switchTab('getlisted',this)">Get Listed</button>
+  <button class="tab-btn" onclick="switchTab('toppages',this)">What Top Pages Do</button>
+  <button class="tab-btn" onclick="switchTab('credibility',this)">Credibility Gaps</button>
+</div>
+
+<!-- panels are injected here by JS -->
+<div id="panels"></div>
+
+<script>
+/* ═══════════════════════════════════════════ DATA ═══════════════════════════════════════════ */
+
+const TABS = {
+
+  master: {
+    label: 'Master TDL',
+    key: 'wdash_master',
+    progressIds: ['mp_lead','mp0','mp1','mp2','mp3','mp4','mp5','mp6','mp7'],
+    filters: [
+      {id:'all',label:'All'},{id:'pending',label:'Pending'},{id:'done',label:'Done'},
+      {id:'rush',label:'Rush'},{id:'abed',label:'Needs Abed'}
+    ],
+    sections: [
+      {
+        id:'priorities', title:'Strategic Priorities',
+        items:[
+          { id:'mp_lead', text:'Create the lead magnet document', tags:['rush','p1'] },
+          { id:'mp0', text:'Have Amro explain what he is doing with his uncle — then identify what content would improve the outcome', detail:'Get context from Amro on the initiative, then map it to content needs: blog posts, lead magnets, LinkedIn posts, or landing pages depending on the goal.', tags:['rush'], done:true },
+          { id:'mp1', text:'Stage 1 EN baseline articles complete — all 14 available published', detail:'All 14 available EN articles published (Articles 5-7 blocked, RTM cluster). Last few articles missing images due to Gemini technical issues — resolve before adding images. Arabic translations in progress: AR 1-4 done, AR 8-9 done, AR 10 next.', tags:['p1'], done:true },
+          { id:'mp2', text:'Ask Abed this week — case studies + G2/Capterra reviews', detail:'(a) Name 2-3 clients willing to be cited in case studies with real outcome data. (b) Personally reach out to 10-15 clients and ask for G2/Capterra reviews. See Credibility Gaps tab.', tags:['p2','abed'] },
+          { id:'mp3', text:'Website parallel track: credibility fixes + schema', detail:'While content is being written. See Credibility Gaps tab and What Top Pages Do tab.', tags:['p3'] },
+          { id:'mp4', text:'Fix website technical issues', detail:'GA4 installed. Remaining: waqtak-scripts.js 404, email capture. 2026-04-28 audit found 10 more actionable issues — see Website tab Site Audit Fixes section.', tags:['p4'] },
+          { id:'mp5', text:'After Stage 1: Industry posts', detail:'Government (GCC-focused, Arabic-first), Banking (English-first), Healthcare (GCC signals)', tags:['low'] },
+          { id:'mp6', text:'After Stage 1 + industry: Five Blind Spots pillar content', detail:'Blog + LinkedIn + gated PDF', tags:['low'] },
+          { id:'mp7', text:'After baseline: Playbook content track', detail:'Daily/weekly/monthly workflows for Firas', tags:['low'] },
+        ]
+      },
+      {
+        id:'mref', title:'SEO Reference Files',
+        items:[
+          { id:'mref1', text:'get-listed.md — action items to get Waqtak listed on aggregator sites and review platforms', detail:'G2, Capterra, TheCXLead, ScanQueue. Priority order: claim G2 + Capterra → get reviews → submit to TheCXLead.', tags:['info'], noCheck:true },
+          { id:'mref2', text:'what-top-pages-do.md — content and architecture patterns from first-page SERP results', detail:'Checklist for building or auditing any page. Word count minimums, FAQ schema, pricing transparency, pillar page architecture.', tags:['info'], noCheck:true },
+          { id:'mref3', text:'credibility-gaps.md — action plan to fix proof gaps from ChatGPT vendor research', detail:'Named case studies, demo video, AI claims audit, traction signals, app store audit.', tags:['info'], noCheck:true },
+        ]
+      },
+      {
+        id:'mbacklog', title:'Backlog',
+        items:[
+          { id:'mbl3', text:'Waqtak NHS Integration', detail:'Reference doc: https://docs.google.com/document/d/1y41ToMOvSqDKhpmHfX4r_J0C-ofdpteK-iv5PzoB81k/edit?usp=sharing', tags:['low'], noCheck:true },
+          { id:'mbl2', text:'Discuss hardware-to-SaaS upsell strategy', tags:['low'], noCheck:true },
+        ]
+      },
+      {
+        id:'mdone', title:'Completed',
+        items:[
+          { id:'mf1', text:'Blog section built locally and deployed to live site', done:true },
+          { id:'mf2', text:'Yoast SEO installed, meta descriptions on all pages', done:true },
+          { id:'mf3', text:'Content strategy finalized via multi-model feedback loop', done:true },
+          { id:'mf4', text:'Article production workflow established (16-step process)', done:true },
+          { id:'mf5', text:'Articles 1-3 written and published (What is QMS / Types / Benefits)', done:true },
+          { id:'mf6', text:'Duplicate title tags removed sitewide', done:true },
+          { id:'mf7', text:'Organization schema added (Facebook, LinkedIn, Instagram)', done:true },
+          { id:'mf8', text:'SERP competitor analysis (10 pages) + SEO reference files created', done:true },
+          { id:'mf9', text:'All 14 available Stage 1 EN articles published — Articles 5-7 blocked (RTM). Images missing on last few due to Gemini technical issues.', done:true },
+          { id:'mf10', text:'GA4 installed on waqtak.io', done:true },
+          { id:'mf11', text:'Full bilingual site audit completed (2026-04-28) — 14 actionable issues catalogued across 35 pages', done:true },
+          { id:'mf12', text:'Arabic contact page /ar/contact-ar/ deployed (was 404 on production)', done:true },
+          { id:'mf13', text:'Stage 1 Arabic started — QMS cluster AR (articles 1-3 published)', done:true },
+        ]
+      }
+    ]
+  },
+
+  website: {
+    label:'waqtak Website',
+    key:'wdash_website',
+    progressIds:['w3','w_toc','w_lm','w4','w5','w6','w7','w8','w9','w10','w11','wa_c5','wa_h1','wa_h2','wa_h3','wa_h4','wa_h5','wa_m14','wa_m2','wa_m3','wa_l3'],
+    filters:[
+      {id:'all',label:'All'},{id:'pending',label:'Pending'},{id:'done',label:'Done'},
+      {id:'credibility',label:'Credibility'},{id:'schema',label:'Schema'},{id:'blocked',label:'Blocked'}
+    ],
+    sections:[
+      {
+        id:'wtech', title:'Technical Fixes',
+        items:[
+          { id:'w3', text:'Fix waqtak-scripts.js 404', detail:'A script is being enqueued but the file doesn\'t exist or the path is wrong. Flagged by Google Rich Results Test as a failed resource on every page load.', tags:['high'], done:true },
+          { id:'w_toc', text:'Fix TOC scrolling on blog posts', detail:'Table of contents scroll behavior is broken. Investigate and fix.', tags:['medium'] },
+        ]
+      },
+      {
+        id:'wschema', title:'Schema',
+        items:[
+          { id:'w4', text:'Add FAQPage schema to all solution pages and blog articles', detail:'Use Yoast FAQ block on each page. Validate at validator.schema.org after each page. Generates rich snippet real estate in SERPs without changing ranking position.', tags:['schema','high'] },
+          { id:'w5', text:'Add SoftwareApplication schema to all solution pages', detail:'JSON-LD: @type SoftwareApplication, applicationCategory: BusinessApplication, operatingSystem: Web. Add via Yoast or a custom JSON-LD block in the theme head.', tags:['schema','medium'] },
+          { id:'w6', text:'Fix author sameAs', detail:'Update the "alaa" WordPress user profile to point to a real LinkedIn URL instead of the site homepage. Yoast uses this for E-E-A-T signals — pointing to the homepage tells Google nothing about who the author is.', tags:['schema','medium'] },
+        ]
+      },
+      {
+        id:'wcontent', title:'Content Fixes',
+        items:[
+          { id:'w7', text:'Fix Platform page "Why It Sucks" heading', detail:'Off-tone for B2B enterprise audience. Rewrite to match the voice of other solution pages.', tags:['medium'] },
+          { id:'w8', text:'Rewrite Appointments problem cards (#11)', detail:'Each card must map to the "unmanaged demand" blind spot. Same quality as the Monitoring rewrites. Cards should remove the blind spot, not just describe a pain point.', tags:['medium'] },
+          { id:'w9', text:'Rewrite Customer Feedback problem cards (#17)', detail:'Map to "silent churn" blind spot. Fix the heading that currently duplicates Monitoring copy. Each card should make the reader feel the problem.', tags:['medium'] },
+          { id:'w10', text:'Publish Arabic blog post', detail:'EN blog has 1 post live at /what-is-queue-management-software-qms/. Arabic blog is empty. Translate and publish the Arabic version.', tags:['medium'] },
+          { id:'w11', text:'Translate FAQs to Arabic and add to site', detail:'After FAQPage schema is done on all solution pages, translate each FAQ block to Arabic and add to the corresponding Arabic solution pages.', tags:['medium'] },
+          { id:'w_lm', text:'Update /pdf-download/ page copy for QMS Vendor Evaluation Scorecard', detail:'Remove all Five Blind Spots references. Replace headline, description, and form context to match the new lead magnet. Hold until PDF from waqtak-content is ready.', tags:['medium'] },
+        ]
+      },
+      {
+        id:'waudit', title:'Site Audit Fixes (2026-04-28)',
+        items:[
+          { id:'wa_c5', text:'Remove English headline from /ar/analytics-kpis-ar/ hero', detail:'The hero section shows "Stop managing by intuition. Start managing by data." in English alongside the Arabic. Open the page in WP editor and delete the English text block from the hero section.', tags:['high'], done:true },
+          { id:'wa_h1', text:'Em dash sweep — sitewide EN pages', detail:'Find and replace all em dashes with periods, commas, or parentheses. Affected: homepage, /about_us/, /pdf-download/, and all 6 industry pages (/industry-banking/, /industry-telecom/, /industry-healthcare/, /industry-government/, /industry-retail/, /industry-ngos/).', tags:['high'], done:true },
+          { id:'wa_h2', text:'Remove stale /arabic/waqtak-solution-*/ language widgets from all 5 EN solution pages', detail:'Every solution page has an in-content language widget with dead URLs (/arabic/waqtak-solution-X/ and /solution-X/). Remove the whole widget block from each page in WP editor. Affects: queue-management, appointments, real-time-monitoring, analytics-kpis, customer-feedback.', tags:['high'], done:true },
+          { id:'wa_h3', text:'Fix Polylang mapping for /contact-us/ AR counterpart', detail:'The AR language toggle on /contact-us/ points to /ar/1367-2/ (raw post ID). Fix by setting the Arabic page slug in Polylang settings for that page pair.', tags:['high'], done:true },
+          { id:'wa_h4', text:'Remove /book-demo/ URL references from /book-a-demo/ and /pdf-download/', detail:'The wrong URL variant /book-demo/ (no "a") appears on these pages. This historically sent EN users to the Arabic demo page. Scrub all /book-demo/ references from both pages.', tags:['high'], done:true },
+          { id:'wa_h5', text:'Fix /ar/about-ar/ footer language toggle', detail:'The EN link in the footer toggle points back to /ar/about-ar/ instead of /about_us/. Header toggle is correct — footer only is broken. Fix the footer link in WP editor for this page.', tags:['high'], done:true },
+          { id:'wa_m14', text:'Add per-language fallbacks to customizer-driven text (footer + nav CTA)', detail:'Footer column headings, tagline, copyright, and nav CTA button text all pull from a single customizer value with no per-language variant. Will break all AR pages if customizer is saved in English. Add waqtak_t() checks in footer.php and header.php.', tags:['medium','arch'], done:true },
+          { id:'wa_m2', text:'Remove stale /arabic/waqtak-X/ links from footer sitewide', detail:'Footer still references old /arabic/ URL pattern on /platform/, all industry pages, /book-a-demo/, /pdf-download/. These URLs likely 404.', tags:['medium'], done:true },
+          { id:'wa_m3', text:'Fix "Contact Us" footer link on /appointments/', detail:'Currently points to /about/ instead of /contact-us/. All other pages are correct — this is the only anomaly.', tags:['medium'], done:true },
+          { id:'wa_l3', text:'Fix /ar/industries-ar/ hero image alt text', detail:'Currently alt="Placeholder". Replace with descriptive Arabic text.', tags:['low'], done:true },
+        ]
+      },
+      {
+        id:'wblocked', title:'Blocked on Abed',
+        items:[
+          { id:'wb1', text:'Fix About page placeholder text (EN + AR)', detail:'EN: founding year, Keylife description, placeholder images. AR: same in Arabic. Cannot proceed without Abed providing the real content.', tags:['blocked','abed'], done:true },
+          { id:'wb2', text:'Fix Demo page placeholder testimonial', detail:'"[Short quote], [Name], [Title, Organization]" still visible to live users. Blocked on real client quote from Abed.', tags:['blocked','abed'], noCheck:true },
+          { id:'wb3', text:'Get Univia Pro font files and add to theme', detail:'Font files needed from Abed. Currently falling back to system font.', tags:['blocked','abed'], noCheck:true },
+        ]
+      },
+      {
+        id:'wbacklog', title:'Backlog',
+        items:[
+          { id:'wbl1', text:'Fix image .png/.webp mismatch sitewide (#69)', tags:['low'], noCheck:true },
+          { id:'wbl2', text:'Remove USAID logo and "250+ organizations trust Waqtak" text from Industries page', tags:['low'], noCheck:true },
+          { id:'wbl3', text:'Reduce "citizen" usage on Government page (currently 14 instances)', tags:['low'], noCheck:true },
+          { id:'wbl4', text:'Shorten Telecom H1 (126 chars), Healthcare H1 (94 chars), Retail H1 (89 chars)', tags:['low'], noCheck:true },
+          { id:'wbl5', text:'Analytics & KPIs problem cards — too abstract, need rewrite', tags:['low'], noCheck:true },
+          { id:'wbl6', text:'Fix duplicate hreflang tags sitewide', tags:['low'], noCheck:true },
+          { id:'wbl7', text:'Fix /about/ vs /about_us/ URL inconsistency', tags:['low'], noCheck:true },
+          { id:'wbl8', text:'GEO one-time setup — Register waqtak.io with Perplexity Publisher Program + upload llms.txt to site root', tags:['low'], noCheck:true },
+          { id:'wbl9', text:'Remove AI claims from F6S profile (f6s.com/software/waqtak) — edit product description to remove AI, predictive, or intelligent language that doesn\'t reflect the actual product', tags:['low'], noCheck:true },
+        ]
+      },
+      {
+        id:'wdone', title:'Completed',
+        items:[
+          { id:'wd1', text:'Rewrite Analytics & KPIs problem cards', done:true },
+          { id:'wd2', text:'Full Real-Time Monitoring page rewrite', done:true },
+          { id:'wd3', text:'Build and deploy blog section (listing, single post, CSS, RTL, search, categories, TOC)', done:true },
+          { id:'wd4', text:'Install Yoast SEO, configure meta descriptions for all 36 pages', done:true },
+          { id:'wd5', text:'Fix Arabic footer sitewide (tagline, nav headings, copyright, social URLs, CTA text)', done:true },
+          { id:'wd6', text:'Fix 8 waqtak.local URLs on Appointments EN page', done:true },
+          { id:'wd7', text:'Fix /book-demo redirect sending EN users to Arabic demo page', done:true },
+          { id:'wd8', text:'Remove duplicate title tags sitewide', done:true },
+          { id:'wd9', text:'Add Organization schema (Facebook, LinkedIn, Instagram via Yoast)', done:true },
+          { id:'wd10', text:'Install Google Analytics GA4 tag in header.php', done:true },
+          { id:'wd11', text:'Deploy /ar/contact-ar/ Arabic contact page (was 404 on production)', done:true },
+          { id:'wd12', text:'Fix Load More button on /blog/ — added missing AJAX handler to functions.php', done:true },
+          { id:'wd13', text:'Build waqtak/partner-card Gutenberg block — logo, name, country tag, description, contact info, custom text + icon, PHP render callback, equal-height CSS', done:true },
+          { id:'wd14', text:'Translate "250+ organizations trust Waqtak" caption to Arabic on /ar/home-ar/', done:true },
+          { id:'wd15', text:'Fix Arabic contact page slug — /ar/1367-2/ renamed to /ar/contact-ar/', done:true },
+          { id:'wd16', text:'Add 301 redirect from /ar/about-ar/ to /ar/about_us-ar/', done:true },
+        ]
+      }
+    ]
+  },
+
+  content: {
+    label:'waqtak Content',
+    key:'wdash_content',
+    progressIds:['c4','c5','c6','c7','c8','c9','c10','c11','c12','c13','c14','c15','c16','c17','car1','car2','car3','car4','car8','car9','car10'],
+    focusBanner:'Stage 1 EN complete (14/17 published — Articles 5–7 blocked). Arabic translations in progress — AR Article 10 is next.',
+    filters:[
+      {id:'all',label:'All'},{id:'pending',label:'Pending'},{id:'done',label:'Done'},
+      {id:'stage1',label:'Stage 1'},{id:'stage2',label:'Stage 2'},{id:'stage3',label:'Stage 3'}
+    ],
+    sections:[
+      {
+        id:'cs1', title:'Stage 1: Baseline SEO Clusters (EN) — Target Apr 26',
+        clusters:[
+          {
+            label:'Queue Management',
+            items:[
+              { id:'c1', text:'What is a Queue Management System?', done:true, tags:['stage1'] },
+              { id:'c2', text:'Types of Queue Management Systems', done:true, tags:['stage1'] },
+              { id:'c3', text:'Benefits of a Queue Management System', done:true, tags:['stage1'] },
+              { id:'c4', text:'How to Choose the Right Queue Management System', done:true, tags:['stage1'] },
+            ]
+          },
+          {
+            label:'Real-Time Monitoring',
+            items:[
+              { id:'c5', text:'What is Real-Time Branch Monitoring?', tags:['stage1'] },
+              { id:'c6', text:'Benefits of Real-Time Monitoring', tags:['stage1'] },
+              { id:'c7', text:'How to Choose a Monitoring Solution', tags:['stage1'] },
+            ]
+          },
+          {
+            label:'Analytics & KPIs',
+            items:[
+              { id:'c8', text:'What is Operational Analytics for Branches?', done:true, tags:['stage1'] },
+              { id:'c9', text:'Benefits of Operational Analytics', done:true, tags:['stage1'] },
+              { id:'c10', text:'How to Choose an Analytics Platform', done:true, tags:['stage1'] },
+            ]
+          },
+          {
+            label:'Appointments',
+            items:[
+              { id:'c11', text:'What is an Appointment Scheduling System for Branches?', done:true, tags:['stage1'] },
+              { id:'c12', text:'Types of Appointment Scheduling Systems', done:true, tags:['stage1'] },
+              { id:'c13', text:'Benefits of Appointment Scheduling', done:true, tags:['stage1'] },
+              { id:'c14', text:'How to Choose an Appointment System', done:true, tags:['stage1'] },
+            ]
+          },
+          {
+            label:'Customer Feedback',
+            items:[
+              { id:'c15', text:'What is Customer Feedback Management?', done:true, tags:['stage1'] },
+              { id:'c16', text:'The 5 Benefits of Customer Feedback Management Systems', done:true, tags:['stage1'] },
+              { id:'c17', text:'How to Choose a Customer Feedback Solution', done:true, tags:['stage1'] },
+            ]
+          },
+        ]
+      },
+      {
+        id:'cs1ar', title:'Stage 1 Arabic — Apr 27 to May 3',
+        clusters:[
+          {
+            label:'Queue Management AR',
+            items:[
+              { id:'car1', text:'ما هو نظام إدارة الطوابير؟', done:true, tags:['stage1','arabic'] },
+              { id:'car2', text:'أنواع أنظمة إدارة الطوابير', done:true, tags:['stage1','arabic'] },
+              { id:'car3', text:'5 فوائد نظام إدارة الطوابير', done:true, tags:['stage1','arabic'] },
+              { id:'car4', text:'كيف تختار نظام إدارة الطوابير', done:true, tags:['stage1','arabic'] },
+            ]
+          },
+          {
+            label:'Analytics & KPIs AR',
+            items:[
+              { id:'car8', text:'ما هي البيانات والتحليلات التشغيلية للفروع؟', done:true, tags:['stage1','arabic'] },
+              { id:'car9', text:'فوائد البيانات والتحليلات التشغيلية للفروع', done:true, tags:['stage1','arabic'] },
+              { id:'car10', text:'كيف تختار منصة التحليلات', tags:['stage1','arabic','here'] },
+            ]
+          },
+          {
+            label:'Remaining Clusters AR — Pending',
+            items:[
+              { id:'car11', text:'Appointments cluster AR (4 articles — EN 11-14)', tags:['stage1','arabic'], noCheck:true },
+              { id:'car15', text:'Customer Feedback cluster AR (3 articles — EN 15-17)', tags:['stage1','arabic'], noCheck:true },
+            ]
+          },
+          {
+            label:'Real-Time Monitoring AR — Blocked',
+            items:[
+              { id:'car5', text:'RTM cluster AR (3 articles — EN 5-7) — blocked pending Abed answer on minimum branch count', tags:['stage1','arabic','blocked'], noCheck:true },
+            ]
+          }
+        ]
+      },
+      {
+        id:'cs2', title:'Stage 2: Depth — Problem-Framing (EN) — May 3-5',
+        items:[
+          { id:'c19', text:'Revise "What Your Operation Loses Without a Queue Management System"', detail:'Apply 10-point revision plan. Add GCC layer.', tags:['stage2'], noCheck:true },
+          { id:'c20', text:'Write Real-Time Monitoring problem-framing article', tags:['stage2'], noCheck:true },
+          { id:'c21', text:'Write Analytics & KPIs problem-framing article', tags:['stage2'], noCheck:true },
+          { id:'c22', text:'Write Appointments problem-framing article', tags:['stage2'], noCheck:true },
+          { id:'c23', text:'Write Customer Feedback problem-framing article', tags:['stage2'], noCheck:true },
+        ]
+      },
+      {
+        id:'cs2ar', title:'Stage 2 Arabic — May 6-7',
+        items:[
+          { id:'c24', text:'Batch translate all 5 problem-framing articles to Arabic', tags:['stage2','arabic'], noCheck:true },
+        ]
+      },
+      {
+        id:'cs3', title:'Stage 3: Industry Posts — After May 7',
+        items:[
+          { id:'c25', text:'Government industry blog post', detail:'GCC-focused, Arabic-first', tags:['stage3'], noCheck:true },
+          { id:'c26', text:'Banking industry blog post', detail:'GCC-focused, English-first', tags:['stage3'], noCheck:true },
+          { id:'c27', text:'Healthcare industry blog post', detail:'GCC signals', tags:['stage3'], noCheck:true },
+        ]
+      },
+      {
+        id:'cbacklog', title:'Backlog',
+        items:[
+          { id:'cbl14', text:'Add images to EN articles missing them (Articles 4, 8–17) — Gemini technical issues blocking image generation. Resolve Gemini issue or switch tool before resuming. All Arabic articles also need images.', noCheck:true },
+          { id:'cbl15', text:'Complete Arabic refinement of Article 9 (فوائد البيانات والتحليلات التشغيلية للفروع) — user noted it was not fully finished', noCheck:true },
+          { id:'cbl1', text:'Remove checklist from "How to Choose a QMS" and convert to gated PDF lead magnet', noCheck:true },
+          { id:'cbl2', text:'Five Blind Spots blog post (pillar article, after baseline)', noCheck:true },
+          { id:'cbl3', text:'Five Blind Spots LinkedIn post', noCheck:true },
+          { id:'cbl4', text:'Five Blind Spots gated PDF lead magnet', noCheck:true },
+          { id:'cbl5', text:'Playbook content: daily check-in, weekly review, monthly staffing plan', noCheck:true },
+          { id:'cbl6', text:'Solution LinkedIn posts + PDFs (after blog posts exist)', noCheck:true },
+          { id:'cbl7', text:'Outcome/justification content (requires data + client permission via Abed)', noCheck:true },
+          { id:'cbl8', text:'Criteria-setting content: "What to look for in a branch operations platform"', noCheck:true },
+          { id:'cbl9', text:'Explore webapp option alongside standalone app', noCheck:true },
+          { id:'cbl10', text:'Explore branded screen customization (can clients brand kiosk/display screens?)', noCheck:true },
+          { id:'cbl11', text:'Develop pitch strategy: reseller/referral angle', noCheck:true },
+          { id:'cbl12', text:'Explore banking/repeat-visit app integration', noCheck:true },
+          { id:'cbl13', text:'Content ideas generation', noCheck:true },
+        ]
+      },
+      {
+        id:'cdone', title:'Completed',
+        items:[
+          { id:'cf1', text:'Content creation prompt (waqtak-content-creation-prompt.md)', done:true },
+          { id:'cf2', text:'4-phase content plan', done:true },
+          { id:'cf3', text:'Strategic framework (understanding-evolution.html)', done:true },
+          { id:'cf4', text:'Multi-model strategy feedback loop (Claude + ChatGPT + Gemini)', done:true },
+          { id:'cf5', text:'Competitor blog content research (15+ GCC players)', done:true },
+          { id:'cf6', text:'Strategic shift to breadth-first baseline content', done:true },
+          { id:'cf7', text:'Article production workflow (16-step process)', done:true },
+          { id:'cf8', text:'Article 1: What is a Queue Management System?', done:true },
+          { id:'cf9', text:'Article 2: Types of Queue Management Systems', done:true },
+          { id:'cf10', text:'Article 3: Benefits of a Queue Management System', done:true },
+          { id:'cf11', text:'SEO baseline captured (Ubersuggest, Seobility, Moz, Ahrefs)', done:true },
+        ]
+      }
+    ]
+  },
+
+  getlisted: {
+    label:'Get Listed',
+    key:'wdash_getlisted',
+    progressIds:['gl1','gl2','gl3','gl4','gl5','gl6'],
+    filters:[
+      {id:'all',label:'All'},{id:'pending',label:'Pending'},{id:'done',label:'Done'},
+      {id:'urgent',label:'Urgent'},{id:'abed',label:'Needs Abed'}
+    ],
+    sections:[
+      {
+        id:'glactions', title:'Action Items — In Priority Order',
+        items:[
+          { id:'gl1', text:'Claim G2 + Capterra profiles — do this now, before first articles publish', detail:'G2: create vendor account → select "Queue Management" category → add product details, screenshots, pricing, integrations → mark free trial availability. Capterra/Software Advice/GetApp: one profile covers all three. Target: both profiles live and complete within the week.', tags:['urgent'] },
+          { id:'gl2', text:'Get 10-15 verified client reviews on G2 — within 30 days of claiming profile', detail:'Abed identifies 10-15 existing clients. Send them G2\'s direct review link. Reviews must be from verified current users (authenticated via LinkedIn or work email). Spread reviews over several weeks — sudden spikes can trigger G2 fraud detection. Target: 10-15 G2 reviews + 5+ Capterra reviews within 30 days.', tags:['urgent','abed'] },
+          { id:'gl3', text:'Submit to TheCXLead for editorial review — after G2/Capterra have 5-10 reviews', detail:'Visit thecxlead.com/tools/best-queue-management-system/ and use the "Interested in being reviewed?" link. Pitch angle: "We\'re the only queue management platform built specifically for the GCC market — banks, government, and healthcare in Saudi Arabia, UAE, Qatar. No other vendor in your list covers this geography." This creates a Best for MENA/GCC slot that doesn\'t compete with any existing entry.', tags:['high'] },
+          { id:'gl4', text:'Add FAQ schema to all solution pages and blog articles', detail:'Add a FAQ section (5 questions minimum) to each solution page. Implement FAQ schema via Yoast. Validate at validator.schema.org. Apply to blog articles as they publish. 15 minutes per page. Assign to waqtak sub-project.', tags:['high','website'] },
+          { id:'gl5', text:'Publish pricing information on waqtak.io', detail:'Even a rough tier structure is better than nothing: "Starts at $X/branch/month. Enterprise pricing on request." ScanQueue\'s editorial criteria explicitly weights vendors with published pricing higher. Confirm pricing structure with Abed before publishing.', tags:['medium','abed'] },
+          { id:'gl6', text:'Contact ScanQueue about MENA inclusion — after G2/Capterra are live', detail:'Reach out via ScanQueue\'s contact page once G2/Capterra profiles are active. Pitch: "We noticed Waqtak isn\'t in your 2026 list. We specialize in the GCC/MENA market — banks, government, and healthcare. Happy to provide details." Don\'t do this before G2/Capterra are active — they\'ll look you up.', tags:['low'] },
+        ]
+      },
+    ]
+  },
+
+  toppages: {
+    label:'What Top Pages Do',
+    key:'wdash_toppages',
+    progressIds:['tp1','tp2','tp3','tp4','tp5','tp6','tp7','tp8','tp9','tp10','tp11'],
+    filters:[
+      {id:'all',label:'All'},{id:'pending',label:'Pending'},{id:'done',label:'Done'},
+      {id:'structure',label:'Structure'},{id:'seo',label:'SEO Signals'},{id:'arch',label:'Architecture'}
+    ],
+    sections:[
+      {
+        id:'tpstruct', title:'Content Structure',
+        items:[
+          { id:'tp1', text:'Word count meets the minimum for the page type', detail:'Competitive queries: 3,500-7,000 words. Educational pillar pages: 3,500-4,500 words. Product/solution pages: 2,000-3,000 words. Pages under 1,000 words do not rank. QRQ (~550 words) is invisible.', tags:['structure'] },
+          { id:'tp2', text:'Page includes all four required sections', detail:'"What is [topic]?" anchors informational queries. Industry verticals section captures high-intent vertical searches. "How to choose" section captures decision-stage queries. FAQ section or comparison table captures long-tail variants.', tags:['structure'] },
+          { id:'tp3', text:'Roundup/list content uses year + number in H1', detail:'Pattern: "15 Best Queue Management Systems in 2026 (3 Are Free)". Signals freshness and specificity. Update the year annually or Google treats it as stale.', tags:['structure'] },
+        ]
+      },
+      {
+        id:'tpseo', title:'SEO Signals',
+        items:[
+          { id:'tp4', text:'FAQ schema implemented and validated', detail:'SEDCO, Qwaiting, and ScanQueue use it. Wavetec and Qmatic don\'t — leaving SERP real estate unclaimed. Generates rich snippets without changing ranking position. 15 minutes per page. Validate at schema.org/validator.', tags:['seo'] },
+          { id:'tp5', text:'Pricing information is published on the page', detail:'ScanQueue\'s editorial criteria explicitly weights vendors with published pricing higher. G2 Market Presence scoring is also influenced by transparency. Even a rough tier ("starts at $X/month") beats "contact for quote."', tags:['seo'] },
+          { id:'tp6', text:'Third-party review scores displayed', detail:'Qwaiting displays 4.8 Capterra, 4.7 G2, 4.8 GetApp above the fold. WaitWell uses G2 award badges. Borrowed authority matters most when competing against established players.', tags:['seo'] },
+          { id:'tp7', text:'Quantified outcomes in case studies', detail:'SEDCO: "reduce customer waiting time up to 40%," "registration time from 10-20 minutes to under 1 minute." Named institutional clients earn backlinks from press and news coverage. One named case study with a specific metric outperforms five generic quotes.', tags:['seo'] },
+        ]
+      },
+      {
+        id:'tparch', title:'Architecture',
+        items:[
+          { id:'tp8', text:'Informational pillar pages are separate from product pages', detail:'Qmatic\'s "Guide to Queue Management Systems" is a dedicated 4,500-word educational resource at its own URL, separate from their product page. Conflating both goals on one page achieves neither well. Waqtak\'s blog architecture is already correct — keep it that way.', tags:['arch'] },
+          { id:'tp9', text:'Industry depth has dedicated pages, not just bullet points', detail:'SEDCO, Qmatic, and Wavetec each have dedicated solution pages per vertical (banking, healthcare, government, retail, telecom). Homepage bullet points cannot replicate topical authority clusters. Waqtak already has industry pages — keep them deepened.', tags:['arch'] },
+        ]
+      },
+      {
+        id:'tpignore', title:'What to Ignore',
+        items:[
+          { id:'tp10', text:'Hardware queries are not worth competing for', detail:'Kiosk, ticket dispenser, display screens, self-service check-in terminal. These are queries a pure SaaS product cannot and should not compete for. Don\'t build content targeting hardware terms.', tags:['info'], noCheck:true },
+          { id:'tp11', text:'Longevity claims cannot be faked — compete on modernity instead', detail:'"40+ years of expertise" (SEDCO), "founded 1986" (Wavetec). Newer entrants cannot replicate this. Compete on: cloud-native, mobile-first, Arabic-first, GCC-specific. That\'s the angle no established player owns.', tags:['info'], noCheck:true },
+        ]
+      }
+    ]
+  },
+
+  credibility: {
+    label:'Credibility Gaps',
+    key:'wdash_credibility',
+    progressIds:['cr1','cr2','cr3','cr4','cr5','cr6','cr7'],
+    filters:[
+      {id:'all',label:'All'},{id:'pending',label:'Pending'},{id:'done',label:'Done'},
+      {id:'abed',label:'Needs Abed'},{id:'website',label:'Assign to Website'}
+    ],
+    sections:[
+      {
+        id:'crabed', title:'Blocked on Abed',
+        items:[
+          { id:'cr1', text:'Named case studies (2-3 clients)', detail:'Highest-impact item on this list. For each client: name, industry, deployment scale (branches/counters), one quantified outcome (wait time reduction, throughput increase, satisfaction score). Build a Case Studies page or embed in solution pages. This single item changes the entire credibility picture.', tags:['rush','abed'] },
+          { id:'cr2', text:'Product demo video', detail:'2-3 minute screen recording of the real dashboard in use (real interface, real data, not a slide deck). Embed on homepage and solution pages. Directly addresses the "no demos" objection ChatGPT flagged.', tags:['high','abed'] },
+          { id:'cr3', text:'G2 + Capterra client reviews', detail:'Abed personally reaches out to 10-15 existing clients this week and asks for reviews. See Get Listed tab for the full process. Time-sensitive: ChatGPT sources review platforms when evaluating vendors.', tags:['high','abed'] },
+          { id:'cr4', text:'agile.ps datasheet update', detail:'Third-party PDF at agile.ps is shaping how AI tools read Waqtak. If it\'s outdated or inaccurate, ask Abed whether Agile PS can update it. Not blocking, but worth flagging.', tags:['medium','abed'] },
+        ]
+      },
+      {
+        id:'crwebsite', title:'Assign to waqtak Sub-Project',
+        items:[
+          { id:'cr5', text:'Audit and fix AI/predictive claims sitewide', detail:'Find every instance of "AI," "predictive," and "intelligent." For each: either add proof (screenshot, methodology paragraph, sample output) or rewrite to accurate language. "Trend-based staffing recommendations" is more credible than "AI insights" with no evidence behind it.', tags:['rush','website'], done:true },
+          { id:'cr6', text:'Strengthen traction signals on homepage', detail:'"9M+ tickets served" is on the site but not prominent enough. Move the strongest verifiable proof point into the hero or stats section. It should be impossible to miss on first scroll.', tags:['high','website'] },
+        ]
+      },
+      {
+        id:'cryou', title:'Quick Audit — You',
+        items:[
+          { id:'cr7', text:'App store audit', detail:'Check App Store and Google Play for Waqtak\'s customer-facing app. Note: current ratings, review count, and what negative reviews say. If low ratings are from bugs or UX issues, that\'s a product problem. If satisfied users haven\'t been asked to review, that\'s solvable. Determine which before acting.', tags:['medium','you'] },
+        ]
+      },
+      {
+        id:'crinfo', title:'Cannot Fix With Content Alone',
+        items:[
+          { id:'cri1', text:'F6S founding date (2022) is a public record', detail:'ChatGPT will always flag this. The only counter is overwhelming proof of operational scale — deployment numbers, client tenure, volume of tickets served.', tags:['info'], noCheck:true },
+          { id:'cri2', text:'App store ratings require product improvement or active solicitation', detail:'Website copy won\'t change what Google Play shows. Diagnose the root cause before deciding how to respond.', tags:['info'], noCheck:true },
+          { id:'cri3', text:'Third-party sources (agile.ps, F6S) are not fully in your control', detail:'ChatGPT cited both. Neither is a Waqtak property. The agile.ps datasheet is the more actionable one — ask Abed whether their partner can update it.', tags:['info'], noCheck:true },
+        ]
+      }
+    ]
+  }
+
+};
+
+/* ═══════════════════════════════════════════ RENDER ═══════════════════════════════════════════ */
+
+let activeTab = 'master';
+
+function getState(key) {
+  try { return JSON.parse(localStorage.getItem(key) || '{}'); } catch { return {}; }
+}
+function setState(key, s) { localStorage.setItem(key, JSON.stringify(s)); }
+
+function isDone(state, item) {
+  if (state[item.id] === true) return true;
+  if (item.done && state[item.id] !== false) return true;
+  return false;
+}
+
+function getAllItems(tab) {
+  const sections = tab.sections;
+  const items = [];
+  sections.forEach(sec => {
+    if (sec.clusters) {
+      sec.clusters.forEach(cl => items.push(...(cl.items||[])));
+    } else {
+      items.push(...(sec.items||[]));
+    }
+  });
+  return items;
+}
+
+function getIPKey(tabKey) { return tabKey + '_ip'; }
+function isInProgress(tabKey, itemId) {
+  return !!getState(getIPKey(tabKey))[itemId];
+}
+function setInProgress(tabKey, itemId, val) {
+  const s = getState(getIPKey(tabKey));
+  if (val) s[itemId] = true; else delete s[itemId];
+  setState(getIPKey(tabKey), s);
+}
+function renderIPSidebar(tabId) {
+  if (!tabId || tabId === 'now') return;
+  const tab = TABS[tabId];
+  if (!tab) return;
+  const body = document.getElementById('ip-body-' + tabId);
+  if (!body) return;
+  const allItems = getAllItems(tab);
+  const ipState = getState(getIPKey(tab.key));
+  const ipItems = allItems.filter(i => ipState[i.id]);
+  body.innerHTML = '';
+  if (!ipItems.length) {
+    body.innerHTML = '<div class="ip-empty">No tasks in progress</div>';
+    return;
+  }
+  ipItems.forEach(item => {
+    const chip = document.createElement('div');
+    chip.className = 'ip-chip';
+    const text = document.createElement('span');
+    text.className = 'ip-chip-text';
+    text.title = item.text;
+    text.textContent = item.text;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'ip-remove';
+    removeBtn.title = 'Remove from in progress';
+    removeBtn.innerHTML = '&times;';
+    removeBtn.addEventListener('click', () => {
+      setInProgress(tab.key, item.id, false);
+      const ipBtn = document.getElementById('ipbtn_' + item.id);
+      if (ipBtn) {
+        ipBtn.classList.remove('active');
+        const row = ipBtn.closest('.item');
+        if (row) row.style.display = '';
+      }
+      renderIPSidebar(tabId);
+      renderNowPanel();
+    });
+    chip.appendChild(text);
+    chip.appendChild(removeBtn);
+    body.appendChild(chip);
+  });
+  refreshNowIPCount();
+  renderNowSidebar();
+}
+
+function renderItems(items, state, container, tabKey, tabId) {
+  items.forEach(item => {
+    const done = isDone(state, item);
+    const row = document.createElement('div');
+    row.className = 'item' + (done ? ' checked' : '');
+    row.dataset.done = done ? '1' : '0';
+    row.dataset.tags = (item.tags||[]).join(' ');
+
+    const cb = document.createElement('input');
+    cb.type = 'checkbox';
+    cb.checked = done;
+    if (item.noCheck) cb.disabled = true;
+    cb.id = 'cb_' + item.id;
+    if (!item.noCheck) {
+      cb.addEventListener('change', () => {
+        const s = getState(tabKey);
+        s[item.id] = cb.checked;
+        setState(tabKey, s);
+        if (cb.checked) {
+          setInProgress(tabKey, item.id, false);
+          const ipb = document.getElementById('ipbtn_' + item.id);
+          if (ipb) { ipb.classList.remove('active'); ipb.disabled = true; }
+          renderIPSidebar(tabId);
+        } else {
+          const ipb = document.getElementById('ipbtn_' + item.id);
+          if (ipb) { ipb.disabled = false; }
+        }
+        row.style.display = ''; // always restore row when done state changes
+        row.classList.toggle('checked', cb.checked);
+        row.dataset.done = cb.checked ? '1' : '0';
+        updateProgress(activeTab);
+        applyFilter(activeTab);
+        renderNowPanel();
+      });
+    }
+
+    const ipDisabled = item.noCheck || done;
+    const ipActive = isInProgress(tabKey, item.id);
+    const ipBtn = document.createElement('button');
+    ipBtn.className = 'ip-btn' + (ipActive ? ' active' : '');
+    ipBtn.id = 'ipbtn_' + item.id;
+    ipBtn.title = 'Mark as in progress';
+    ipBtn.innerHTML = '&#9654;';
+    if (ipDisabled) {
+      ipBtn.disabled = true;
+    } else {
+      ipBtn.addEventListener('click', () => {
+        const nowIP = isInProgress(tabKey, item.id);
+        setInProgress(tabKey, item.id, !nowIP);
+        ipBtn.classList.toggle('active', !nowIP);
+        row.style.display = !nowIP ? 'none' : ''; // move: hide when in-progress, restore when removed
+        renderIPSidebar(tabId);
+        renderNowPanel();
+      });
+    }
+
+    if (isInProgress(tabKey, item.id) && !done) row.style.display = 'none';
+
+    const tags = (item.tags||[]).map(t => `<span class="tag ${t}">${t === 'here' ? 'You Are Here' : t === 'abed' ? 'Needs Abed' : t === 'done-tag' ? 'Done' : t === 'noCheck' ? '' : t}</span>`).join('');
+
+    const content = document.createElement('div');
+    content.className = 'item-content';
+    content.innerHTML = `
+      <div class="item-top">
+        <span class="item-id">${item.id}</span>
+        <label class="item-text" for="cb_${item.id}">${item.text}</label>
+        ${tags}
+      </div>
+      ${item.detail ? `<div class="item-detail">${item.detail}</div>` : ''}
+    `;
+
+    row.appendChild(cb);
+    row.appendChild(ipBtn);
+    row.appendChild(content);
+    container.appendChild(row);
+  });
+}
+
+function renderSection(sec, state, tabKey, tabId) {
+  const div = document.createElement('div');
+  div.className = 'section';
+  div.dataset.sectionId = sec.id;
+
+  const header = document.createElement('div');
+  header.className = 'section-header open';
+
+  const body = document.createElement('div');
+  body.className = 'section-body open';
+
+  // Build items list (either direct or clustered)
+  if (sec.clusters) {
+    sec.clusters.forEach(cluster => {
+      const clHead = document.createElement('div');
+      clHead.className = 'cluster-header';
+      clHead.textContent = cluster.label;
+      body.appendChild(clHead);
+      renderItems(cluster.items, state, body, tabKey, tabId);
+    });
+  } else {
+    renderItems(sec.items || [], state, body, tabKey, tabId);
+  }
+
+  // Count items for header
+  const allItems = sec.clusters
+    ? sec.clusters.flatMap(c => c.items)
+    : (sec.items || []);
+  const doneCount = allItems.filter(i => isDone(state, i)).length;
+
+  header.innerHTML = `
+    <span class="arrow">&#9654;</span>
+    <h2>${sec.title}</h2>
+    <span class="section-meta">${doneCount}/${allItems.length}</span>
+  `;
+  header.addEventListener('click', () => {
+    header.classList.toggle('open');
+    body.classList.toggle('open');
+  });
+
+  div.appendChild(header);
+  div.appendChild(body);
+  return div;
+}
+
+function renderTab(tabId) {
+  const tab = TABS[tabId];
+  const state = getState(tab.key);
+
+  const panel = document.createElement('div');
+  panel.className = 'tab-panel';
+  panel.id = 'panel-' + tabId;
+
+  // Focus banner
+  if (tab.focusBanner) {
+    const banner = document.createElement('div');
+    banner.className = 'focus-banner';
+    banner.textContent = tab.focusBanner;
+    panel.appendChild(banner);
+  }
+
+  // Progress
+  const pw = document.createElement('div');
+  pw.className = 'progress-wrap';
+  pw.innerHTML = `
+    <div class="progress-row">
+      <span class="progress-stats"><strong id="prog-done-${tabId}">0</strong> / <strong id="prog-total-${tabId}">${tab.progressIds.length}</strong> complete</span>
+      <span class="progress-stats" id="prog-pct-${tabId}">0%</span>
+    </div>
+    <div class="progress-track"><div class="progress-fill" id="prog-fill-${tabId}"></div></div>
+  `;
+  panel.appendChild(pw);
+
+  // Summary
+  const sumWrap = document.createElement('div');
+  sumWrap.className = 'summary';
+  sumWrap.id = 'summary-' + tabId;
+  panel.appendChild(sumWrap);
+
+  // Controls
+  const ctrl = document.createElement('div');
+  ctrl.className = 'controls';
+  ctrl.innerHTML = `
+    <button onclick="expandAll('${tabId}')">Expand All</button>
+    <button onclick="collapseAll('${tabId}')">Collapse All</button>
+    <div class="filter-group" id="filters-${tabId}">
+      ${(tab.filters||[]).map(f =>
+        `<button data-f="${f.id}" onclick="setFilter('${tabId}','${f.id}',this)" class="${f.id==='all'?'active':''}">${f.label}</button>`
+      ).join('')}
+    </div>
+  `;
+
+  // Sections
+  const main = document.createElement('div');
+  main.id = 'main-' + tabId;
+  tab.sections.forEach(sec => {
+    main.appendChild(renderSection(sec, state, tab.key, tabId));
+  });
+
+  // Two-column layout: sections left, in-progress sidebar right
+  const layout = document.createElement('div');
+  layout.className = 'tab-layout';
+
+  const leftCol = document.createElement('div');
+  leftCol.appendChild(ctrl);
+  leftCol.appendChild(main);
+  layout.appendChild(leftCol);
+
+  const ipSidebar = document.createElement('div');
+  ipSidebar.className = 'ip-sidebar';
+  ipSidebar.id = 'ip-sidebar-' + tabId;
+  ipSidebar.innerHTML = `
+    <div class="ip-sidebar-header">&#9654; In Progress</div>
+    <div id="ip-body-${tabId}"><div class="ip-empty">No tasks in progress</div></div>
+  `;
+  layout.appendChild(ipSidebar);
+  panel.appendChild(layout);
+
+  return panel;
+}
+
+function updateProgress(tabId) {
+  const tab = TABS[tabId];
+  const state = getState(tab.key);
+  const total = tab.progressIds.length;
+  const done = tab.progressIds.filter(id => {
+    const allItems = getAllItems(tab);
+    const item = allItems.find(i => i.id === id);
+    return item && isDone(state, item);
+  }).length;
+  const pct = total ? Math.round(done / total * 100) : 0;
+
+  const doneEl = document.getElementById('prog-done-' + tabId);
+  const pctEl = document.getElementById('prog-pct-' + tabId);
+  const fillEl = document.getElementById('prog-fill-' + tabId);
+  if (doneEl) doneEl.textContent = done;
+  if (pctEl) pctEl.textContent = pct + '%';
+  if (fillEl) fillEl.style.width = pct + '%';
+
+  // Update section counters
+  const main = document.getElementById('main-' + tabId);
+  if (!main) return;
+  main.querySelectorAll('.section').forEach(secEl => {
+    const items = secEl.querySelectorAll('.item');
+    let sd = 0;
+    items.forEach(r => { if (r.dataset.done === '1') sd++; });
+    const meta = secEl.querySelector('.section-meta');
+    if (meta) meta.textContent = sd + '/' + items.length;
+  });
+
+  renderSummary(tabId);
+}
+
+function renderSummary(tabId) {
+  const tab = TABS[tabId];
+  const state = getState(tab.key);
+  const all = getAllItems(tab);
+  const doneCount = all.filter(i => isDone(state, i)).length;
+  const pending = all.filter(i => !isDone(state, i) && !i.noCheck).length;
+
+  const cards = [
+    { label:'Total', cls:'c-total', val: `${doneCount}/${all.length}` },
+    { label:'Pending', cls:'c-high', val: pending },
+    { label:'Done', cls:'c-done', val: doneCount },
+  ];
+
+  const el = document.getElementById('summary-' + tabId);
+  if (el) el.innerHTML = cards.map(c =>
+    `<div class="summary-card"><div class="num ${c.cls}">${c.val}</div><div class="lbl">${c.label}</div></div>`
+  ).join('');
+}
+
+let activeFilters = {};
+function applyFilter(tabId) {
+  const f = activeFilters[tabId] || 'all';
+  const main = document.getElementById('main-' + tabId);
+  if (!main) return;
+  main.querySelectorAll('.item').forEach(row => {
+    let show = true;
+    if (f === 'pending') show = row.dataset.done === '0';
+    else if (f === 'done') show = row.dataset.done === '1';
+    else if (f !== 'all') show = (row.dataset.tags || '').includes(f);
+    row.style.display = show ? '' : 'none';
+  });
+}
+
+function setFilter(tabId, f, btn) {
+  activeFilters[tabId] = f;
+  const group = document.getElementById('filters-' + tabId);
+  if (group) group.querySelectorAll('button').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  applyFilter(tabId);
+}
+
+function expandAll(tabId) {
+  const main = document.getElementById('main-' + tabId);
+  if (!main) return;
+  main.querySelectorAll('.section-header').forEach(h => h.classList.add('open'));
+  main.querySelectorAll('.section-body').forEach(b => b.classList.add('open'));
+}
+function collapseAll(tabId) {
+  const main = document.getElementById('main-' + tabId);
+  if (!main) return;
+  main.querySelectorAll('.section-header').forEach(h => h.classList.remove('open'));
+  main.querySelectorAll('.section-body').forEach(b => b.classList.remove('open'));
+}
+
+function switchTab(tabId, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  const panel = document.getElementById('panel-' + tabId);
+  if (panel) panel.classList.add('active');
+  activeTab = tabId;
+  if (tabId === 'now') {
+    renderNowPanel();
+  } else {
+    updateProgress(tabId);
+    renderSummary(tabId);
+  }
+}
+
+/* ═══════════════════════════════════════════ NOW PANEL ═══════════════════════════════════════════ */
+
+const TAB_ORDER = ['content','credibility','website','getlisted','master','toppages'];
+
+function tagPriority(tags) {
+  if (!tags || !tags.length) return 9;
+  if (tags.includes('rush') || tags.includes('urgent') || tags.includes('p1')) return 1;
+  if (tags.includes('high') || tags.includes('p2')) return 2;
+  if (tags.includes('medium') || tags.includes('p3')) return 3;
+  if (tags.includes('p4') || tags.includes('low')) return 4;
+  if (tags.every(t => t === 'info')) return 99; // info-only = skip
+  return 5;
+}
+
+function getNowItems() {
+  const candidates = [];
+  TAB_ORDER.forEach((tabId, tabIdx) => {
+    const tab = TABS[tabId];
+    const state = getState(tab.key);
+    const allItems = getAllItems(tab);
+    allItems.forEach((item, itemIdx) => {
+      if (isDone(state, item)) return;
+      if (item.noCheck) return;
+      if (isInProgress(tab.key, item.id)) return;
+      const tp = tagPriority(item.tags);
+      if (tp >= 9) return;
+      candidates.push({ item, tabId, tabKey: tab.key, tabLabel: tab.label, tp, tabIdx, itemIdx });
+    });
+  });
+  candidates.sort((a, b) => a.tp !== b.tp ? a.tp - b.tp : a.tabIdx !== b.tabIdx ? a.tabIdx - b.tabIdx : a.itemIdx - b.itemIdx);
+  return candidates;
+}
+
+function buildNowCard(entry, isPrimary) {
+  const { item, tabId, tabKey, tabLabel, tp } = entry;
+  const state = getState(tabKey);
+  const done = isDone(state, item);
+
+  const card = document.createElement('div');
+  card.className = isPrimary ? 'now-primary' : 'now-card';
+  if (done) card.classList.add('checked');
+
+  const cb = document.createElement('input');
+  cb.type = 'checkbox';
+  cb.checked = done;
+  cb.addEventListener('change', () => {
+    const s = getState(tabKey);
+    s[item.id] = cb.checked;
+    setState(tabKey, s);
+    // sync with main tab checkbox
+    const mainCb = document.getElementById('cb_' + item.id);
+    if (mainCb) {
+      mainCb.checked = cb.checked;
+      const row = mainCb.closest('.item');
+      if (row) { row.classList.toggle('checked', cb.checked); row.dataset.done = cb.checked ? '1' : '0'; }
+    }
+    if (cb.checked) {
+      setInProgress(tabKey, item.id, false);
+      const ipb = document.getElementById('ipbtn_' + item.id);
+      if (ipb) { ipb.classList.remove('active'); ipb.disabled = true; }
+      renderIPSidebar(tabId);
+    }
+    updateProgress(tabId);
+    renderNowPanel();
+  });
+
+  const priorityLabel = {1:'Rush',2:'High',3:'Medium',4:'Low',5:'Normal'}[tp] || '';
+  const priorityClass = {1:'rush',2:'high',3:'medium',4:'low',5:'info'}[tp] || 'info';
+  const sourceClass = tabId === 'content' ? 'stage1' : tabId === 'website' ? 'schema' : tabId === 'credibility' ? 'rush' : tabId === 'getlisted' ? 'seo' : 'info';
+
+  const ipActive = isInProgress(tabKey, item.id);
+  const nowIPBtn = document.createElement('button');
+  nowIPBtn.className = 'ip-btn' + (ipActive ? ' active' : '');
+  nowIPBtn.title = 'Mark as in progress';
+  nowIPBtn.innerHTML = '&#9654;';
+  nowIPBtn.addEventListener('click', () => {
+    const nowIP = isInProgress(tabKey, item.id);
+    setInProgress(tabKey, item.id, !nowIP);
+    nowIPBtn.classList.toggle('active', !nowIP);
+    // sync with main tab ip button and row visibility
+    const mainIPBtn = document.getElementById('ipbtn_' + item.id);
+    if (mainIPBtn) {
+      mainIPBtn.classList.toggle('active', !nowIP);
+      const mainRow = mainIPBtn.closest('.item');
+      if (mainRow) mainRow.style.display = !nowIP ? 'none' : '';
+    }
+    renderIPSidebar(tabId);
+    renderNowPanel();
+  });
+
+  const content = document.createElement('div');
+  content.className = 'now-content';
+  content.innerHTML = `
+    <div class="now-top">
+      <span class="item-id">${item.id}</span>
+      <span class="now-text">${item.text}</span>
+      <span class="tag ${priorityClass}">${priorityLabel}</span>
+      <span class="tag ${sourceClass}">${tabLabel}</span>
+    </div>
+    ${item.detail ? `<div class="item-detail" style="margin-top:.35rem">${item.detail}</div>` : ''}
+  `;
+
+  card.appendChild(cb);
+  card.appendChild(nowIPBtn);
+  card.appendChild(content);
+  return card;
+}
+
+function renderNowSidebar() {
+  const body = document.getElementById('ip-body-now');
+  if (!body) return;
+  const allIPItems = [];
+  Object.keys(TABS).forEach(tabId => {
+    const tab = TABS[tabId];
+    const ipState = getState(getIPKey(tab.key));
+    getAllItems(tab).forEach(item => {
+      if (ipState[item.id]) allIPItems.push({ item, tabId, tab });
+    });
+  });
+  body.innerHTML = '';
+  if (!allIPItems.length) {
+    body.innerHTML = '<div class="ip-empty">No tasks in progress</div>';
+    return;
+  }
+  allIPItems.forEach(({ item, tabId, tab }) => {
+    const chip = document.createElement('div');
+    chip.className = 'ip-chip';
+    const text = document.createElement('span');
+    text.className = 'ip-chip-text';
+    text.title = item.text;
+    text.textContent = item.text;
+    const removeBtn = document.createElement('button');
+    removeBtn.className = 'ip-remove';
+    removeBtn.title = 'Remove from in progress';
+    removeBtn.innerHTML = '&times;';
+    removeBtn.addEventListener('click', () => {
+      setInProgress(tab.key, item.id, false);
+      const ipBtn = document.getElementById('ipbtn_' + item.id);
+      if (ipBtn) ipBtn.classList.remove('active');
+      renderIPSidebar(tabId);
+      renderNowSidebar();
+      renderNowPanel();
+    });
+    chip.appendChild(text);
+    chip.appendChild(removeBtn);
+    body.appendChild(chip);
+  });
+}
+
+function renderNowPanel() {
+  const main = document.getElementById('now-main');
+  if (!main) return;
+  main.innerHTML = '';
+
+  const items = getNowItems();
+
+  if (!items.length) {
+    main.innerHTML = '<div class="now-empty"><span>✓</span>All tasks complete.</div>';
+    return;
+  }
+
+  const doLabel = document.createElement('div');
+  doLabel.className = 'now-do-label';
+  doLabel.textContent = 'Do This Now';
+  main.appendChild(doLabel);
+  main.appendChild(buildNowCard(items[0], true));
+
+  if (items.length > 1) {
+    const upLabel = document.createElement('div');
+    upLabel.className = 'now-section-label';
+    upLabel.textContent = 'Up Next';
+    main.appendChild(upLabel);
+    items.slice(1, 7).forEach(entry => main.appendChild(buildNowCard(entry, false)));
+  }
+}
+
+function switchNowSubTab(sub, btn) {
+  document.querySelectorAll('.now-subtab-btn').forEach(b => b.classList.remove('active'));
+  if (btn) btn.classList.add('active');
+  document.getElementById('now-main').style.display = sub === 'do' ? '' : 'none';
+  document.getElementById('now-ip-panel').style.display = sub === 'ip' ? '' : 'none';
+  if (sub === 'ip') renderNowIPPanel();
+}
+
+function refreshNowIPCount() {
+  let total = 0;
+  Object.keys(TABS).forEach(tabId => {
+    const ipState = getState(getIPKey(TABS[tabId].key));
+    total += Object.values(ipState).filter(Boolean).length;
+  });
+  const countEl = document.getElementById('now-ip-count');
+  if (countEl) countEl.textContent = total;
+  // re-render if the panel is currently visible
+  const ipPanel = document.getElementById('now-ip-panel');
+  if (ipPanel && ipPanel.style.display !== 'none') renderNowIPPanel();
+}
+
+function renderNowIPPanel() {
+  const panel = document.getElementById('now-ip-panel');
+  if (!panel) return;
+  panel.innerHTML = '';
+
+  const allIPItems = [];
+  Object.keys(TABS).forEach(tabId => {
+    const tab = TABS[tabId];
+    const ipState = getState(getIPKey(tab.key));
+    getAllItems(tab).forEach(item => {
+      if (ipState[item.id]) allIPItems.push({ item, tabId, tab });
+    });
+  });
+
+  const countEl = document.getElementById('now-ip-count');
+  if (countEl) countEl.textContent = allIPItems.length;
+
+  if (!allIPItems.length) {
+    panel.innerHTML = '<div class="now-empty"><span>&#9654;</span>No tasks in progress.<br><span style="font-size:.8rem">Click &#9654; on any task to track it here.</span></div>';
+    return;
+  }
+
+  allIPItems.forEach(({ item, tabId, tab }) => {
+    const card = document.createElement('div');
+    card.className = 'now-ip-card';
+
+    const ipBtn = document.createElement('button');
+    ipBtn.className = 'ip-btn active';
+    ipBtn.title = 'Remove from in progress';
+    ipBtn.innerHTML = '&#9654;';
+    ipBtn.addEventListener('click', () => {
+      setInProgress(tab.key, item.id, false);
+      const mainIPBtn = document.getElementById('ipbtn_' + item.id);
+      if (mainIPBtn) mainIPBtn.classList.remove('active');
+      renderIPSidebar(tabId);
+      renderNowIPPanel();
+    });
+
+    const text = document.createElement('span');
+    text.className = 'now-ip-text';
+    text.textContent = item.text;
+
+    const srcClass = tabId === 'content' ? 'stage1' : tabId === 'website' ? 'schema' : tabId === 'credibility' ? 'rush' : tabId === 'getlisted' ? 'seo' : 'info';
+    const srcTag = document.createElement('span');
+    srcTag.className = 'tag ' + srcClass;
+    srcTag.textContent = tab.label;
+
+    card.appendChild(ipBtn);
+    card.appendChild(text);
+    card.appendChild(srcTag);
+    panel.appendChild(card);
+  });
+}
+
+function createNowPanel() {
+  const panel = document.createElement('div');
+  panel.className = 'tab-panel';
+  panel.id = 'panel-now';
+
+  const layout = document.createElement('div');
+  layout.className = 'tab-layout';
+
+  const leftCol = document.createElement('div');
+  leftCol.innerHTML = '<div id="now-main"></div>';
+  layout.appendChild(leftCol);
+
+  const ipSidebar = document.createElement('div');
+  ipSidebar.className = 'ip-sidebar';
+  ipSidebar.id = 'ip-sidebar-now';
+  ipSidebar.innerHTML = `
+    <div class="ip-sidebar-header">&#9654; In Progress</div>
+    <div id="ip-body-now"><div class="ip-empty">No tasks in progress</div></div>
+  `;
+  layout.appendChild(ipSidebar);
+
+  panel.appendChild(layout);
+  return panel;
+}
+
+/* ═══════════════════════════════════════════ INIT ═══════════════════════════════════════════ */
+
+function init() {
+  const container = document.getElementById('panels');
+
+  // Now panel first
+  container.appendChild(createNowPanel());
+
+  Object.keys(TABS).forEach(tabId => {
+    const panel = renderTab(tabId);
+    if (tabId === 'master') panel.classList.add('active');
+    container.appendChild(panel);
+  });
+  Object.keys(TABS).forEach(tabId => {
+    updateProgress(tabId);
+    renderSummary(tabId);
+    renderIPSidebar(tabId);
+  });
+  renderNowPanel();
+  refreshNowIPCount();
+  renderNowSidebar();
+}
+
+init();
+</script>
+</body>
+</html>

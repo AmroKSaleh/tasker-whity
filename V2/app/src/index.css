@@ -1,0 +1,236 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --color-paper:   #FBFAF6;
+  --color-surf-2:  #F5F3ED;
+  --color-surf:    #F0EDE5;
+  --color-line-2:  #ECE9E1;
+  --color-line:    #D4D0C8;
+  --color-mute-2:  #9A9896;
+  --color-mute:    #6B6867;
+  --color-ink-2:   #3D3B36;
+  --color-ink:     #1A1916;
+
+  --color-accent:       #D97757;
+  --color-accent-2:     #F5E6DE;
+  --color-accent-dark:  #B85C35;
+  --color-accent-soft:  rgba(217,119,87,0.10);
+  --color-accent-edge:  rgba(217,119,87,0.35);
+  --color-star:         #FACC15;
+  --color-star-soft:    rgba(250,204,21,0.14);
+
+  --color-priority-rush: #C0432D;
+  --color-priority-high: #D97757;
+  --color-priority-med:  #8C8055;
+  --color-priority-low:  #6B6867;
+  --color-priority-done: #5C7A5F;
+
+  --shadow-card:  0 1px 3px rgba(26,25,22,0.06);
+  --scroll-thumb: #D4D0C8;
+  --scroll-thumb-hover: #9A9896;
+}
+
+[data-theme="dark"] {
+  --color-paper:   #16151B;
+  --color-surf-2:  #1D1B22;
+  --color-surf:    #232128;
+  --color-line-2:  #2D2A33;
+  --color-line:    #38353F;
+  --color-mute-2:  #6B6867;
+  --color-mute:    #9A9896;
+  --color-ink-2:   #C7C4BD;
+  --color-ink:     #F0EFEC;
+
+  --color-accent-2:    rgba(217,119,87,0.18);
+  --color-accent-soft: rgba(217,119,87,0.14);
+
+  --shadow-card:  0 1px 3px rgba(0,0,0,0.4);
+  --scroll-thumb: #38353F;
+  --scroll-thumb-hover: #6B6867;
+}
+
+/* Focus mode — always-dark, regardless of light/dark theme.
+   Scoped to [data-focus="true"] subtrees; tokens swap locally. */
+[data-focus="true"] {
+  --color-paper:   #0a0a0a;
+  --color-surf-2:  #111111;
+  --color-surf:    #161616;
+  --color-line-2:  #1c1c1c;
+  --color-line:    #262626;
+  --color-mute-2:  #525252;
+  --color-mute:    #8a8a8a;
+  --color-ink-2:   #c7c4bd;
+  --color-ink:     #f0efec;
+}
+
+@layer base {
+  *, *::before, *::after { box-sizing: border-box; }
+
+  html, body {
+    overscroll-behavior-y: none;
+  }
+
+  body {
+    background: var(--color-paper);
+    color: var(--color-ink);
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 13px;
+    line-height: 1.6;
+    min-height: 100vh;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  ::-webkit-scrollbar        { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track  { background: transparent; }
+  ::-webkit-scrollbar-thumb  { background: var(--scroll-thumb); border-radius: 9999px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--scroll-thumb-hover); }
+}
+
+/* ── Delete button ── */
+.btn-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 7px;
+  border-radius: 4px;
+  border: 1px solid var(--color-line);
+  background: transparent;
+  color: var(--color-mute-2);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.btn-delete:hover {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #fff;
+}
+
+/* ── Priority chips ── */
+.chip-rush   { background: var(--color-ink);  color: var(--color-paper); border: none; }
+.chip-high   { background: var(--color-ink-2); color: var(--color-paper); border: none; }
+.chip-medium { background: transparent; color: var(--color-ink); border: 1px solid var(--color-ink); }
+.chip-low    { background: transparent; color: var(--color-mute-2); border: 1px dashed var(--color-mute-2); }
+
+/* ── AI accent ── */
+.ai-glow { color: var(--color-accent); }
+.ai-surface { background: var(--color-accent-2); color: var(--color-accent-dark); }
+
+/* ── Board: hide columns scrollbar ── */
+.cols-scroll { scrollbar-width: none; }
+.cols-scroll::-webkit-scrollbar { height: 0; display: none; }
+
+/* ── Column body: slim scrollbar ── */
+.col-body::-webkit-scrollbar { width: 6px; }
+.col-body::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 3px; }
+
+/* ── Semantic buttons ── */
+.btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: 6px; border: 1px solid var(--color-line); background: var(--color-paper);
+  padding: 7px 12px; font-size: 13px; font-weight: 500; line-height: 1; color: var(--color-ink-2);
+  cursor: pointer; transition: background 0.12s, border-color 0.12s;
+}
+.btn:hover { border-color: var(--color-mute-2); background: var(--color-surf-2); }
+.btn-sm { padding: 5px 10px; font-size: 12px; }
+
+.btn-primary {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: 6px; border: 1px solid var(--color-ink); background: var(--color-ink);
+  padding: 7px 12px; font-size: 13px; font-weight: 500; line-height: 1; color: var(--color-paper);
+  cursor: pointer; transition: background 0.12s;
+}
+.btn-primary:hover { background: var(--color-ink-2); }
+
+.btn-ghost {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: 6px; border: none; background: transparent;
+  padding: 7px 12px; font-size: 13px; font-weight: 500; line-height: 1; color: var(--color-ink-2);
+  cursor: pointer; transition: background 0.12s;
+}
+.btn-ghost:hover { background: var(--color-line-2); }
+
+.btn-focus {
+  display: inline-flex; align-items: center; gap: 6px;
+  border-radius: 6px; border: 1px solid var(--color-accent); background: var(--color-accent);
+  padding: 7px 12px; font-size: 13px; font-weight: 500; line-height: 1; color: var(--color-paper);
+  cursor: pointer; transition: background 0.12s, border-color 0.12s;
+}
+.btn-focus:hover { background: var(--color-accent-dark); border-color: var(--color-accent-dark); }
+
+.icon-btn-focus {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 6px;
+  border: 1px solid var(--color-accent);
+  background: var(--color-accent);
+  color: var(--color-paper);
+  cursor: pointer; transition: background 0.1s, border-color 0.1s;
+}
+.icon-btn-focus:hover { background: var(--color-accent-dark); border-color: var(--color-accent-dark); }
+
+/* ── Editorial redesign primitives ── */
+.kicker {
+  display: inline-flex; align-items: center;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+  font-size: 9.5px; line-height: 14px; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--color-mute); font-weight: 600;
+}
+
+/* Round task checkbox — fills priority-done green with a white check */
+.tcheck {
+  appearance: none; -webkit-appearance: none;
+  width: 16px; height: 16px; border-radius: 50%;
+  border: 1px solid var(--color-line); background: transparent;
+  cursor: pointer; flex: 0 0 auto; position: relative;
+  transition: background 0.12s, border-color 0.12s;
+}
+.tcheck:hover { border-color: var(--color-ink-2); }
+.tcheck:checked { background: var(--color-priority-done); border-color: var(--color-priority-done); }
+.tcheck:checked::after {
+  content: ""; position: absolute; inset: 3px; background: var(--color-paper);
+  clip-path: polygon(14% 50%, 0 60%, 40% 100%, 100% 18%, 86% 8%, 38% 70%);
+}
+
+/* Priority dots */
+.dot   { display: inline-block; width: 6px; height: 6px; border-radius: 9999px; flex: 0 0 auto; }
+.dot-rush { background: var(--color-priority-rush); }
+.dot-high { background: var(--color-priority-high); }
+.dot-med  { background: var(--color-priority-med); }
+.dot-low  { background: var(--color-priority-low); }
+.dot-done { background: var(--color-priority-done); }
+
+/* ── Icon button ── */
+.icon-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 28px; height: 28px; border-radius: 6px; border: none; background: transparent;
+  color: var(--color-mute); cursor: pointer; transition: background 0.1s, color 0.1s;
+}
+.icon-btn:hover { background: var(--color-surf); color: var(--color-ink); }
+
+/* ── Filter pills ── */
+.pill {
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  border-radius: 9999px; border: 1px solid var(--color-line); background: var(--color-paper);
+  padding: 5px 10px; font-family: 'JetBrains Mono', monospace; font-size: 11px;
+  text-transform: uppercase; letter-spacing: 0.06em; color: var(--color-ink-2); line-height: 1;
+  cursor: pointer; transition: background 0.12s, border-color 0.12s;
+}
+.pill:not(.pill-active):hover { background: var(--color-surf-2); }
+.pill-active { border-color: var(--color-ink); background: var(--color-ink); color: var(--color-paper); }
+.pill-active:hover { background: var(--color-ink-2); border-color: var(--color-ink-2); }
+
+/* ── Kbd hint ── */
+.kbd {
+  display: inline-block; border-radius: 3px; border: 1px solid var(--color-line);
+  background: var(--color-paper); padding: 1px 5px; font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; color: var(--color-ink-2);
+}

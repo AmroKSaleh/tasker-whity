@@ -1,0 +1,407 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Tasker API",
+    "description": "Manage projects, tasks, sections, and milestones in Tasker.",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "https://smarttasksxdd.netlify.app/api/rest"
+    }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "Project": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "slug": { "type": "string" },
+          "sort_order": { "type": "number" },
+          "context": { "type": "object" }
+        }
+      },
+      "Section": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "project_id": { "type": "string" },
+          "sort_order": { "type": "number" }
+        }
+      },
+      "Task": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "text": { "type": "string", "description": "Task title" },
+          "detail": { "type": "string", "description": "Notes or description" },
+          "status": { "type": "string", "enum": ["pending", "in_progress", "done"] },
+          "priority": { "type": "string", "enum": ["rush", "high", "medium", "low"] },
+          "due_date": { "type": "string", "format": "date", "description": "YYYY-MM-DD" },
+          "section_id": { "type": "string" },
+          "project_id": { "type": "string" },
+          "pinned": { "type": "boolean" },
+          "sort_order": { "type": "number" }
+        }
+      },
+      "Milestone": {
+        "type": "object",
+        "properties": {
+          "index": { "type": "integer" },
+          "summary": { "type": "string" },
+          "detail": { "type": "string" },
+          "completed": { "type": "boolean" }
+        }
+      }
+    }
+  },
+  "security": [{ "bearerAuth": [] }],
+  "paths": {
+    "/projects": {
+      "get": {
+        "operationId": "listProjects",
+        "summary": "List all projects",
+        "responses": {
+          "200": {
+            "description": "List of projects",
+            "content": {
+              "application/json": {
+                "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Project" } }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createProject",
+        "summary": "Create a new project",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Created project",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Project" } }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{projectId}": {
+      "get": {
+        "operationId": "getProject",
+        "summary": "Get a project by ID or slug",
+        "parameters": [
+          { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Project details",
+            "content": {
+              "application/json": { "schema": { "$ref": "#/components/schemas/Project" } }
+            }
+          }
+        }
+      }
+    },
+    "/projects/{projectId}/context": {
+      "patch": {
+        "operationId": "updateProjectContext",
+        "summary": "Update project context (goal, why, scope, etc.)",
+        "parameters": [
+          { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "goal": { "type": "string" },
+                  "why": { "type": "string" },
+                  "scope": { "type": "string" },
+                  "risks": { "type": "string" },
+                  "audience": { "type": "string" },
+                  "notes": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Updated project" }
+        }
+      }
+    },
+    "/projects/{projectId}/sections": {
+      "get": {
+        "operationId": "listSections",
+        "summary": "List sections for a project",
+        "parameters": [
+          { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of sections",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Section" } } }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createSection",
+        "summary": "Create a section in a project",
+        "parameters": [
+          { "name": "projectId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["name"],
+                "properties": {
+                  "name": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Created section" }
+        }
+      }
+    },
+    "/tasks": {
+      "get": {
+        "operationId": "listTasks",
+        "summary": "List tasks, optionally filtered by project",
+        "parameters": [
+          { "name": "project_id", "in": "query", "schema": { "type": "string" } },
+          { "name": "status", "in": "query", "schema": { "type": "string" } },
+          { "name": "section_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of tasks",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "createTask",
+        "summary": "Create a new task",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["text", "project_id"],
+                "properties": {
+                  "text": { "type": "string" },
+                  "detail": { "type": "string" },
+                  "project_id": { "type": "string" },
+                  "section_id": { "type": "string" },
+                  "priority": { "type": "string", "enum": ["rush", "high", "medium", "low"] },
+                  "due_date": { "type": "string", "format": "date" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Created task", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Task" } } } }
+        }
+      }
+    },
+    "/tasks/ranked": {
+      "get": {
+        "operationId": "rankTasks",
+        "summary": "Get tasks ranked by priority, due date, and urgency",
+        "parameters": [
+          { "name": "project_id", "in": "query", "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Ranked tasks",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Task" } } }
+            }
+          }
+        }
+      }
+    },
+    "/tasks/{taskId}": {
+      "patch": {
+        "operationId": "updateTask",
+        "summary": "Update a task",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "text": { "type": "string" },
+                  "detail": { "type": "string" },
+                  "priority": { "type": "string", "enum": ["rush", "high", "medium", "low"] },
+                  "due_date": { "type": "string", "format": "date" },
+                  "status": { "type": "string", "enum": ["pending", "in_progress", "done"] },
+                  "section_id": { "type": "string" },
+                  "pinned": { "type": "boolean" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Updated task" }
+        }
+      },
+      "delete": {
+        "operationId": "deleteTask",
+        "summary": "Delete a task",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Deleted" }
+        }
+      }
+    },
+    "/tasks/{taskId}/complete": {
+      "post": {
+        "operationId": "completeTask",
+        "summary": "Mark a task as done",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Task marked done" }
+        }
+      }
+    },
+    "/tasks/{taskId}/uncomplete": {
+      "post": {
+        "operationId": "uncompleteTask",
+        "summary": "Mark a done task back to pending",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": { "description": "Task marked pending" }
+        }
+      }
+    },
+    "/tasks/{taskId}/milestones": {
+      "get": {
+        "operationId": "listMilestones",
+        "summary": "List milestones for a task",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "List of milestones",
+            "content": {
+              "application/json": { "schema": { "type": "array", "items": { "$ref": "#/components/schemas/Milestone" } } }
+            }
+          }
+        }
+      },
+      "post": {
+        "operationId": "addMilestone",
+        "summary": "Add a milestone to a task",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["summary"],
+                "properties": {
+                  "summary": { "type": "string" },
+                  "detail": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Added milestone" }
+        }
+      }
+    },
+    "/tasks/{taskId}/milestones/{index}/complete": {
+      "post": {
+        "operationId": "completeMilestone",
+        "summary": "Mark a milestone as complete",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "index", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Milestone marked complete" }
+        }
+      }
+    },
+    "/tasks/{taskId}/milestones/{index}/uncomplete": {
+      "post": {
+        "operationId": "uncompleteMilestone",
+        "summary": "Mark a completed milestone back to incomplete",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "index", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Milestone marked incomplete" }
+        }
+      }
+    },
+    "/tasks/{taskId}/milestones/{index}": {
+      "delete": {
+        "operationId": "deleteMilestone",
+        "summary": "Delete a milestone",
+        "parameters": [
+          { "name": "taskId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "index", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": { "description": "Milestone deleted" }
+        }
+      }
+    }
+  }
+}

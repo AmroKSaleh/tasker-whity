@@ -1,0 +1,1 @@
+create table if not exists project_instructions (id uuid default gen_random_uuid() primary key, project_id uuid references projects(id) on delete cascade not null, user_id uuid references auth.users(id) on delete cascade not null, title text not null, content text not null, created_at timestamptz default now() not null, updated_at timestamptz default now() not null);

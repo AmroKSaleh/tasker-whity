@@ -1,0 +1,92 @@
+@import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+.btn-delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 7px;
+  border-radius: 4px;
+  border: 1px solid #e0e0e0;
+  background: transparent;
+  color: #bbb;
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  flex-shrink: 0;
+  font-family: inherit;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+.btn-delete:hover {
+  background: #ef4444;
+  border-color: #ef4444;
+  color: #fff;
+}
+
+@layer base {
+  /* Greyscale token remapping — all MD3 roles point to greyscale values */
+  :root {
+    --md-background:                #ffffff;
+    --md-on-background:             #111111;
+    --md-surface:                   #ffffff;
+    --md-surface-dim:               #e6e6e6;
+    --md-surface-bright:            #ffffff;
+    --md-surface-container-lowest:  #ffffff;
+    --md-surface-container-low:     #fafafa;
+    --md-surface-container:         #f5f5f5;
+    --md-surface-container-high:    #eeeeee;
+    --md-surface-container-highest: #e6e6e6;
+    --md-on-surface:                #111111;
+    --md-on-surface-variant:        #6b6b6b;
+    --md-surface-variant:           #e6e6e6;
+    --md-inverse-surface:           #111111;
+    --md-on-inverse-surface:        #ffffff;
+    --md-outline:                   #cfcfcf;
+    --md-outline-variant:           #e6e6e6;
+    --md-primary:                   #111111;
+    --md-on-primary:                #ffffff;
+    --md-primary-container:         #111111;
+    --md-on-primary-container:      #ffffff;
+    --md-inverse-primary:           #cfcfcf;
+    --md-secondary:                 #333333;
+    --md-on-secondary:              #ffffff;
+    --md-secondary-container:       #eeeeee;
+    --md-on-secondary-container:    #111111;
+    --md-tertiary:                  #6b6b6b;
+    --md-on-tertiary:               #ffffff;
+    --md-tertiary-container:        #f5f5f5;
+    --md-on-tertiary-container:     #111111;
+    --md-error:                     #ba1a1a;
+    --md-on-error:                  #ffffff;
+    --md-error-container:           #ffdad6;
+    --md-on-error-container:        #410002;
+    --md-scrim:                     #000000;
+  }
+
+  *, *::before, *::after {
+    box-sizing: border-box;
+  }
+
+  body {
+    @apply bg-paper text-ink font-sans;
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    margin: 0;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  ::-webkit-scrollbar        { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track  { background: transparent; }
+  ::-webkit-scrollbar-thumb  { background: #cfcfcf; border-radius: 9999px; }
+  ::-webkit-scrollbar-thumb:hover { background: #9a9a9a; }
+}
+
+/* Priority chips — greyscale density encoding */
+.priority-rush   { background: #111111; color: #ffffff; border: none; }
+.priority-high   { background: #444444; color: #ffffff; border: none; }
+.priority-medium { background: #ffffff; color: #111111; border: 1px solid #111111; }
+.priority-low    { background: #ffffff; color: #9a9a9a; border: 1px dashed #111111; }

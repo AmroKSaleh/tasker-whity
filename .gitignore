@@ -1,0 +1,37 @@
+# ── Dependencies ──
+node_modules/
+
+# ── Build output ──
+dist/
+build/
+
+# ── Mobile (Capacitor — regenerable) ──
+android/
+
+# ── Deploy / tooling caches ──
+.netlify/
+.vercel/
+.vite/
+.turbo/
+
+# ── Secrets / environment ──
+.env
+.env.*
+*.local
+
+# ── Redundant manual backups (git is the history now) ──
+snapshots/
+
+# ── Tooling / local agent state ──
+.claude/
+
+# ── Logs ──
+*.log
+npm-debug.log*
+
+# ── OS / editor ──
+.DS_Store
+Thumbs.db
+*.swp
+.idea/
+.vscode/

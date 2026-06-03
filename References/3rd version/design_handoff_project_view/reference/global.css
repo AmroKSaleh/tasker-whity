@@ -1,0 +1,90 @@
+/* Drop into your global CSS (e.g. src/index.css) inside an @layer components.
+ * These are the few utility classes the redesign needs that don't fit cleanly
+ * as inline Tailwind. */
+
+@layer base {
+  body { font-family: 'Inter', system-ui, sans-serif; color: #1A1916; background: #F0EDE5; }
+}
+
+@layer components {
+  /* Buttons — used across project header + sidebar */
+  .btn {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-line bg-paper
+           px-3.5 py-2 text-sm font-medium leading-none text-ink-2
+           transition-colors hover:border-mute-2 hover:bg-surf-2;
+  }
+  .btn-primary {
+    @apply inline-flex items-center gap-1.5 rounded-md border border-ink bg-ink
+           px-3.5 py-2 text-sm font-medium leading-none text-paper
+           transition-colors hover:bg-ink-2;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center gap-1.5 rounded-md bg-transparent
+           px-3.5 py-2 text-sm font-medium leading-none text-ink-2
+           transition-colors hover:bg-line-2;
+  }
+  .btn-sm {
+    @apply px-2.5 py-1.5 text-xs rounded;
+  }
+
+  /* Icon-only button — used in headers and tool clusters */
+  .icon-btn {
+    @apply inline-flex h-8 w-8 items-center justify-center rounded-md border border-transparent
+           bg-transparent text-ink-2 transition-colors
+           hover:border-line hover:bg-surf-2;
+  }
+
+  /* Pill — filter bar */
+  .pill {
+    @apply inline-flex items-center gap-1.5 whitespace-nowrap rounded-full
+           border border-line bg-paper px-2.5 py-1.5
+           font-mono text-[11px] uppercase leading-none tracking-[0.06em] text-ink-2
+           transition-colors hover:bg-surf-2;
+  }
+  .pill-active {
+    @apply border-ink bg-ink text-paper hover:bg-ink;
+  }
+
+  /* Chip — priority, due, tag */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-sm px-1.5 py-0.5
+           font-mono text-[9.5px] uppercase leading-tight tracking-[0.08em];
+  }
+  .chip-rush { @apply text-priority-rush; background-color: rgba(192,67,45,0.12); }
+  .chip-high { @apply text-priority-high; background-color: rgba(217,119,87,0.10); }
+  .chip-med  { @apply text-priority-med;  background-color: rgba(140,128,85,0.14); }
+  .chip-low  { @apply text-priority-low;  background-color: rgba(107,104,103,0.14); }
+  .chip-tag {
+    @apply border border-line bg-transparent text-mute normal-case;
+    font-size: 10px;
+    letter-spacing: 0.02em;
+  }
+  .chip-due {
+    @apply bg-transparent text-mute pl-0;
+    letter-spacing: 0.04em;
+  }
+  .chip-due-overdue { @apply font-medium text-priority-rush; }
+  .chip-due-today   { @apply font-medium text-priority-high; }
+
+  /* The horizontal column scroller — hide native scrollbar */
+  .cols-scroll {
+    scrollbar-width: none;
+  }
+  .cols-scroll::-webkit-scrollbar { height: 0; display: none; }
+
+  /* Column body — keep a thin sliver scrollbar for vertical scroll hint */
+  .col-body::-webkit-scrollbar { width: 6px; }
+  .col-body::-webkit-scrollbar-thumb { background: #D4D0C8; border-radius: 3px; }
+  .col-body::-webkit-scrollbar-track { background: transparent; }
+
+  /* Hide scrollbars on mobile horizontal scrollers (filter bar, m-cols) */
+  .no-scrollbar { scrollbar-width: none; }
+  .no-scrollbar::-webkit-scrollbar { display: none; }
+
+  /* Mono "kbd" inside the scroll hint */
+  .kbd {
+    @apply rounded-sm border border-line bg-paper px-1.5 py-0.5
+           font-mono text-[10px] text-ink-2;
+    letter-spacing: 0;
+  }
+}

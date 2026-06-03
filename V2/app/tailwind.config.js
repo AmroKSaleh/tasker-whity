@@ -1,0 +1,96 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./index.html', './src/**/*.{js,jsx}'],
+  theme: {
+    extend: {
+      fontFamily: {
+        sans: ['Inter', 'system-ui', 'sans-serif'],
+        mono: ['"JetBrains Mono"', 'ui-monospace', 'monospace'],
+      },
+      colors: {
+        ink:    { DEFAULT: 'var(--color-ink)',    2: 'var(--color-ink-2)' },
+        mute:   { DEFAULT: 'var(--color-mute)',   2: 'var(--color-mute-2)' },
+        line:   { DEFAULT: 'var(--color-line)',   2: 'var(--color-line-2)' },
+        surf:   { DEFAULT: 'var(--color-surf)',   2: 'var(--color-surf-2)' },
+        paper:  'var(--color-paper)',
+        accent: {
+          DEFAULT: 'var(--color-accent)',
+          2:       'var(--color-accent-2)',
+          dark:    'var(--color-accent-dark)',
+          soft:    'var(--color-accent-soft)',
+          edge:    'var(--color-accent-edge)',
+        },
+        star: {
+          DEFAULT: 'var(--color-star)',
+          soft:    'var(--color-star-soft)',
+        },
+        priority: {
+          rush: 'var(--color-priority-rush)',
+          high: 'var(--color-priority-high)',
+          med:  'var(--color-priority-med)',
+          low:  'var(--color-priority-low)',
+          done: 'var(--color-priority-done)',
+        },
+      },
+      fontSize: {
+        'display': ['32px', { lineHeight: '38px', letterSpacing: '-0.8px', fontWeight: '800' }],
+        'h1':      ['26px', { lineHeight: '32px', letterSpacing: '-0.6px', fontWeight: '800' }],
+        'h2':      ['22px', { lineHeight: '28px', letterSpacing: '-0.5px', fontWeight: '800' }],
+        'h3':      ['17px', { lineHeight: '24px', letterSpacing: '-0.2px', fontWeight: '700' }],
+        'body':    ['13px', { lineHeight: '20px', fontWeight: '500' }],
+        'body-sm': ['11px', { lineHeight: '16px', fontWeight: '500' }],
+        'meta':    ['9.5px', { lineHeight: '14px', letterSpacing: '0.5px', fontWeight: '600' }],
+        '2xs':     ['10px',  { lineHeight: '14px', letterSpacing: '0.08em' }],
+        '3xs':     ['9.5px', { lineHeight: '13px', letterSpacing: '0.1em' }],
+      },
+      borderRadius: {
+        'xs':    '3px',
+        'sm':    '4px',
+        'md':    '6px',
+        'lg':    '8px',
+        'xl':    '10px',
+        '2xl':   '14px',
+        'pill':  '9999px',
+        'sheet': '14px',
+      },
+      boxShadow: {
+        'hero':  '0 4px 16px rgba(0,0,0,0.08)',
+        'card':  '0 1px 3px rgba(26,25,22,0.06)',
+        'sm':    '0 1px 2px rgba(26,25,22,0.05)',
+        'panel': '-12px 0 32px rgba(26,25,22,0.08)',
+        'sheet': '0 -8px 24px rgba(26,25,22,0.18)',
+        'fab':   '0 4px 16px rgba(26,25,22,0.25)',
+        'drag':  '0 18px 40px rgba(26,25,22,0.18), 0 0 0 1.5px #D97757',
+      },
+      transitionTimingFunction: {
+        'panel': 'cubic-bezier(0.2, 0.7, 0.3, 1)',
+      },
+      spacing: {
+        '4.5': '18px',
+        '5.5': '22px',
+      },
+      keyframes: {
+        'slide-in-right':  { '0%': { transform: 'translateX(100%)' }, '100%': { transform: 'translateX(0)' } },
+        'slide-out-right': { '0%': { transform: 'translateX(0)' },   '100%': { transform: 'translateX(100%)' } },
+        'fade-in':  { '0%': { opacity: 0 }, '100%': { opacity: 1 } },
+        'fade-out': { '0%': { opacity: 1 }, '100%': { opacity: 0 } },
+        'sheet-up':   { '0%': { transform: 'translateY(100%)' }, '100%': { transform: 'translateY(0)' } },
+        'sheet-down': { '0%': { transform: 'translateY(0)' },    '100%': { transform: 'translateY(100%)' } },
+        'card-rise': {
+          '0%':   { transform: 'translate(-50%, 100%)', opacity: 0 },
+          '100%': { transform: 'translate(-50%, 0)',    opacity: 1 },
+        },
+      },
+      animation: {
+        'slide-in-right':  'slide-in-right 240ms cubic-bezier(0.2,0.7,0.3,1) both',
+        'slide-out-right': 'slide-out-right 220ms cubic-bezier(0.2,0.7,0.3,1) both',
+        'fade-in':  'fade-in 180ms linear both',
+        'fade-out': 'fade-out 180ms linear both',
+        'sheet-up':   'sheet-up 280ms cubic-bezier(0.2,0.7,0.3,1) both',
+        'sheet-down': 'sheet-down 260ms cubic-bezier(0.2,0.7,0.3,1) both',
+        'card-rise':  'card-rise 280ms cubic-bezier(0.2,0.7,0.3,1) both',
+      },
+    },
+  },
+  plugins: [],
+}
