@@ -1,6 +1,6 @@
 import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
-import { Home, Folder, Workflow, Calendar, Search, Inbox, Settings } from 'lucide-react'
+import { Home, Folder, Workflow, Calendar, Search, Inbox, BookOpen, Settings } from 'lucide-react'
 import { useSidebarStore } from '../../store/useSidebarStore'
 
 function RailButton({ icon: Icon, label, active, expanded, onClick }) {
@@ -50,7 +50,8 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
             <RailButton icon={Inbox}    label="Inbox"    active={active === 'inbox'}     expanded={expanded} />
           </div>
           <div className="flex-1" />
-          <div className="px-1.5">
+          <div className="px-1.5 flex flex-col gap-0.5">
+            <RailButton icon={BookOpen} label="Docs"     active={active === 'docs'}     expanded={expanded} onClick={() => navigate('/docs')} />
             <RailButton icon={Settings} label="Settings" active={active === 'settings'} expanded={expanded} onClick={() => navigate('/settings')} />
           </div>
         </div>
