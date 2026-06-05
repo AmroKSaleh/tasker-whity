@@ -320,7 +320,7 @@ const ASSISTANT_DIRECTIVES = [
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
   'FLOW IDENTITY: After persisting a new flow (after all create_task + set_task_output + set_task_input calls), call name_flow with all task IDs and a descriptive name (e.g. "Blog Post Publication Flow"). Optionally add a context string — the goal, constraints, or background that applies to all tasks. At the start of any flow run, call get_flow_context to orient yourself. Use update_flow_context to log progress or decisions that future agents in the flow should know.',
   'RUN FLOW: When the user asks you to run, execute, or start a flow — call run_flow first (with flow_id or any task_id in the flow). Read the playbook it returns. Then self-sequence through every step in order: execute → store_artifact → complete_task → validate → handle action. Do NOT prompt the user between steps unless action=ask_human. The flow runs to completion (or human intervention) in one session.',
-  'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. How: (1) word/character count → count manually word-by-word or run `echo "..." | wc -w` via Bash and put the exact number in the note; (2) command (e.g. "npm test exits 0") → run it with the Bash tool, capture stdout/stderr, put the exit code + output in the note; (3) keyword/pattern → read the artifact and search it, put the match result in the note; (4) file existence → use Glob/Read, put the found path in the note. Submitting a check result with no note is REJECTED. A note of "I checked, it passes" is not evidence — the raw observed value is. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) also REQUIRES a note — the specific deficiency: what exactly did not meet the rule and why. "fail" alone is REJECTED. This applies to the validator subagent too.',
+  'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. Submit two fields: (1) observed_value — the raw datum from running it: exact word count ("1,542 words"), command output ("exit 0: All 24 tests passed"), file path ("/src/index.ts found"), pattern match ("keyword \'auth\' found at line 47"). Submitting without observed_value is REJECTED by the server. (2) note — interpretation of the observed_value against the rule (e.g. "1,542 words — exceeds the 1,000-word minimum"). How to produce observed_value: word/char count → run `echo "..." | wc -w` via Bash; command check → run it via Bash, capture stdout + exit code; file existence → Glob/Read, record the path; pattern → Grep/Read and record the match. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) ALSO requires a note — the specific deficiency. This applies to the validator subagent too.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -947,7 +947,8 @@ const TOOLS = [
             properties: {
               rule_id: { type: 'string', description: 'id of the rule (from validate_output\'s output)' },
               status: { type: 'string', enum: ['pass', 'fail'], description: 'Did the output meet this rule?' },
-              note: { type: 'string', description: 'REQUIRED for kind=check rules (pass or fail): the raw observed result of actually running the check — command stdout, exact word/character count, pattern match result, file path found. REQUIRED for any fail (any kind): the specific deficiency — what did not meet the rule and why. Not a claim — concrete evidence. For kind=judgment pass: reasoning recommended but not required.' },
+              observed_value: { type: 'string', description: 'REQUIRED for kind=check rules. The raw datum from actually running the check — not an interpretation, the value itself. Examples: "1,542 words" (word count), "exit 0 — All 24 tests passed" (command), "/src/index.ts found" (file exists), "keyword \'authentication\' found at line 47" (pattern). If you cannot produce a concrete observed value, you have not run the check.' },
+              note: { type: 'string', description: 'REQUIRED for any fail (any kind): the specific deficiency — what did not meet the rule and why. REQUIRED for kind=check rules: interpretation of the observed_value (e.g. "1,542 words — exceeds 1,000-word minimum"). For kind=judgment pass: reasoning recommended.' },
             },
             required: ['rule_id', 'status'],
           },
@@ -2861,14 +2862,14 @@ ${rulesBlock}
 ─────────────────────────────────────────────────────────────
 
 For kind=judgment rules: prior is FAIL. You need clear, concrete evidence from the artifact to flip to pass. Partial match, vague similarity, or "it could be interpreted as" is not enough — stay FAIL.
-For kind=check rules: evaluate deterministically (count words/lines, check patterns, run commands). Put the raw observed value in the note.
-Any fail REQUIRES a note naming the specific deficiency. Any pass on a judgment rule REQUIRES a note citing the concrete evidence that cleared it.
+For kind=check rules: ACTUALLY RUN the check — count words/lines, run commands via Bash, search for patterns. Record the raw result as observed_value (e.g. "1,542 words", "exit 0: All 24 tests passed", "/src/index.ts found at line 3"). Submitting without observed_value is REJECTED.
+Any fail REQUIRES a note naming the specific deficiency. Any pass on a judgment rule REQUIRES a note citing the concrete evidence that cleared it. Any check rule REQUIRES observed_value.
 
 Call submit_validation_result with:
   task_id: "${producer.id}"
   target_task_id: "${consumer.id}"
   validator: "independent-subagent"
-  results: one {rule_id, status, note} per rule — you must cover all rule IDs: ${allRuleIds}`
+  results: one {rule_id, status, observed_value (check rules only), note} per rule — you must cover all rule IDs: ${allRuleIds}`
 
       const artifactReady = !!storedArtifact
       const isProvisional = (!gateContractBlessed && gateRules.length > 0) || (!selfContractBlessed && selfRules.length > 0)
@@ -2893,6 +2894,14 @@ Call submit_validation_result with:
         ...(isProvisional ? { provisional_warning: 'One or more contracts are PROVISIONAL (not confirmed by a human). Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to bless the quality bar.' } : {}),
         retry_info: { retry_count: edgeRetry, retry_limit: 3, retries_remaining: Math.max(0, 3 - edgeRetry) },
         ...(hasJudgment ? { validator_agent_prompt: validatorPrompt } : {}),
+        ...(!hasJudgment ? {
+          check_execution_guide: [...gateRules, ...selfRules].filter((r: any) => r.kind === 'check').map((r: any) => ({
+            rule_id: r.id,
+            label: r.label,
+            rule: r.rule,
+            required: `observed_value (the raw result of running this check) + note (interpretation). Both rejected if missing.`,
+          })),
+        } : {}),
       })
     }
 
@@ -2934,9 +2943,30 @@ Call submit_validation_result with:
       const ruleById = new Map<string, any>()
       ;[...gateRules, ...selfRules].forEach((r: any) => ruleById.set(r.id, r))
 
-      // Reject results missing required notes:
-      // - kind=check always needs a note (the actual observed value — pass or fail)
+      // Reject results missing required evidence:
+      // - kind=check always needs observed_value (the raw datum from running the check)
+      // - kind=check also needs a note (interpretation of the observed_value)
       // - any fail (any kind) needs a note (the specific deficiency)
+      const missingObservedValue = results.filter((res: any) => {
+        const rule = ruleById.get(res.rule_id)
+        return rule?.kind === 'check' && !res.observed_value
+      })
+      if (missingObservedValue.length) {
+        return JSON.stringify({
+          error: 'missing_observed_value',
+          message: `${missingObservedValue.length} check rule(s) submitted without observed_value. For kind=check rules, you MUST actually run the check and record the raw result — exact word count, command stdout + exit code, file path found, pattern match result. A description of the output is not an observed value. Run the check. Record what you observed.`,
+          rules_needing_observed_value: missingObservedValue.map((res: any) => {
+            const rule = ruleById.get(res.rule_id)
+            return {
+              rule_id: res.rule_id,
+              label: rule?.label || res.rule_id,
+              rule: rule?.rule,
+              how_to_check: rule?.description || 'Run the check described in the rule. Record the raw output as observed_value.',
+            }
+          }),
+        })
+      }
+
       const unevidenced = results.filter((res: any) => {
         const rule = ruleById.get(res.rule_id)
         return !res.note && (rule?.kind === 'check' || res.status === 'fail')
@@ -2944,11 +2974,11 @@ Call submit_validation_result with:
       if (unevidenced.length) {
         return JSON.stringify({
           error: 'missing_evidence',
-          message: `${unevidenced.length} rule(s) submitted without a required note. Requirements: (1) kind=check rules always need a note — the actual observed result (count, command stdout, pattern match). (2) Any failing rule needs a note — the specific deficiency, not just "fail". Submitting without is rejected.`,
+          message: `${unevidenced.length} rule(s) submitted without a required note. Requirements: (1) kind=check rules need a note interpreting the observed_value. (2) Any failing rule needs a note — the specific deficiency, not just "fail".`,
           rules_needing_evidence: unevidenced.map((res: any) => {
             const rule = ruleById.get(res.rule_id)
             const reason = rule?.kind === 'check'
-              ? 'kind=check — note must contain the actual observed value'
+              ? 'kind=check — note must interpret the observed_value (e.g. "1,542 words — exceeds 1,000-word minimum")'
               : 'status=fail — note must describe the specific deficiency'
             return { rule_id: res.rule_id, label: rule?.label || res.rule_id, rule: rule?.rule, reason }
           }),
@@ -2961,8 +2991,8 @@ Call submit_validation_result with:
         const rule = ruleById.get(res.rule_id)
         const isGate = gateRuleIds.has(res.rule_id)
         const isCheck = rule?.kind === 'check'
-        const noteLen = (res.note || '').length
-        const evidenceQuality = isCheck ? (noteLen === 0 ? 'missing' : noteLen < 15 ? 'weak' : 'good') : null
+        const observedValueLen = (res.observed_value || '').length
+        const evidenceQuality = isCheck ? (observedValueLen === 0 ? 'missing' : observedValueLen < 10 ? 'weak' : 'good') : null
         return {
           rule_id: res.rule_id,
           label: rule?.label || res.rule_id,
@@ -2971,6 +3001,7 @@ Call submit_validation_result with:
           kind: rule?.kind || 'check',
           status: res.status === 'pass' ? 'pass' : 'fail',
           note: res.note || null,
+          ...(isCheck ? { observed_value: res.observed_value } : {}),
           validator,
           contract_blessed: isGate ? gateContractBlessed : selfContractBlessed,
           ...(isCheck ? { evidence_quality: evidenceQuality } : {}),
@@ -3027,9 +3058,11 @@ Call submit_validation_result with:
         overall: validationStatus,
         fails: ledger.filter((l: any) => l.status === 'fail').map((l: any) => ({
           rule_id: l.rule_id, label: l.label, kind: l.kind, severity: l.severity, source: l.source, note: l.note,
+          ...(l.observed_value ? { observed_value: l.observed_value } : {}),
         })),
         passes: ledger.filter((l: any) => l.status === 'pass').map((l: any) => ({
           rule_id: l.rule_id, label: l.label, kind: l.kind, severity: l.severity, source: l.source, note: l.note,
+          ...(l.observed_value ? { observed_value: l.observed_value } : {}),
         })),
       }
 
@@ -3143,6 +3176,7 @@ Call submit_validation_result with:
         lines.push(`FAILED (${critique.fails.length}):`)
         critique.fails.forEach((f: any) => {
           lines.push(`  ✗ [${f.source === 'input' ? 'gate' : 'self'} · ${f.severity} · ${f.kind}] ${f.label}`)
+          if (f.observed_value) lines.push(`      Observed: ${f.observed_value}`)
           lines.push(`      ${f.note || '(no note)'}`)
         })
       } else {
@@ -3152,6 +3186,7 @@ Call submit_validation_result with:
         lines.push('', `PASSED (${critique.passes.length}):`)
         critique.passes.forEach((p: any) => {
           lines.push(`  ✓ [${p.source === 'input' ? 'gate' : 'self'} · ${p.severity} · ${p.kind}] ${p.label}`)
+          if (p.observed_value) lines.push(`      Observed: ${p.observed_value}`)
           if (p.note) lines.push(`      ${p.note}`)
         })
       }
