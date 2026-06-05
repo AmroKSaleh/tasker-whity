@@ -970,7 +970,7 @@ const TOOLS = [
   },
   {
     name: 'confirm_contract',
-    description: 'Human-bless a contract on a task. Agent-authored contracts are AI-QA\'d (QA performed by AI, not a human) — stamped contract_blessed: false in the validation ledger. Call this after the human has reviewed and approved the quality bar. Confirmation is non-destructive; any subsequent call to set_task_output or set_task_input resets the contract to AI-QA\'d.',
+    description: 'Human-bless a contract on a task. Agent-authored contracts are AI-QA\'d (QA is performed by AI, not a meat sack) — stamped contract_blessed: false in the validation ledger. Call this after the human has reviewed and approved the quality bar. Confirmation is non-destructive; any subsequent call to set_task_output or set_task_input resets the contract to AI-QA\'d.',
     inputSchema: {
       type: 'object',
       properties: {
