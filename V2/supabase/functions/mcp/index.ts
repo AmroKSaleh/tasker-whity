@@ -306,6 +306,7 @@ const ASSISTANT_DIRECTIVES = [
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
+  'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and use AskUserQuestion to present the failures to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -2323,6 +2324,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           target: null,
           gate_rules: [],
           self_check_rules: selfRules,
+          retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
         })
       }
 
@@ -2352,6 +2354,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         target_task_id: consumer.id,
         gate_rules: gateRules,
         self_check_rules: selfRules,
+        retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
       })
     }
 
@@ -2411,20 +2414,41 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const validationStatus = valid ? 'valid' : 'invalid'
 
       const prevOutput = (producer.output && typeof producer.output === 'object') ? producer.output : {}
-      await sb.from('tasks').update({
-        output: { ...prevOutput, validation_status: validationStatus, validated_against: targetId, validated_at: checkedAt, ledger },
-      }).eq('id', producer.id)
+      const prevRetryCount = typeof prevOutput.retry_count === 'number' ? prevOutput.retry_count : 0
+      const RETRY_LIMIT = 3
 
-      // Reopen the producer on failure so work resumes (no silent premature completion).
       let reopened = false
-      if (!valid && producer.status === 'done') {
-        await sb.from('tasks').update({ status: 'in_progress', completed_at: null }).eq('id', producer.id)
-        reopened = true
+      let action = valid ? 'pass' : 'regenerate'
+      let newRetryCount = prevRetryCount
+
+      if (!valid) {
+        newRetryCount = prevRetryCount + 1
+        if (newRetryCount >= RETRY_LIMIT) {
+          action = 'ask_human'
+        } else if (producer.status === 'done') {
+          await sb.from('tasks').update({ status: 'in_progress', completed_at: null }).eq('id', producer.id)
+          reopened = true
+        }
       }
+
+      await sb.from('tasks').update({
+        output: {
+          ...prevOutput,
+          validation_status: validationStatus,
+          validated_against: targetId,
+          validated_at: checkedAt,
+          ledger,
+          retry_count: valid ? 0 : newRetryCount,
+          ...(action === 'ask_human' ? { retry_blocked: true } : {}),
+        },
+      }).eq('id', producer.id)
 
       const fmt = (l: any) => `  ${l.status === 'pass' ? '✓' : '✗'} [${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`
       return JSON.stringify({
         status: validationStatus,
+        action,
+        retry_count: valid ? 0 : newRetryCount,
+        retries_remaining: valid ? RETRY_LIMIT : Math.max(0, RETRY_LIMIT - newRetryCount),
         producer: producer.text,
         target: targetText,
         gate_failures: blockingFails.map(fmt),
@@ -2433,7 +2457,9 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         producer_reopened: reopened,
         summary: valid
           ? `Output passed the gate${warnings.length ? ` (${warnings.length} warning(s) noted)` : ''}.${targetText ? ` "${targetText}" can proceed.` : ''}`
-          : `Output REJECTED by ${targetText ? `"${targetText}"'s` : 'the'} acceptance criteria — ${blockingFails.length} blocker(s).${reopened ? ' Producer reopened (in_progress).' : ''} Fix and re-validate.`,
+          : action === 'ask_human'
+            ? `Output REJECTED — retry limit reached (${RETRY_LIMIT} attempts). Stop and ask the human via AskUserQuestion — show them the failures and ask how to proceed.`
+            : `Output REJECTED by ${targetText ? `"${targetText}"'s` : 'the'} acceptance criteria — ${blockingFails.length} blocker(s). Attempt ${newRetryCount}/${RETRY_LIMIT}.${reopened ? ' Producer reopened.' : ''} Fix, re-complete the task, then call validate_output + submit_validation_result again.`,
       })
     }
 
@@ -2445,6 +2471,9 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       const status = out.validation_status || 'pending'
       const lines = [`Validation status: ${status}`]
+      if (typeof out.retry_count === 'number' && out.retry_count > 0) {
+        lines.push(`Retry count: ${out.retry_count}/3${out.retry_blocked ? ' (limit reached — awaiting human direction)' : ''}`)
+      }
       if (Array.isArray(out.ledger) && out.ledger.length) {
         lines.push('', 'Last check (per rule):')
         out.ledger.forEach((l: any) => {
