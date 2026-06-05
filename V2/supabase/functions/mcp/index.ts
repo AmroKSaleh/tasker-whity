@@ -970,7 +970,7 @@ const TOOLS = [
   },
   {
     name: 'confirm_contract',
-    description: 'Human-bless a contract on a task. Agent-authored contracts are PROVISIONAL — stamped contract_blessed: false in the validation ledger. Call this after the human has reviewed and approved the quality bar. Confirmation is non-destructive; any subsequent call to set_task_output or set_task_input resets the contract to provisional.',
+    description: 'Human-bless a contract on a task. Agent-authored contracts are AI-QA\'d (QA performed by AI, not a human) — stamped contract_blessed: false in the validation ledger. Call this after the human has reviewed and approved the quality bar. Confirmation is non-destructive; any subsequent call to set_task_output or set_task_input resets the contract to AI-QA\'d.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2289,7 +2289,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
             lines.push('')
             lines.push(`  Gate: ${gateLabel}`)
-            lines.push(`  Status: ${vstatus.toUpperCase()} | Validator: ${validatorStr} | Contract: ${allBlessed ? 'confirmed' : 'PROVISIONAL'}`)
+            lines.push(`  Status: ${vstatus.toUpperCase()} | Validator: ${validatorStr} | Contract: ${allBlessed ? 'confirmed' : 'AI-QA\'d'}`)
             if (edgeLedger.validated_at) lines.push(`  At: ${edgeLedger.validated_at}`)
             if (retries > 0) lines.push(`  Retries: ${retries}${edgeLedger.retry_blocked ? ' (limit reached)' : ''}`)
             lines.push('')
@@ -2304,7 +2304,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       })
 
       lines.push(SEP)
-      lines.push(`Summary: ${sorted.length} tasks | ${totalValidated} edges validated | ${totalPass} pass | ${totalFail} fail | ${totalRetries} retries | ${totalBlocked} human-blocked | ${totalProvisional} provisional contract${totalProvisional !== 1 ? 's' : ''}`)
+      lines.push(`Summary: ${sorted.length} tasks | ${totalValidated} edges validated | ${totalPass} pass | ${totalFail} fail | ${totalRetries} retries | ${totalBlocked} human-blocked | ${totalProvisional} AI-QA'd contract${totalProvisional !== 1 ? 's' : ''}`)
       return lines.join('\n')
     }
 
@@ -2623,7 +2623,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
             lines.push(`  Requires output from: ${srcLabel}`)
             const gateRules = e.contract?.rules || []
             if (gateRules.length) {
-              const blessed = e.contract?.confirmed ? 'confirmed' : 'PROVISIONAL'
+              const blessed = e.contract?.confirmed ? 'confirmed' : 'AI-QA\'d'
               lines.push(`  Gate contract [${blessed}]:`)
               gateRules.forEach((r: any) => {
                 lines.push(`    [${r.severity} · ${r.kind}] ${r.label}: ${r.rule}`)
@@ -2635,7 +2635,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         // Output contract (what this task must produce)
         const outContract = outputContract(t.output)
         if (outContract.rules.length) {
-          const blessed = outContract.confirmed ? 'confirmed' : 'PROVISIONAL'
+          const blessed = outContract.confirmed ? 'confirmed' : 'AI-QA\'d'
           lines.push(`  Output contract [${blessed}]:`)
           outContract.rules.forEach((r: any) => {
             lines.push(`    [${r.severity} · ${r.kind}] ${r.label}: ${r.rule}`)
@@ -2749,7 +2749,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set input edge on ${args.task_id}: consumes ${args.source_task_id}` +
-        (rules.length ? ` with ${rules.length} contract rule${rules.length !== 1 ? 's' : ''} (PROVISIONAL — confirm via confirm_contract)` : ' (no contract rules yet)') +
+        (rules.length ? ` with ${rules.length} contract rule${rules.length !== 1 ? 's' : ''} (AI-QA'd — QA is performed by AI, not a meat sack. confirm_contract to have a human bless it)` : ' (no contract rules yet)') +
         `. Total input edges: ${edges.length}.`
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
     }
@@ -2770,7 +2770,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (error) throw new Error(error.message)
 
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
-      return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is PROVISIONAL until confirmed by a human via confirm_contract. Consumers are derived from tasks that list this as a source.`
+      return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is AI-QA'd (QA is performed by AI, not a meat sack) until a human confirms it via confirm_contract. Consumers are derived from tasks that list this as a source.`
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
     }
 
@@ -2816,7 +2816,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           gate_rules: [],
           self_check_rules: selfRules,
           contract_status: { gate_contract: 'none', output_contract: selfBlessed ? 'confirmed' : 'provisional' },
-          ...(!selfBlessed ? { provisional_warning: 'Output contract is PROVISIONAL (not confirmed by a human). Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to bless the quality bar.' } : {}),
+          ...(!selfBlessed ? { provisional_warning: 'QA is performed by AI, not a meat sack. Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to have a human bless the quality bar.' } : {}),
           retry_info: { retry_count: selfEdgeRetry, retry_limit: 3, retries_remaining: Math.max(0, 3 - selfEdgeRetry) },
         })
       }
@@ -2891,7 +2891,7 @@ Call submit_validation_result with:
           gate_contract: gateRules.length ? (gateContractBlessed ? 'confirmed' : 'provisional') : 'none',
           output_contract: selfRules.length ? (selfContractBlessed ? 'confirmed' : 'provisional') : 'none',
         },
-        ...(isProvisional ? { provisional_warning: 'One or more contracts are PROVISIONAL (not confirmed by a human). Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to bless the quality bar.' } : {}),
+        ...(isProvisional ? { provisional_warning: 'QA is performed by AI, not a meat sack. Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to have a human bless the quality bar.' } : {}),
         retry_info: { retry_count: edgeRetry, retry_limit: 3, retries_remaining: Math.max(0, 3 - edgeRetry) },
         ...(hasJudgment ? { validator_agent_prompt: validatorPrompt } : {}),
         ...(!hasJudgment ? {
@@ -3168,7 +3168,7 @@ Call submit_validation_result with:
 
       const lines = [
         `Critique for "${task.text}"`,
-        `Status: ${critique.overall?.toUpperCase()} | Validator: ${critique.validator} | Contract: ${critique.contract_blessed ? 'confirmed' : 'PROVISIONAL'}`,
+        `Status: ${critique.overall?.toUpperCase()} | Validator: ${critique.validator} | Contract: ${critique.contract_blessed ? 'confirmed' : 'AI-QA\'d'}`,
         `At: ${critique.validated_at}`,
         '',
       ]
@@ -3213,7 +3213,7 @@ Call submit_validation_result with:
         const weakEv = ledger.filter((l: any) => l.kind === 'check' && l.evidence_quality === 'weak')
         if (weakEv.length) lines.push(`  ⚠ Weak evidence (${weakEv.length}): ${weakEv.map((l: any) => l.label).join(', ')}`)
         const unblessed = ledger.filter((l: any) => l.contract_blessed === false)
-        if (unblessed.length) lines.push(`  ⚠ Provisional contract (${unblessed.length} rule${unblessed.length !== 1 ? 's' : ''} graded against unconfirmed bar)`)
+        if (unblessed.length) lines.push(`  ⚠ AI-QA'd contract (${unblessed.length} rule${unblessed.length !== 1 ? 's' : ''} — QA is performed by AI, not a meat sack)`)
         if (ledger.length) {
           ledger.forEach((l: any) => {
             lines.push(`  ${l.status === 'pass' ? '✓' : '✗'} [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`)
@@ -3247,7 +3247,7 @@ Call submit_validation_result with:
         const weakEv = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.kind === 'check' && l.evidence_quality === 'weak') : []
         if (weakEv.length) lines.push(`⚠ Weak evidence on check rules (${weakEv.length}): ${weakEv.map((l: any) => l.label).join(', ')} — note too short to be a real run result`)
         const unblessed = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.contract_blessed === false) : []
-        if (unblessed.length) lines.push(`⚠ Provisional contract (${unblessed.length} rule${unblessed.length !== 1 ? 's' : ''} graded against unconfirmed bar) — use confirm_contract to bless the quality bar`)
+        if (unblessed.length) lines.push(`⚠ AI-QA'd contract (${unblessed.length} rule${unblessed.length !== 1 ? 's' : ''} — QA is performed by AI, not a meat sack) — use confirm_contract to have a human bless the quality bar`)
         if (Array.isArray(out.ledger) && out.ledger.length) {
           lines.push('', 'Last check (per rule):')
           out.ledger.forEach((l: any) => {
