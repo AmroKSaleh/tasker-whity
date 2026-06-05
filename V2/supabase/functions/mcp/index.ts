@@ -305,6 +305,7 @@ const ASSISTANT_DIRECTIVES = [
   'When you begin working on a task, the FIRST thing to do is set its status to in_progress. Calling get_task does this automatically; if you start work without calling get_task, set it explicitly via update_task before doing anything else. When the work is genuinely and verifiably complete, mark it done with complete_task; otherwise leave it in_progress.',
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
+  'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -958,6 +959,18 @@ const TOOLS = [
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. BPW-7)' },
       },
       required: ['task_id'],
+    },
+  },
+  {
+    name: 'build_new_flow',
+    description: 'Start building a NEW flow — a chain of contract-linked tasks toward a goal (sections/groups are just filing; the flow is the I/O chain). Call this when the user wants to create a multi-step process/flow from scratch. It does NOT build anything itself: it returns an interview playbook + the project\'s current tasks/sections (grounding). YOU then run a grill-me-style interview, propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID the flow belongs to' },
+        goal: { type: 'string', description: 'The end goal of the flow in the user\'s words (the final deliverable). Optional — if omitted, the playbook tells you to elicit it first.' },
+      },
+      required: ['project_id'],
     },
   },
 ]
@@ -2191,6 +2204,55 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       }
 
       return lines.join('\n')
+    }
+
+    case 'build_new_flow': {
+      const project = await resolveProject(sb, userId, args.project_id)
+      if (!project) return `Project "${args.project_id}" not found.`
+
+      // Project grounding (codebase-first, applied to Tasker's own data): existing
+      // sections + tasks, so the agent doesn't ask about what it can already see.
+      const [{ data: sections }, { data: tasks }] = await Promise.all([
+        sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order'),
+        sb.from('tasks').select('short_id, text, status').eq('project_id', project.id).eq('user_id', userId).order('sort_order').limit(80),
+      ])
+      const sectionList = (sections || []).map((s: any) => ({ id: s.id, name: s.name }))
+      const taskList = (tasks || []).map((t: any) => ({
+        id: project.prefix && t.short_id != null ? `${project.prefix}-${t.short_id}` : t.short_id,
+        text: t.text,
+        status: t.status,
+      }))
+
+      return JSON.stringify({
+        status: 'run_flow_interview',
+        mode: 'create',
+        goal: args.goal || null,
+        instruction: 'You are building a NEW flow with the user. Run the interview below YOURSELF using your interactive question tool (AskUserQuestion / ask_question). A flow = a chain of contract-linked tasks; sections/groups are just filing and do not define the flow. Do NOT create or wire any tasks until the user confirms the whole proposed flow at the end.',
+        grill_me_rules: [
+          'Ask ONE question at a time; each answer determines the next question.',
+          'Every question carries a recommended option, prefixed "(Recommended)", based on best practice + what you can already see.',
+          'Project-first (codebase-first): never ask what you can determine from the repo or the project_context below.',
+          'Offer multiple-choice options with a custom write-in allowed; keep it conversational.',
+        ],
+        playbook: [
+          '1. GROUND THE START: use project_context below and read the repo if relevant, then ask the user what they already have / where they are starting from. Do not ask about things you can already see.',
+          '2. PIN THE GOAL' + (args.goal ? ` (stated: "${args.goal}")` : '') + ': confirm the end goal and treat it as the FINAL task\'s output contract.',
+          '3. FORWARD-DECOMPOSE one step at a time toward the goal, recommending a path each time, building the ordered chain of tasks.',
+          '4. AUTHOR A CONTRACT PER HANDOFF: for each task propose an output contract (its definition-of-done) and the next task\'s input contract (its acceptance criteria) as structured, CONTEXT-FREE rules — describe the shape of acceptable output, never this run\'s subject. Only make a step its own task if it produces a distinct, checkable output a later step depends on (a contract-worthy handoff); otherwise it is a sub-detail of a task, not its own task.',
+          '5. PRESENT THE WHOLE PROPOSED FLOW (tasks + dependency edges + contracts) and ask for ONE confirmation.',
+          '6. ON CONFIRM, PERSIST (see persistence).',
+        ],
+        persistence: {
+          when: 'ONLY after the user confirms the whole flow.',
+          steps: [
+            'create_task for each step (pass section_id from project_context if it belongs in an existing section).',
+            'set_task_output(task_id, contract) on each producing task — its definition-of-done.',
+            'set_task_input(task_id, source_task_id, contract) on each consuming task — call once per upstream source (fan-in supported). The input contract is the consumer\'s acceptance criteria for that incoming artifact.',
+            'Finally call get_flow_order to show the user the ordered flow you built.',
+          ],
+        },
+        project_context: { sections: sectionList, tasks: taskList },
+      })
     }
 
     case 'set_task_input': {
