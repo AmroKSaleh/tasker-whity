@@ -197,14 +197,92 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
       .select('id').eq('user_id', userId).eq('prefix', prefix).maybeSingle()
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, input').eq('project_id', project.id).eq('short_id', shortId).maybeSingle()
+        .select('id, text, input, output, status, short_id').eq('project_id', project.id).eq('short_id', shortId).maybeSingle()
       if (task) return task
     }
   }
   // Fall back to UUID
   const { data } = await sb.from('tasks')
-    .select('id, text, input').eq('id', taskRef).eq('user_id', userId).maybeSingle()
+    .select('id, text, input, output, status, short_id').eq('id', taskRef).eq('user_id', userId).maybeSingle()
   return data ?? null
+}
+
+// ── Flow I/O helpers (contract layer — TDE-137) ───────────────
+// A flow is a connected component of the project-wide I/O graph. Edges are
+// authoritative on the INPUT side. The `input` field is read through here so
+// BOTH the legacy single-source shape and the new edge-list shape work.
+//
+//   new input:  { edges: [ { source_task_id, expected_type?, contract: { rules: Rule[] } } ] }
+//   legacy:     { source_task_id, expected_type, validation_rules }
+//   Rule:       { id, label, rule, description?, kind: 'check'|'judgment', severity: 'blocker'|'warning' }
+//
+// Each input edge carries the CONSUMER's acceptance criteria for that one
+// incoming artifact (fan-in = multiple edges). `output` holds the producer's
+// single definition-of-done contract plus the validation ledger.
+function inputEdges(input: any): Array<{ source_task_id: string, expected_type?: string, contract: { rules: any[] } }> {
+  if (!input) return []
+  if (Array.isArray(input.edges)) {
+    return input.edges.filter((e: any) => e && e.source_task_id)
+  }
+  if (input.source_task_id) {
+    // Legacy single-source shape → one edge; fold validation_rules into a judgment rule.
+    const rules = input.validation_rules
+      ? [{ id: 'legacy', label: 'Validation rules', rule: input.validation_rules, kind: 'judgment', severity: 'blocker' }]
+      : []
+    return [{ source_task_id: input.source_task_id, expected_type: input.expected_type, contract: { rules } }]
+  }
+  return []
+}
+
+// All upstream source task IDs this task consumes from (the tasks that block it).
+function inputSourceIds(input: any): string[] {
+  return inputEdges(input).map(e => e.source_task_id)
+}
+
+// The producer's output contract ({ rules: [] } if none set).
+function outputContract(output: any): { rules: any[] } {
+  if (output?.contract?.rules) return output.contract
+  return { rules: [] }
+}
+
+// Normalize a single authored rule into the canonical shape (defaults + a stable id).
+function normalizeRule(r: any, i: number): any {
+  return {
+    id: r.id || `r${i + 1}`,
+    label: r.label || r.rule?.toString().slice(0, 40) || `Rule ${i + 1}`,
+    rule: r.rule,
+    description: r.description || null,
+    kind: r.kind === 'check' ? 'check' : 'judgment',
+    severity: r.severity === 'warning' ? 'warning' : 'blocker',
+  }
+}
+
+// Upstream source tasks NOT yet done (the blockers for a fan-in task). Reads both I/O shapes.
+async function unmetSources(sb: any, input: any): Promise<Array<{ id: string, text: string, status: string }>> {
+  const ids = inputSourceIds(input)
+  if (!ids.length) return []
+  const { data } = await sb.from('tasks').select('id, text, status').in('id', ids)
+  return (data || []).filter((t: any) => t.status !== 'done')
+}
+
+// Build the standard "flow blocked, ask the user" response from a list of unmet upstream tasks.
+function flowBlockedResponse(unmet: Array<{ text: string, status: string }>): string {
+  const names = unmet.map(s => `"${s.text}"`).join(', ')
+  const first = unmet[0]
+  const single = unmet.length === 1
+  return JSON.stringify({
+    status: 'flow_blocked',
+    action_required: 'ASK_USER',
+    instruction: 'Do NOT proceed silently. Present this to the user as a dialog using the AskUserQuestion tool (a clickable prompt, like a permission request). Show the two options below and wait for their choice. If they choose to override, retry this same tool call with proceed_anyway: true.',
+    message: `This task is part of a flow that requires ${names} to be complete first.`,
+    question: single
+      ? `"${first.text}" isn't done yet (${first.status}). How do you want to proceed?`
+      : `${unmet.length} upstream tasks aren't done yet (${names}). How do you want to proceed?`,
+    options: [
+      { label: single ? `Complete "${first.text}" first` : `Complete the ${unmet.length} upstream tasks first`, recommended: true },
+      { label: 'Start anyway (override)', proceed_anyway: true },
+    ],
+  })
 }
 
 async function getOrCreateBacklog(sb: any, projectId: string): Promise<string> {
@@ -228,6 +306,27 @@ const ASSISTANT_DIRECTIVES = [
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
 ]
+
+// ── Shared schema: a single contract rule (TDE-137) ──────────
+const RULE_SCHEMA = {
+  type: 'object',
+  description: 'One quality-bar rule. Author these by discussing with the user, then have them confirm.',
+  properties: {
+    id: { type: 'string', description: 'Optional stable id; auto-assigned if omitted.' },
+    label: { type: 'string', description: 'Short human name (e.g. "Cites enough sources").' },
+    rule: { type: 'string', description: 'The rule itself — the assertion checked. For kind=judgment, a precise NL criterion. For kind=check, the check spec (e.g. "min_length: 500", "command: npm test exits 0").' },
+    description: { type: 'string', description: 'Optional context: why it matters / how to satisfy. Not itself a pass/fail target.' },
+    kind: { type: 'string', enum: ['check', 'judgment'], description: 'check = deterministic (counts, patterns, commands); judgment = semantic judgment by you, the agent.' },
+    severity: { type: 'string', enum: ['blocker', 'warning'], description: 'blocker fail reopens the producing task; warning fail is recorded but does not block. Default blocker.' },
+  },
+  required: ['rule'],
+}
+const CONTRACT_SCHEMA = {
+  type: 'object',
+  description: 'A quality contract: an ordered list of rules the artifact must satisfy. Context-free / portable — describe the SHAPE of acceptable output, never this run\'s subject.',
+  properties: { rules: { type: 'array', items: RULE_SCHEMA } },
+  required: ['rules'],
+}
 
 // ── Tool definitions ─────────────────────────────────────────
 const TOOLS = [
@@ -765,44 +864,71 @@ const TOOLS = [
   },
   {
     name: 'set_task_input',
-    description: 'Set what input a task expects (source task, expected type, validation rules).',
+    description: 'Declare an INPUT EDGE: this task consumes the output of `source_task_id`, and `contract` is the acceptance criteria that upstream output must meet for THIS task to use it (the consumer\'s bar). Call once per upstream source to support fan-in — a task can require multiple inputs (e.g. a draft needing both an outline and research). Upserts the edge for that source by default.',
     inputSchema: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
-        source_task_id: { type: 'string', description: 'Task that produces the input' },
-        expected_type: { type: 'string', enum: ['string', 'document', 'code', 'decision', 'other'], description: 'Expected input type' },
-        validation_rules: { type: 'string', description: 'Validation rules or criteria (optional)' },
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31) — the CONSUMER' },
+        source_task_id: { type: 'string', description: 'Upstream task whose output this task consumes (the producer for this edge)' },
+        contract: CONTRACT_SCHEMA,
+        expected_type: { type: 'string', enum: ['string', 'document', 'code', 'decision', 'other'], description: 'Optional coarse type hint for this input' },
+        replace: { type: 'boolean', description: 'If true, replace ALL input edges with just this one. Default false (upsert only this source\'s edge).' },
       },
-      required: ['task_id', 'source_task_id', 'expected_type'],
+      required: ['task_id', 'source_task_id'],
     },
   },
   {
     name: 'set_task_output',
-    description: 'Set where a task\'s output goes (target task that depends on this task\'s output).',
+    description: 'Set this task\'s OUTPUT CONTRACT — the producer\'s single definition-of-done for the one artifact it produces. Consumers are derived (any task that lists this one as a source), so no target is needed. Keep the contract context-free / portable.',
     inputSchema: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
-        target_task_id: { type: 'string', description: 'Task that consumes this task\'s output' },
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31) — the PRODUCER' },
+        contract: CONTRACT_SCHEMA,
       },
-      required: ['task_id', 'target_task_id'],
+      required: ['task_id', 'contract'],
     },
   },
   {
     name: 'validate_output',
-    description: 'Validate if a task\'s output meets the target task\'s expectations.',
+    description: 'PHASE 1 of a handoff check. Returns the rules to evaluate — the CONSUMER\'s input contract for this edge (the gate) plus the producer\'s own output contract (self-check) — with an instruction for YOU (the agent) to evaluate each rule against the actual produced output, then report results via submit_validation_result. Tasker does NOT run the checks; you do. Does not itself return a verdict.',
     inputSchema: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31) whose output to validate' },
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31) — the PRODUCER whose output to validate' },
+        target_task_id: { type: 'string', description: 'Optional: which CONSUMER edge to validate against. Required only if the producer feeds more than one task.' },
       },
       required: ['task_id'],
     },
   },
   {
+    name: 'submit_validation_result',
+    description: 'PHASE 2 of a handoff check. After evaluating the rules returned by validate_output, report per-rule results here. Tasker writes them to the producer\'s feedback ledger, applies the gate (any BLOCKER gate-rule failure → invalid, reopens the producer), and returns the verdict. Warnings are recorded but do not block.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID — the PRODUCER (same as validate_output)' },
+        target_task_id: { type: 'string', description: 'Optional: the CONSUMER edge validated against (required only if the producer feeds more than one task)' },
+        results: {
+          type: 'array',
+          description: 'Per-rule results from your evaluation.',
+          items: {
+            type: 'object',
+            properties: {
+              rule_id: { type: 'string', description: 'id of the rule (from validate_output\'s output)' },
+              status: { type: 'string', enum: ['pass', 'fail'], description: 'Did the output meet this rule?' },
+              note: { type: 'string', description: 'Brief evidence/reason — especially for failures.' },
+            },
+            required: ['rule_id', 'status'],
+          },
+        },
+      },
+      required: ['task_id', 'results'],
+    },
+  },
+  {
     name: 'get_validation_feedback',
-    description: 'Get validation feedback for a task (what went wrong, what to fix).',
+    description: 'Get the latest validation feedback for a task: its overall status and the per-rule ledger (what failed and why) from the last handoff check.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1064,25 +1190,10 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const task = await resolveTask(sb, userId, task_id)
       if (!task) return 'Task not found.'
 
-      // Check for unmet flow step when starting work
+      // Check for unmet flow step when starting work (fan-in: all sources must be done)
       if ((patch.status === 'in_progress' || patch.status === 'done') && task.input && !proceed_anyway) {
-        const sourceTaskId = task.input.source_task_id
-        if (sourceTaskId) {
-          const { data: sourceTask } = await sb.from('tasks').select('text, status').eq('id', sourceTaskId).maybeSingle()
-          if (sourceTask && sourceTask.status !== 'done') {
-            return JSON.stringify({
-              status: 'flow_blocked',
-              action_required: 'ASK_USER',
-              instruction: 'Do NOT proceed silently. Present this to the user as a dialog using the AskUserQuestion tool (a clickable prompt, like a permission request). Show the two options below and wait for their choice. If they choose to override, retry this same tool call with proceed_anyway: true.',
-              message: `This task is part of a flow that requires "${sourceTask.text}" to be complete first (currently: ${sourceTask.status}).`,
-              question: `"${sourceTask.text}" isn't done yet. How do you want to proceed?`,
-              options: [
-                { label: `Complete "${sourceTask.text}" first`, recommended: true },
-                { label: 'Start anyway (override)', proceed_anyway: true },
-              ],
-            })
-          }
-        }
+        const unmet = await unmetSources(sb, task.input)
+        if (unmet.length) return flowBlockedResponse(unmet)
       }
 
       if (patch.status === 'done') {
@@ -1111,25 +1222,10 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return 'Task not found.'
 
-      // Check for unmet flow step
+      // Check for unmet flow step (fan-in: all sources must be done)
       if (task.input && !proceed_anyway) {
-        const sourceTaskId = task.input.source_task_id
-        if (sourceTaskId) {
-          const { data: sourceTask } = await sb.from('tasks').select('text, status').eq('id', sourceTaskId).maybeSingle()
-          if (sourceTask && sourceTask.status !== 'done') {
-            return JSON.stringify({
-              status: 'flow_blocked',
-              action_required: 'ASK_USER',
-              instruction: 'Do NOT proceed silently. Present this to the user as a dialog using the AskUserQuestion tool (a clickable prompt, like a permission request). Show the two options below and wait for their choice. If they choose to override, retry this same tool call with proceed_anyway: true.',
-              message: `This task is part of a flow that requires "${sourceTask.text}" to be complete first (currently: ${sourceTask.status}).`,
-              question: `"${sourceTask.text}" isn't done yet. How do you want to proceed?`,
-              options: [
-                { label: `Complete "${sourceTask.text}" first`, recommended: true },
-                { label: 'Start anyway (override)', proceed_anyway: true },
-              ],
-            })
-          }
-        }
+        const unmet = await unmetSources(sb, task.input)
+        if (unmet.length) return flowBlockedResponse(unmet)
       }
 
       await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString() }).eq('id', task.id)
@@ -1188,13 +1284,15 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       // BUT: if the task has an unmet flow dependency (its source isn't done), do NOT
       // flip silently — surface a warning so the agent can confirm with the user first.
       let justStarted = false
-      let flowWarning: { text: string, status: string } | null = null
+      let flowWarning: { names: string, first: string, status: string, count: number } | null = null
       if (full.status === 'pending' && !args.peek) {
-        const sourceTaskId = full.input?.source_task_id
-        if (sourceTaskId) {
-          const { data: sourceTask } = await sb.from('tasks').select('text, status').eq('id', sourceTaskId).maybeSingle()
-          if (sourceTask && sourceTask.status !== 'done') {
-            flowWarning = { text: sourceTask.text, status: sourceTask.status }
+        const unmet = await unmetSources(sb, full.input)
+        if (unmet.length) {
+          flowWarning = {
+            names: unmet.map((u: any) => `"${u.text}"`).join(', '),
+            first: unmet[0].text,
+            status: unmet[0].status,
+            count: unmet.length,
           }
         }
         if (!flowWarning) {
@@ -1243,7 +1341,10 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       // Workflow directive
       lines.push('\n---')
       if (flowWarning) {
-        lines.push(`⚠️ FLOW DEPENDENCY — NOT STARTED: This task depends on "${flowWarning.text}", which is not done yet (currently: ${flowWarning.status}). Its status was left as pending. Do NOT proceed silently — present this to the user via your interactive question tool (AskUserQuestion in Claude Code, AskQuestion in Cursor, or the equivalent): option 1 (recommended) complete "${flowWarning.text}" first; option 2 start anyway. If they choose start-anyway, set this task to in_progress by calling update_task with proceed_anyway: true.`)
+        const dep = flowWarning.count === 1
+          ? `"${flowWarning.first}", which is not done yet (currently: ${flowWarning.status})`
+          : `${flowWarning.count} upstream tasks that are not done yet (${flowWarning.names})`
+        lines.push(`⚠️ FLOW DEPENDENCY — NOT STARTED: This task depends on ${dep}. Its status was left as pending. Do NOT proceed silently — present this to the user via your interactive question tool (AskUserQuestion in Claude Code, AskQuestion in Cursor, or the equivalent): option 1 (recommended) complete the upstream task(s) first; option 2 start anyway. If they choose start-anyway, set this task to in_progress by calling update_task with proceed_anyway: true.`)
       } else if (justStarted) {
         lines.push('▶ Status auto-set to in_progress — you are now working on this task.')
       }
@@ -1950,13 +2051,14 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       const taskById = new Map(tasks.map((t: any) => [t.id, t]))
 
-      // Build undirected adjacency for connected-component detection
+      // Build undirected adjacency for connected-component detection (fan-in: many sources per task)
       const adj = new Map(tasks.map((t: any) => [t.id, new Set<string>()]))
       tasks.forEach((t: any) => {
-        const src = t.input?.source_task_id
-        if (src && adj.has(src)) {
-          adj.get(t.id)!.add(src)
-          adj.get(src)!.add(t.id)
+        for (const src of inputSourceIds(t.input)) {
+          if (adj.has(src)) {
+            adj.get(t.id)!.add(src)
+            adj.get(src)!.add(t.id)
+          }
         }
       })
 
@@ -1997,8 +2099,8 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           if (depths.has(id)) return depths.get(id)!
           if (stack.has(id)) return 0
           stack.add(id)
-          const src = taskById.get(id)?.input?.source_task_id
-          const d = src && taskById.has(src) ? depth(src, stack) + 1 : 0
+          const srcs = inputSourceIds(taskById.get(id)?.input).filter((s: string) => taskById.has(s))
+          const d = srcs.length ? Math.max(...srcs.map((s: string) => depth(s, stack) + 1)) : 0
           depths.set(id, d)
           return d
         }
@@ -2022,9 +2124,9 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           lines.push(`### Flow ${fi + 1}: "${sorted[0]?.text?.split(' ').slice(0, 5).join(' ')}${sorted[0]?.text?.split(' ').length > 5 ? '…' : ''}"`)
         }
         sorted.forEach((task: any, i: number) => {
-          const dep = task.input?.source_task_id
-            ? (() => { const src = taskById.get(task.input.source_task_id); return src ? ` ← ${taskLabel(src)}` : '' })()
-            : ''
+          const srcLabels = inputSourceIds(task.input)
+            .map((sid: string) => taskById.get(sid)).filter(Boolean).map((s: any) => taskLabel(s))
+          const dep = srcLabels.length ? ` ← ${srcLabels.join(', ')}` : ''
           const prio = task.priority ? ` [${task.priority}]` : ''
           lines.push(`Step ${i + 1}  ${statusIcon(task.status)}  ${taskLabel(task)} — ${task.text}${prio}${dep}`)
         })
@@ -2049,18 +2151,20 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const statusIcon = (s: string) => s === 'done' ? '✓' : s === 'in_progress' ? '▶' : '○'
       const taskLine = (t: any) => `  ${statusIcon(t.status)}  ${taskRef(t)} — ${t.text}${t.priority ? ` [${t.priority}]` : ''}`
 
-      // Task this one directly requires (its source)
-      const sourceId = full.input?.source_task_id
-      const { data: requires } = sourceId
-        ? await sb.from('tasks').select('id, text, status, priority, short_id').eq('id', sourceId).eq('user_id', userId).maybeSingle()
-        : { data: null }
+      // Tasks this one directly requires (ALL its input sources — fan-in)
+      const sourceIds = inputSourceIds(full.input)
+      const { data: requiresList } = sourceIds.length
+        ? await sb.from('tasks').select('id, text, status, priority, short_id').in('id', sourceIds).eq('user_id', userId)
+        : { data: [] }
 
-      // Tasks that directly depend on this one (they list this task as their source)
-      const { data: blocks } = await sb.from('tasks')
-        .select('id, text, status, priority, short_id')
-        .eq('user_id', userId)
-        .eq('project_id', full.project_id)
-        .contains('input', { source_task_id: full.id })
+      // Tasks that directly depend on this one (they list this task as a source — both data shapes)
+      const [{ data: b1 }, { data: b2 }] = await Promise.all([
+        sb.from('tasks').select('id, text, status, priority, short_id').eq('user_id', userId).eq('project_id', full.project_id).contains('input', { source_task_id: full.id }),
+        sb.from('tasks').select('id, text, status, priority, short_id').eq('user_id', userId).eq('project_id', full.project_id).contains('input', { edges: [{ source_task_id: full.id }] }),
+      ])
+      const blocksMap = new Map<string, any>()
+      ;[...(b1 || []), ...(b2 || [])].forEach((t: any) => blocksMap.set(t.id, t))
+      const blocks = [...blocksMap.values()]
 
       const lines: string[] = [
         `# ${taskRef(full)} — ${full.text}`,
@@ -2068,9 +2172,9 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         ``,
       ]
 
-      if (requires) {
+      if (requiresList && requiresList.length) {
         lines.push(`## Requires (blocks this task until done)`)
-        lines.push(taskLine(requires))
+        requiresList.forEach((r: any) => lines.push(taskLine(r)))
         lines.push(``)
       } else {
         lines.push(`## Requires`)
@@ -2092,101 +2196,202 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     case 'set_task_input': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
+      const source = await resolveTask(sb, userId, args.source_task_id)
+      if (!source) return `Source task "${args.source_task_id}" not found.`
+      if (source.id === task.id) return `A task cannot be its own input source.`
 
-      const input = {
-        source_task_id: args.source_task_id,
-        expected_type: args.expected_type,
-        validation_rules: args.validation_rules || null,
+      const rules = (args.contract?.rules || []).map(normalizeRule)
+      const edge = {
+        source_task_id: source.id,
+        expected_type: args.expected_type || null,
+        contract: { rules },
       }
 
-      const { error } = await sb.from('tasks').update({ input }).eq('id', task.id)
+      // Upsert this source's edge (replace=true wipes all others). Supports fan-in.
+      let edges = args.replace ? [] : inputEdges(task.input)
+      edges = edges.filter((e: any) => e.source_task_id !== source.id && e.source_task_id !== args.source_task_id)
+      edges.push(edge)
+
+      const { error } = await sb.from('tasks').update({ input: { edges } }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
-      const shortId = task.prefix ? `${task.prefix}-${task.short_id}` : task.id
-      return `Set input for ${shortId}: expects ${args.expected_type} from ${args.source_task_id}`
+      return `Set input edge on ${args.task_id}: consumes ${args.source_task_id}` +
+        (rules.length ? ` with ${rules.length} contract rule${rules.length !== 1 ? 's' : ''}` : ' (no contract rules yet)') +
+        `. Total input edges: ${edges.length}.`
     }
 
     case 'set_task_output': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
 
-      const targetTask = await resolveTask(sb, userId, args.target_task_id)
-      if (!targetTask) return `Target task "${args.target_task_id}" not found.`
-
+      const rules = (args.contract?.rules || []).map(normalizeRule)
+      const prev = (task.output && typeof task.output === 'object') ? task.output : {}
       const output = {
-        target_task_id: args.target_task_id,
-        validation_status: 'pending',
-        feedback: null,
+        ...prev,
+        contract: { rules },
+        validation_status: prev.validation_status || 'pending',
       }
 
       const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
-      const shortId = task.prefix ? `${task.prefix}-${task.short_id}` : task.id
-      const targetShortId = targetTask.prefix ? `${targetTask.prefix}-${targetTask.short_id}` : targetTask.id
-      return `Set output for ${shortId}: goes to ${targetShortId}`
+      return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Consumers are derived from tasks that list this as a source.`
     }
 
     case 'validate_output': {
-      const task = await resolveTask(sb, userId, args.task_id)
-      if (!task) return `Task "${args.task_id}" not found.`
+      const producer = await resolveTask(sb, userId, args.task_id)
+      if (!producer) return `Task "${args.task_id}" not found.`
 
-      if (!task.output || !task.output.target_task_id) {
-        return `Task has no output target set. Use set_task_output first.`
+      // Consumers = tasks that list this producer as an input source (both data shapes).
+      const [{ data: c1 }, { data: c2 }] = await Promise.all([
+        sb.from('tasks').select('id, text, input, status').eq('user_id', userId).contains('input', { source_task_id: producer.id }),
+        sb.from('tasks').select('id, text, input, status').eq('user_id', userId).contains('input', { edges: [{ source_task_id: producer.id }] }),
+      ])
+      const consumerMap = new Map<string, any>()
+      ;[...(c1 || []), ...(c2 || [])].forEach((t: any) => consumerMap.set(t.id, t))
+      const consumers = [...consumerMap.values()]
+      const selfRules = outputContract(producer.output).rules
+
+      if (!consumers.length) {
+        if (!selfRules.length) return `"${producer.text}" has no downstream consumer and no output contract — nothing to validate. Add a definition-of-done with set_task_output, or set_task_input on a downstream task.`
+        return JSON.stringify({
+          status: 'needs_agent_validation',
+          instruction: 'Endpoint task (no downstream consumer). Evaluate the producer\'s own output contract (self-check) against the actual produced output, then call submit_validation_result with the per-rule results.',
+          producer: producer.text,
+          target: null,
+          gate_rules: [],
+          self_check_rules: selfRules,
+        })
       }
 
-      const targetTask = await resolveTask(sb, userId, task.output.target_task_id)
-      if (!targetTask) return `Target task not found.`
-
-      if (!targetTask.input) {
-        return `Target task has no input expectations set.`
+      let consumer: any
+      if (args.target_task_id) {
+        const t = await resolveTask(sb, userId, args.target_task_id)
+        consumer = t && consumerMap.get(t.id)
+        if (!consumer) return `"${args.target_task_id}" is not a consumer of "${producer.text}". Consumers: ${consumers.map((c: any) => c.text).join(', ')}.`
+      } else if (consumers.length === 1) {
+        consumer = consumers[0]
+      } else {
+        return JSON.stringify({
+          status: 'ambiguous_target',
+          message: `"${producer.text}" feeds ${consumers.length} tasks. Re-call with target_task_id to pick which handoff to validate.`,
+          consumers: consumers.map((c: any) => ({ id: c.id, text: c.text })),
+        })
       }
 
-      // Simple validation: check if task status is done and type matches
-      if (task.status !== 'done') {
-        const feedback = `Task is not complete. Status: ${task.status}. Complete the task before validation.`
-        await sb.from('tasks').update({
-          output: { ...task.output, validation_status: 'invalid', feedback },
-        }).eq('id', task.id)
-        return JSON.stringify({ status: 'invalid', feedback })
+      const edge = inputEdges(consumer.input).find((e: any) => e.source_task_id === producer.id)
+      const gateRules = edge?.contract?.rules || []
+
+      return JSON.stringify({
+        status: 'needs_agent_validation',
+        instruction: 'Tasker does NOT run these checks — you do. For each rule: kind=check → run the deterministic check (count/pattern/command) against the actual produced output; kind=judgment → judge it semantically. Then call submit_validation_result with task_id (this producer), target_task_id (this consumer), and a {rule_id, status, note} for EVERY rule below. The gate is the consumer\'s acceptance criteria — a blocker failure there reopens the producer.',
+        producer: producer.text,
+        target: consumer.text,
+        target_task_id: consumer.id,
+        gate_rules: gateRules,
+        self_check_rules: selfRules,
+      })
+    }
+
+    case 'submit_validation_result': {
+      const producer = await resolveTask(sb, userId, args.task_id)
+      if (!producer) return `Task "${args.task_id}" not found.`
+      const results = Array.isArray(args.results) ? args.results : []
+
+      // Resolve the consumer edge (to know which rules are gating vs self-check).
+      let consumer: any = null
+      let gateRules: any[] = []
+      let targetText: string | null = null
+      let targetId: string | null = null
+      if (args.target_task_id) {
+        consumer = await resolveTask(sb, userId, args.target_task_id)
+      } else {
+        const [{ data: c1 }, { data: c2 }] = await Promise.all([
+          sb.from('tasks').select('id, text, input').eq('user_id', userId).contains('input', { source_task_id: producer.id }),
+          sb.from('tasks').select('id, text, input').eq('user_id', userId).contains('input', { edges: [{ source_task_id: producer.id }] }),
+        ])
+        const m = new Map<string, any>()
+        ;[...(c1 || []), ...(c2 || [])].forEach((t: any) => m.set(t.id, t))
+        const cs = [...m.values()]
+        if (cs.length === 1) consumer = cs[0]
+      }
+      if (consumer) {
+        const edge = inputEdges(consumer.input).find((e: any) => e.source_task_id === producer.id)
+        gateRules = edge?.contract?.rules || []
+        targetText = consumer.text
+        targetId = consumer.id
       }
 
-      // Type validation: expect that task has content/output
-      const expectedType = targetTask.input.expected_type
-      let isValid = true
-      let feedback = ''
+      const gateRuleIds = new Set(gateRules.map((r: any) => r.id))
+      const selfRules = outputContract(producer.output).rules
+      const ruleById = new Map<string, any>()
+      ;[...gateRules, ...selfRules].forEach((r: any) => ruleById.set(r.id, r))
 
-      if (expectedType === 'code' && !task.detail?.toLowerCase().includes('code')) {
-        isValid = false
-        feedback = `Expected code output. Task detail: ${task.detail?.substring(0, 100) || 'empty'}`
-      } else if (expectedType === 'document' && task.detail?.length < 50) {
-        isValid = false
-        feedback = `Expected substantial document output. Got: ${task.detail?.length || 0} chars`
-      } else if (expectedType === 'decision' && !task.detail) {
-        isValid = false
-        feedback = `Expected decision output in task detail field`
-      }
+      const checkedAt = new Date().toISOString()
+      const ledger = results.map((res: any) => {
+        const rule = ruleById.get(res.rule_id)
+        const isGate = gateRuleIds.has(res.rule_id)
+        return {
+          rule_id: res.rule_id,
+          label: rule?.label || res.rule_id,
+          source: isGate ? 'input' : 'output', // input = consumer gate; output = producer self-check
+          severity: rule?.severity || 'blocker',
+          status: res.status === 'pass' ? 'pass' : 'fail',
+          note: res.note || null,
+          checked_at: checkedAt,
+        }
+      })
 
-      const validationStatus = isValid ? 'valid' : 'invalid'
-      if (!feedback) feedback = isValid ? 'Output meets expectations' : 'Output validation failed'
+      const blockingFails = ledger.filter((l: any) => l.source === 'input' && l.status === 'fail' && l.severity === 'blocker')
+      const selfFails = ledger.filter((l: any) => l.source === 'output' && l.status === 'fail' && l.severity === 'blocker')
+      const warnings = ledger.filter((l: any) => l.status === 'fail' && l.severity === 'warning')
+      const valid = blockingFails.length === 0
+      const validationStatus = valid ? 'valid' : 'invalid'
 
+      const prevOutput = (producer.output && typeof producer.output === 'object') ? producer.output : {}
       await sb.from('tasks').update({
-        output: { ...task.output, validation_status: validationStatus, feedback },
-      }).eq('id', task.id)
+        output: { ...prevOutput, validation_status: validationStatus, validated_against: targetId, validated_at: checkedAt, ledger },
+      }).eq('id', producer.id)
 
-      return JSON.stringify({ status: validationStatus, feedback })
+      // Reopen the producer on failure so work resumes (no silent premature completion).
+      let reopened = false
+      if (!valid && producer.status === 'done') {
+        await sb.from('tasks').update({ status: 'in_progress', completed_at: null }).eq('id', producer.id)
+        reopened = true
+      }
+
+      const fmt = (l: any) => `  ${l.status === 'pass' ? '✓' : '✗'} [${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`
+      return JSON.stringify({
+        status: validationStatus,
+        producer: producer.text,
+        target: targetText,
+        gate_failures: blockingFails.map(fmt),
+        self_check_failures: selfFails.map(fmt),
+        warnings: warnings.map(fmt),
+        producer_reopened: reopened,
+        summary: valid
+          ? `Output passed the gate${warnings.length ? ` (${warnings.length} warning(s) noted)` : ''}.${targetText ? ` "${targetText}" can proceed.` : ''}`
+          : `Output REJECTED by ${targetText ? `"${targetText}"'s` : 'the'} acceptance criteria — ${blockingFails.length} blocker(s).${reopened ? ' Producer reopened (in_progress).' : ''} Fix and re-validate.`,
+      })
     }
 
     case 'get_validation_feedback': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
+      const out: any = task.output
+      if (!out || (!out.ledger && !out.validation_status && !out.feedback)) return `No validation has been run on "${task.text}" yet.`
 
-      if (!task.input) return `Task has no input expectations set. Nothing to validate.`
-
-      const feedback = task.input.feedback || 'No feedback yet'
-      const status = task.input.validation_status || 'pending'
-
-      return `Validation Status: ${status}\nFeedback: ${feedback}`
+      const status = out.validation_status || 'pending'
+      const lines = [`Validation status: ${status}`]
+      if (Array.isArray(out.ledger) && out.ledger.length) {
+        lines.push('', 'Last check (per rule):')
+        out.ledger.forEach((l: any) => {
+          lines.push(`  ${l.status === 'pass' ? '✓' : '✗'} [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`)
+        })
+      } else if (out.feedback) {
+        lines.push(`Feedback: ${out.feedback}`) // legacy shape
+      }
+      return lines.join('\n')
     }
 
     default:
