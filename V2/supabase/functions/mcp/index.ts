@@ -307,7 +307,7 @@ const ASSISTANT_DIRECTIVES = [
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and use AskUserQuestion to present the failures to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
-  'VALIDATION INDEPENDENCE: You have a conflict of interest when grading your own work. For kind=judgment rules you MUST declare the validator. Preferred path: spawn a fresh Claude subagent (claude -p "Grade this output against these rules: [rules]. Artifact: [artifact]") and pass validator="independent-subagent". Acceptable path: use AskUserQuestion to show the human the artifact + judgment rules and let them decide — pass validator="human". Last resort only: self-grade and pass validator="self". For kind=check rules (deterministic counts/commands) self-evaluation is fine — no independence requirement. Never omit the validator field when judgment rules are present.',
+  'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When validate_output returns judgment rules, use the Agent tool to spawn an independent validator subagent: copy the validator_agent_prompt from the response, replace the [ARTIFACT] placeholder with the actual produced content, and pass the whole thing as the agent prompt. The subagent has no memory of the work, grades fresh, and calls submit_validation_result itself with validator="independent-subagent". You do NOT grade judgment rules yourself. For kind=check rules (deterministic counts/commands/patterns) you may self-evaluate — no independence needed there. Pass validator="human" only if a human explicitly reviewed instead of a subagent.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -2349,16 +2349,45 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const gateRules = edge?.contract?.rules || []
 
       const hasJudgment = gateRules.some((r: any) => r.kind === 'judgment')
+      const allRuleIds = [...gateRules, ...selfRules].map((r: any) => r.id).join(', ')
+      const rulesBlock = [...gateRules, ...selfRules].map((r: any) =>
+        `[${r.id}] ${r.label} (${r.kind}, ${r.severity}${r.source !== undefined ? '' : ''})\nRule: ${r.rule}${r.description ? `\nContext: ${r.description}` : ''}`
+      ).join('\n\n')
+      const validatorPrompt = `You are an independent quality validator for a Tasker flow. You have no prior context on how this artifact was produced — grade it strictly based only on what you see below.
+
+PRODUCER: ${producer.text} (task_id: ${producer.id})
+CONSUMER: ${consumer.text} (target_task_id: ${consumer.id})
+
+── ARTIFACT ─────────────────────────────────────────────────
+[PASTE THE PRODUCED ARTIFACT HERE before spawning — replace this entire line with the actual content]
+─────────────────────────────────────────────────────────────
+
+── RULES ────────────────────────────────────────────────────
+${rulesBlock}
+─────────────────────────────────────────────────────────────
+
+For kind=check rules: evaluate deterministically (count words/lines, check patterns, run commands).
+For kind=judgment rules: assess semantically from the artifact alone — no benefit of the doubt.
+If uncertain on any rule: default to FAIL.
+
+Call submit_validation_result with:
+  task_id: "${producer.id}"
+  target_task_id: "${consumer.id}"
+  validator: "independent-subagent"
+  results: one {rule_id, status, note} per rule — you must cover all rule IDs: ${allRuleIds}`
+
       return JSON.stringify({
         status: 'needs_agent_validation',
-        instruction: 'Tasker does NOT run these checks — you do. For each rule: kind=check → run the deterministic check (count/pattern/command) against the actual produced output; kind=judgment → judge it semantically. Then call submit_validation_result with task_id (this producer), target_task_id (this consumer), and a {rule_id, status, note} for EVERY rule below. The gate is the consumer\'s acceptance criteria — a blocker failure there reopens the producer.',
+        instruction: hasJudgment
+          ? 'This gate has kind=judgment rules. Spawn a validator subagent using the Agent tool: copy validator_agent_prompt, replace [ARTIFACT] with the produced content, pass as the agent prompt. The subagent grades and calls submit_validation_result independently. You handle kind=check rules yourself, the subagent handles everything.'
+          : 'All rules are kind=check (deterministic). Evaluate each against the actual produced output, then call submit_validation_result with your per-rule results.',
         producer: producer.text,
         target: consumer.text,
         target_task_id: consumer.id,
         gate_rules: gateRules,
         self_check_rules: selfRules,
         retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
-        ...(hasJudgment ? { independence_warning: 'This gate contains kind=judgment rules. You have a conflict of interest grading your own work. Preferred: spawn a fresh subagent (claude -p) with the artifact + rules and pass validator="independent-subagent". Acceptable: use AskUserQuestion for human verdict, pass validator="human". Last resort: pass validator="self" to disclose the conflict.' } : {}),
+        ...(hasJudgment ? { validator_agent_prompt: validatorPrompt } : {}),
       })
     }
 
