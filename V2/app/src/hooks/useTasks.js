@@ -124,6 +124,13 @@ export function useTasks(projectId) {
         else fetchAll()
       })
       .on('postgres_changes', { event: '*', schema: 'public', table: 'sections', filter: `project_id=eq.${projectId}` }, fetchAll)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'groups', filter: `project_id=eq.${projectId}` }, fetchAll)
+      // Supabase drops server-side-FILTERED DELETE events, so the filtered listeners above
+      // miss deletions (creates/updates come through fine). Subscribe to DELETEs WITHOUT a
+      // filter — RLS still scopes them — and narrow to this project client-side via the old row.
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'tasks' }, payload => { if (payload.old?.id) removeTask(payload.old.id) })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'sections' }, payload => { if (payload.old?.project_id === projectId) fetchAll() })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'groups' }, payload => { if (payload.old?.project_id === projectId) fetchAll() })
       .subscribe()
 
     return () => sub.unsubscribe()

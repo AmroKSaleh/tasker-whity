@@ -134,11 +134,12 @@ function ClaudeCodeApiKey({ onKeyChange }) {
       if (!user) return
       const { data } = await supabase
         .from('user_api_keys')
-        .select('id, last_used_at')
+        .select('id, last_used_at, key_plain')
         .eq('user_id', user.id)
         .maybeSingle()
       setHasKey(!!data)
       setLastUsed(data?.last_used_at ?? null)
+      if (data?.key_plain) { setNewKey(data.key_plain); onKeyChange?.(data.key_plain) }
     }
     check()
   }, [])
@@ -154,7 +155,7 @@ function ClaudeCodeApiKey({ onKeyChange }) {
       const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawKey))
       const keyHash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
       await supabase.from('user_api_keys').delete().eq('user_id', user.id)
-      await supabase.from('user_api_keys').insert({ user_id: user.id, key_hash: keyHash })
+      await supabase.from('user_api_keys').insert({ user_id: user.id, key_hash: keyHash, key_plain: rawKey })
       setNewKey(rawKey)
       setHasKey(true)
       setLastUsed(null)
@@ -199,28 +200,41 @@ function ClaudeCodeApiKey({ onKeyChange }) {
   if (hasKey === null) return <p className="text-[13px] text-mute mb-4">Checking…</p>
 
   if (newKey) return (
-    <div className="rounded-xl border border-line bg-surf-2 p-4 mb-4">
-      <p className="font-mono text-[9px] font-bold uppercase tracking-widest text-mute-2 mb-2">
-        Your API key — copy it now, it won't be shown again
-      </p>
-      <div className="flex gap-2 items-center mb-3">
-        <code className="flex-1 bg-paper border border-line rounded-lg px-3 py-2 text-[12px] font-mono text-ink break-all select-all">
-          {newKey}
-        </code>
-        <button onClick={copy} className="btn btn-sm shrink-0">
-          {copied ? '✓ Copied' : 'Copy'}
-        </button>
+    <div className="mb-4 space-y-2">
+      <div className="rounded-xl border border-line bg-surf-2 p-4">
+        <p className="font-mono text-[9px] font-bold uppercase tracking-widest text-mute-2 mb-2">
+          Your API key — kept visible here until you revoke it
+        </p>
+        <div className="flex gap-2 items-center mb-3">
+          <code className="flex-1 bg-paper border border-line rounded-lg px-3 py-2 text-[12px] font-mono text-ink break-all select-all">
+            {newKey}
+          </code>
+          <button onClick={copy} className="btn btn-sm shrink-0">
+            {copied ? '✓ Copied' : 'Copy'}
+          </button>
+        </div>
+        <p className="text-[11px] text-mute-2 mb-3">
+          Switch to any platform tab — your key is already filled in the config snippet.
+        </p>
+        <div className="flex items-center gap-4">
+          <button onClick={generate} disabled={generating} className="text-[11px] text-mute hover:text-ink transition-colors">
+            {generating ? 'Regenerating…' : 'Regenerate key'}
+          </button>
+          <button onClick={revoke} className="text-[11px] text-mute hover:text-red-500 transition-colors">
+            Revoke key
+          </button>
+        </div>
       </div>
-      <p className="text-[11px] text-mute-2 mb-3">
-        Switch to any platform tab — your key is already filled in the config snippet.
-      </p>
-      <div className="flex items-center gap-4">
-        <button onClick={() => { setNewKey(null); onKeyChange?.(null) }} className="text-[11px] text-mute hover:text-ink transition-colors">
-          Done, hide key
+      <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl border border-line bg-surf-2">
+        <span className="text-[12px] text-ink-2 flex-1">MCP server reachable?</span>
+        <button onClick={testMCP} disabled={testingMCP} className="btn btn-sm text-[11px] disabled:opacity-40">
+          {testingMCP ? 'Testing…' : 'Test connection'}
         </button>
-        <button onClick={revoke} className="text-[11px] text-mute hover:text-red-500 transition-colors">
-          Revoke key
-        </button>
+        {mcpStatus && (
+          <span className={`text-[11px] font-medium ${mcpStatus === 'ok' ? 'text-green-600' : 'text-red-500'}`}>
+            {mcpStatus === 'ok' ? '✓ Online' : '✗ Unreachable'}
+          </span>
+        )}
       </div>
     </div>
   )
