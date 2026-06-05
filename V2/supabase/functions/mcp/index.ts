@@ -239,10 +239,10 @@ function inputSourceIds(input: any): string[] {
   return inputEdges(input).map(e => e.source_task_id)
 }
 
-// The producer's output contract ({ rules: [] } if none set).
-function outputContract(output: any): { rules: any[] } {
-  if (output?.contract?.rules) return output.contract
-  return { rules: [] }
+// The producer's output contract ({ rules: [], confirmed: false } if none set).
+function outputContract(output: any): { rules: any[], confirmed: boolean } {
+  if (output?.contract?.rules) return { ...output.contract, confirmed: output.contract.confirmed === true }
+  return { rules: [], confirmed: false }
 }
 
 // Normalize a single authored rule into the canonical shape (defaults + a stable id).
@@ -951,6 +951,20 @@ const TOOLS = [
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'confirm_contract',
+    description: 'Human-bless a contract on a task. Agent-authored contracts are PROVISIONAL — stamped contract_blessed: false in the validation ledger. Call this after the human has reviewed and approved the quality bar. Confirmation is non-destructive; any subsequent call to set_task_output or set_task_input resets the contract to provisional.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID' },
+        contract_type: { type: 'string', enum: ['output', 'input'], description: 'Which contract to confirm: "output" (this task\'s own quality bar) or "input" (the gate rules on an incoming edge). Default: "output".' },
+        source_task_id: { type: 'string', description: 'Required when contract_type is "input" and the task has multiple input edges — identifies which edge\'s contract to confirm.' },
+        confirmed_by: { type: 'string', description: 'Who confirmed it. Default: "human".' },
       },
       required: ['task_id'],
     },
@@ -2297,7 +2311,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const edge = {
         source_task_id: source.id,
         expected_type: args.expected_type || null,
-        contract: { rules },
+        contract: { rules, confirmed: false },
       }
 
       // Upsert this source's edge (replace=true wipes all others). Supports fan-in.
@@ -2309,7 +2323,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (error) throw new Error(error.message)
 
       return `Set input edge on ${args.task_id}: consumes ${args.source_task_id}` +
-        (rules.length ? ` with ${rules.length} contract rule${rules.length !== 1 ? 's' : ''}` : ' (no contract rules yet)') +
+        (rules.length ? ` with ${rules.length} contract rule${rules.length !== 1 ? 's' : ''} (PROVISIONAL — confirm via confirm_contract)` : ' (no contract rules yet)') +
         `. Total input edges: ${edges.length}.`
     }
 
@@ -2321,14 +2335,14 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const prev = (task.output && typeof task.output === 'object') ? task.output : {}
       const output = {
         ...prev,
-        contract: { rules },
+        contract: { rules, confirmed: false },
         validation_status: prev.validation_status || 'pending',
       }
 
       const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
-      return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Consumers are derived from tasks that list this as a source.`
+      return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is PROVISIONAL until confirmed by a human via confirm_contract. Consumers are derived from tasks that list this as a source.`
     }
 
     case 'store_artifact': {
@@ -2363,6 +2377,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       if (!consumers.length) {
         if (!selfRules.length) return `"${producer.text}" has no downstream consumer and no output contract — nothing to validate. Add a definition-of-done with set_task_output, or set_task_input on a downstream task.`
+        const selfBlessed = outputContract(producer.output).confirmed
         return JSON.stringify({
           status: 'needs_agent_validation',
           instruction: 'Endpoint task (no downstream consumer). Evaluate the producer\'s own output contract (self-check) against the actual produced output, then call submit_validation_result with the per-rule results.',
@@ -2370,6 +2385,8 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           target: null,
           gate_rules: [],
           self_check_rules: selfRules,
+          contract_status: { gate_contract: 'none', output_contract: selfBlessed ? 'confirmed' : 'provisional' },
+          ...(!selfBlessed ? { provisional_warning: 'Output contract is PROVISIONAL (not confirmed by a human). Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to bless the quality bar.' } : {}),
           retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
         })
       }
@@ -2391,6 +2408,8 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       const edge = inputEdges(consumer.input).find((e: any) => e.source_task_id === producer.id)
       const gateRules = edge?.contract?.rules || []
+      const gateContractBlessed = edge?.contract?.confirmed === true
+      const selfContractBlessed = outputContract(producer.output).confirmed
 
       const hasJudgment = gateRules.some((r: any) => r.kind === 'judgment')
       const storedArtifact: string | null = producer.output?.artifact || null
@@ -2423,6 +2442,7 @@ Call submit_validation_result with:
   results: one {rule_id, status, note} per rule — you must cover all rule IDs: ${allRuleIds}`
 
       const artifactReady = !!storedArtifact
+      const isProvisional = (!gateContractBlessed && gateRules.length > 0) || (!selfContractBlessed && selfRules.length > 0)
       return JSON.stringify({
         status: hasJudgment && !artifactReady ? 'needs_artifact' : 'needs_agent_validation',
         artifact_stored: artifactReady,
@@ -2436,6 +2456,11 @@ Call submit_validation_result with:
         target_task_id: consumer.id,
         gate_rules: gateRules,
         self_check_rules: selfRules,
+        contract_status: {
+          gate_contract: gateRules.length ? (gateContractBlessed ? 'confirmed' : 'provisional') : 'none',
+          output_contract: selfRules.length ? (selfContractBlessed ? 'confirmed' : 'provisional') : 'none',
+        },
+        ...(isProvisional ? { provisional_warning: 'One or more contracts are PROVISIONAL (not confirmed by a human). Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to bless the quality bar.' } : {}),
         retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
         ...(hasJudgment ? { validator_agent_prompt: validatorPrompt } : {}),
       })
@@ -2463,15 +2488,19 @@ Call submit_validation_result with:
         const cs = [...m.values()]
         if (cs.length === 1) consumer = cs[0]
       }
+      let gateContractBlessed = false
       if (consumer) {
         const edge = inputEdges(consumer.input).find((e: any) => e.source_task_id === producer.id)
         gateRules = edge?.contract?.rules || []
+        gateContractBlessed = edge?.contract?.confirmed === true
         targetText = consumer.text
         targetId = consumer.id
       }
 
       const gateRuleIds = new Set(gateRules.map((r: any) => r.id))
-      const selfRules = outputContract(producer.output).rules
+      const selfOutputContract = outputContract(producer.output)
+      const selfRules = selfOutputContract.rules
+      const selfContractBlessed = selfOutputContract.confirmed
       const ruleById = new Map<string, any>()
       ;[...gateRules, ...selfRules].forEach((r: any) => ruleById.set(r.id, r))
 
@@ -2513,6 +2542,7 @@ Call submit_validation_result with:
           status: res.status === 'pass' ? 'pass' : 'fail',
           note: res.note || null,
           validator,
+          contract_blessed: isGate ? gateContractBlessed : selfContractBlessed,
           ...(isCheck ? { evidence_quality: evidenceQuality } : {}),
           checked_at: checkedAt,
         }
@@ -2599,6 +2629,10 @@ Call submit_validation_result with:
       if (weakEvidence.length) {
         lines.push(`⚠ Weak evidence on check rules (${weakEvidence.length}): ${weakEvidence.map((l: any) => l.label).join(', ')} — note too short to be a real run result`)
       }
+      const unblessedEntries = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.contract_blessed === false) : []
+      if (unblessedEntries.length) {
+        lines.push(`⚠ Provisional contract (${unblessedEntries.length} rule${unblessedEntries.length !== 1 ? 's' : ''} graded against unconfirmed bar) — use confirm_contract to bless the quality bar`)
+      }
       if (Array.isArray(out.ledger) && out.ledger.length) {
         lines.push('', 'Last check (per rule):')
         out.ledger.forEach((l: any) => {
@@ -2608,6 +2642,56 @@ Call submit_validation_result with:
         lines.push(`Feedback: ${out.feedback}`) // legacy shape
       }
       return lines.join('\n')
+    }
+
+    case 'confirm_contract': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const contractType = args.contract_type || 'output'
+      const confirmedBy = args.confirmed_by || 'human'
+      const confirmedAt = new Date().toISOString()
+
+      if (contractType === 'output') {
+        const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+        const prevContract = prev.contract || {}
+        if (!prevContract.rules?.length) return `"${task.text}" has no output contract to confirm. Set one via set_task_output first.`
+        await sb.from('tasks').update({
+          output: { ...prev, contract: { ...prevContract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy } },
+        }).eq('id', task.id)
+        return `Output contract on "${task.text}" confirmed by ${confirmedBy}. ${prevContract.rules.length} rule${prevContract.rules.length !== 1 ? 's' : ''} are now human-blessed — future validation ledger entries will be stamped contract_blessed: true.`
+      }
+
+      if (contractType === 'input') {
+        const edges = inputEdges(task.input)
+        if (!edges.length) return `"${task.text}" has no input edges to confirm.`
+
+        let targetEdge: any = null
+        if (args.source_task_id) {
+          const source = await resolveTask(sb, userId, args.source_task_id)
+          if (source) targetEdge = edges.find((e: any) => e.source_task_id === source.id)
+        } else if (edges.length === 1) {
+          targetEdge = edges[0]
+        } else {
+          return JSON.stringify({
+            error: 'ambiguous_edge',
+            message: `"${task.text}" has ${edges.length} input edges. Re-call with source_task_id to specify which edge's contract to confirm.`,
+            edges: edges.map((e: any) => ({ source_task_id: e.source_task_id })),
+          })
+        }
+
+        if (!targetEdge) return `No input edge found on "${task.text}"${args.source_task_id ? ` from "${args.source_task_id}"` : ''}.`
+        if (!targetEdge.contract?.rules?.length) return `The input edge on "${task.text}" has no contract rules to confirm.`
+
+        const updatedEdges = edges.map((e: any) =>
+          e.source_task_id === targetEdge.source_task_id
+            ? { ...e, contract: { ...e.contract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy } }
+            : e
+        )
+        await sb.from('tasks').update({ input: { edges: updatedEdges } }).eq('id', task.id)
+        return `Input contract on "${task.text}" (from ${targetEdge.source_task_id}) confirmed by ${confirmedBy}. ${targetEdge.contract.rules.length} rule${targetEdge.contract.rules.length !== 1 ? 's' : ''} are now human-blessed.`
+      }
+
+      return `Unknown contract_type "${contractType}". Use "output" or "input".`
     }
 
     default:
