@@ -4,14 +4,6 @@ import { ChevronRight } from 'lucide-react'
 import { Kicker } from '../editorial/atoms'
 import { inputEdges, outputRules } from '../../lib/flowGraph'
 
-const STATUS_ICON = { done: '✓', in_progress: '▶', pending: '○' }
-
-function statusTextColor(status) {
-  if (status === 'done') return 'text-[#4ade80]'
-  if (status === 'in_progress') return 'text-accent'
-  return 'text-mute'
-}
-
 function RuleRow({ rule }) {
   const warn = rule.severity === 'warning'
   return (
@@ -57,9 +49,6 @@ export default function FlowStepList({ steps, prefix }) {
               className="w-full flex items-center gap-2.5 py-2.5 px-2 text-left rounded-md hover:bg-surf-2 transition-colors"
             >
               <ChevronRight size={13} className={clsx('text-mute-2 transition-transform shrink-0', isOpen && 'rotate-90')} />
-              <span className={clsx('font-mono text-[11px] shrink-0 w-3 text-center', statusTextColor(task.status))}>
-                {STATUS_ICON[task.status] ?? '○'}
-              </span>
               <span className="font-mono text-[10px] text-mute-2 shrink-0 w-5">{String(step).padStart(2, '0')}</span>
               <span className="flex-1 text-[13px] font-medium text-ink truncate">{task.text}</span>
               {prefix && task.short_id != null && (

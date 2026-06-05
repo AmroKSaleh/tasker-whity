@@ -34,6 +34,25 @@ function FlowCard({ flow, active, onClick }) {
 }
 
 function FlowDetail({ flow, onBack, listOpen, onToggleList }) {
+  const [graphHeight, setGraphHeight] = useState(320)
+
+  function startResize(e) {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = graphHeight
+    function onMove(ev) {
+      setGraphHeight(Math.max(140, Math.min(720, startH + (ev.clientY - startY))))
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+      document.body.style.userSelect = ''
+    }
+    document.body.style.userSelect = 'none'
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
+
   return (
     <div className="flex flex-col h-full">
       <div className="px-6 pt-6 pb-3 border-b border-line-2 shrink-0">
@@ -54,8 +73,15 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList }) {
           {flow.stepCount} STEPS · {flow.doneCount}/{flow.stepCount} DONE · {STATUS_LABEL[flow.status]}
         </div>
       </div>
-      <div className="shrink-0 border-b border-line-2" style={{ height: 320 }}>
+      <div className="shrink-0" style={{ height: graphHeight }}>
         <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} />
+      </div>
+      <div
+        onPointerDown={startResize}
+        title="Drag to resize"
+        className="group shrink-0 h-2 flex items-center justify-center cursor-row-resize border-y border-line-2 bg-surf-2 hover:bg-surf transition-colors"
+      >
+        <span className="w-8 h-0.5 rounded-full bg-line group-hover:bg-mute-2 transition-colors" />
       </div>
       <div className="flex-1 overflow-auto px-4 py-3 no-scrollbar">
         <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} />
