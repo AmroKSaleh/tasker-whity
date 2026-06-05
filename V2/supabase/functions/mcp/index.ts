@@ -307,6 +307,7 @@ const ASSISTANT_DIRECTIVES = [
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and use AskUserQuestion to present the failures to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
+  'VALIDATION INDEPENDENCE: You have a conflict of interest when grading your own work. For kind=judgment rules you MUST declare the validator. Preferred path: spawn a fresh Claude subagent (claude -p "Grade this output against these rules: [rules]. Artifact: [artifact]") and pass validator="independent-subagent". Acceptable path: use AskUserQuestion to show the human the artifact + judgment rules and let them decide — pass validator="human". Last resort only: self-grade and pass validator="self". For kind=check rules (deterministic counts/commands) self-evaluation is fine — no independence requirement. Never omit the validator field when judgment rules are present.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -911,6 +912,7 @@ const TOOLS = [
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID — the PRODUCER (same as validate_output)' },
         target_task_id: { type: 'string', description: 'Optional: the CONSUMER edge validated against (required only if the producer feeds more than one task)' },
+        validator: { type: 'string', description: 'Who ran this validation. Required when judgment rules are present. Use "independent-subagent" (fresh Claude session with the artifact), "human" (human reviewed), or "self" (you graded your own work — discloses conflict). Omitting when judgment rules exist flags the ledger as unverified.' },
         results: {
           type: 'array',
           description: 'Per-rule results from your evaluation.',
@@ -2346,6 +2348,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const edge = inputEdges(consumer.input).find((e: any) => e.source_task_id === producer.id)
       const gateRules = edge?.contract?.rules || []
 
+      const hasJudgment = gateRules.some((r: any) => r.kind === 'judgment')
       return JSON.stringify({
         status: 'needs_agent_validation',
         instruction: 'Tasker does NOT run these checks — you do. For each rule: kind=check → run the deterministic check (count/pattern/command) against the actual produced output; kind=judgment → judge it semantically. Then call submit_validation_result with task_id (this producer), target_task_id (this consumer), and a {rule_id, status, note} for EVERY rule below. The gate is the consumer\'s acceptance criteria — a blocker failure there reopens the producer.',
@@ -2355,6 +2358,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         gate_rules: gateRules,
         self_check_rules: selfRules,
         retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
+        ...(hasJudgment ? { independence_warning: 'This gate contains kind=judgment rules. You have a conflict of interest grading your own work. Preferred: spawn a fresh subagent (claude -p) with the artifact + rules and pass validator="independent-subagent". Acceptable: use AskUserQuestion for human verdict, pass validator="human". Last resort: pass validator="self" to disclose the conflict.' } : {}),
       })
     }
 
@@ -2393,6 +2397,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       ;[...gateRules, ...selfRules].forEach((r: any) => ruleById.set(r.id, r))
 
       const checkedAt = new Date().toISOString()
+      const validator = args.validator || null
       const ledger = results.map((res: any) => {
         const rule = ruleById.get(res.rule_id)
         const isGate = gateRuleIds.has(res.rule_id)
@@ -2401,11 +2406,16 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           label: rule?.label || res.rule_id,
           source: isGate ? 'input' : 'output', // input = consumer gate; output = producer self-check
           severity: rule?.severity || 'blocker',
+          kind: rule?.kind || 'check',
           status: res.status === 'pass' ? 'pass' : 'fail',
           note: res.note || null,
+          validator,
           checked_at: checkedAt,
         }
       })
+
+      const hasJudgmentGateRules = gateRules.some((r: any) => r.kind === 'judgment')
+      const selfGradedRisk = hasJudgmentGateRules && (!validator || validator === 'self')
 
       const blockingFails = ledger.filter((l: any) => l.source === 'input' && l.status === 'fail' && l.severity === 'blocker')
       const selfFails = ledger.filter((l: any) => l.source === 'output' && l.status === 'fail' && l.severity === 'blocker')
@@ -2449,6 +2459,9 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         action,
         retry_count: valid ? 0 : newRetryCount,
         retries_remaining: valid ? RETRY_LIMIT : Math.max(0, RETRY_LIMIT - newRetryCount),
+        validator: validator || 'unverified',
+        self_graded_risk: selfGradedRisk,
+        ...(selfGradedRisk ? { independence_warning: 'Judgment rules were graded without declaring an independent validator. This result is marked as self-graded in the ledger — it carries less weight than an independent or human verdict. Next time: spawn a fresh subagent or ask the human.' } : {}),
         producer: producer.text,
         target: targetText,
         gate_failures: blockingFails.map(fmt),
@@ -2473,6 +2486,10 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const lines = [`Validation status: ${status}`]
       if (typeof out.retry_count === 'number' && out.retry_count > 0) {
         lines.push(`Retry count: ${out.retry_count}/3${out.retry_blocked ? ' (limit reached — awaiting human direction)' : ''}`)
+      }
+      const selfGradedEntries = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.kind === 'judgment' && (!l.validator || l.validator === 'self')) : []
+      if (selfGradedEntries.length) {
+        lines.push(`⚠ Self-graded judgment rules (${selfGradedEntries.length}): ${selfGradedEntries.map((l: any) => l.label).join(', ')} — treat with caution`)
       }
       if (Array.isArray(out.ledger) && out.ledger.length) {
         lines.push('', 'Last check (per rule):')
