@@ -197,13 +197,13 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
       .select('id').eq('user_id', userId).eq('prefix', prefix).maybeSingle()
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, input, output, status, short_id').eq('project_id', project.id).eq('short_id', shortId).maybeSingle()
+        .select('id, text, input, output, status, short_id, flow_id').eq('project_id', project.id).eq('short_id', shortId).maybeSingle()
       if (task) return task
     }
   }
   // Fall back to UUID
   const { data } = await sb.from('tasks')
-    .select('id, text, input, output, status, short_id').eq('id', taskRef).eq('user_id', userId).maybeSingle()
+    .select('id, text, input, output, status, short_id, flow_id').eq('id', taskRef).eq('user_id', userId).maybeSingle()
   return data ?? null
 }
 
@@ -318,6 +318,7 @@ const ASSISTANT_DIRECTIVES = [
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and use AskUserQuestion to present the failures to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
+  'FLOW IDENTITY: After persisting a new flow (after all create_task + set_task_output + set_task_input calls), call name_flow with all task IDs and a descriptive name (e.g. "Blog Post Publication Flow"). Optionally add a context string — the goal, constraints, or background that applies to all tasks. At the start of any flow run, call get_flow_context to orient yourself. Use update_flow_context to log progress or decisions that future agents in the flow should know.',
   'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. How: (1) word/character count → count manually word-by-word or run `echo "..." | wc -w` via Bash and put the exact number in the note; (2) command (e.g. "npm test exits 0") → run it with the Bash tool, capture stdout/stderr, put the exit code + output in the note; (3) keyword/pattern → read the artifact and search it, put the match result in the note; (4) file existence → use Glob/Read, put the found path in the note. Submitting a check result with no note is REJECTED. A note of "I checked, it passes" is not evidence — the raw observed value is. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) also REQUIRES a note — the specific deficiency: what exactly did not meet the rule and why. "fail" alone is REJECTED. This applies to the validator subagent too.',
 ]
 
@@ -998,6 +999,44 @@ const TOOLS = [
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. BPW-7)' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'name_flow',
+    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). The name appears in get_flow_order output and can be retrieved with get_flow_context.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix, slug, or UUID' },
+        name: { type: 'string', description: 'Human name for the flow (e.g. "Blog Post Publication Flow")' },
+        task_ids: { type: 'array', items: { type: 'string' }, description: 'All task IDs in the flow (UUIDs or short IDs).' },
+        context: { type: 'string', description: 'Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow.' },
+      },
+      required: ['project_id', 'name', 'task_ids'],
+    },
+  },
+  {
+    name: 'get_flow_context',
+    description: 'Get the name and shared context for the flow a task belongs to. Call at the start of a flow run to orient yourself.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Any task in the flow' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'update_flow_context',
+    description: 'Update the shared context bag for a named flow, or rename it. Pass any task ID in the flow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Any task in the flow' },
+        context: { type: 'string', description: 'New shared context (replaces existing)' },
+        name: { type: 'string', description: 'Optional: rename the flow' },
       },
       required: ['task_id'],
     },
@@ -2111,7 +2150,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (!project) return `Project "${args.project_id}" not found.`
 
       const { data: tasks } = await sb.from('tasks')
-        .select('id, text, status, priority, short_id, input, sort_order, section_id')
+        .select('id, text, status, priority, short_id, input, sort_order, section_id, flow_id')
         .eq('project_id', project.id)
         .eq('user_id', userId)
 
@@ -2184,12 +2223,32 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const statusIcon = (s: string) => s === 'done' ? '✓' : s === 'in_progress' ? '▶' : '○'
       const taskLabel = (t: any) => t.prefix ? `${t.prefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
 
+      // Look up named flows for any tasks that have flow_id set
+      const flowIds = [...new Set((tasks || []).map((t: any) => t.flow_id).filter(Boolean))]
+      const flowNameMap = new Map<string, string>()
+      const flowContextMap = new Map<string, string>()
+      if (flowIds.length) {
+        const { data: namedFlows } = await sb.from('flows').select('id, name, context').in('id', flowIds).eq('user_id', userId)
+        ;(namedFlows || []).forEach((f: any) => {
+          flowNameMap.set(f.id, f.name)
+          if (f.context) flowContextMap.set(f.id, f.context)
+        })
+      }
+
       const lines: string[] = [`Flow Execution Order — ${project.name} (${project.prefix})`, ``]
 
       targetFlows.forEach((component, fi) => {
         const sorted = topoSort(component)
+        const namedFlowId = sorted.find((t: any) => t.flow_id)?.flow_id
+        const flowName = namedFlowId ? flowNameMap.get(namedFlowId) : null
+        const flowContext = namedFlowId ? flowContextMap.get(namedFlowId) : null
         if (targetFlows.length > 1) {
-          lines.push(`### Flow ${fi + 1}: "${sorted[0]?.text?.split(' ').slice(0, 5).join(' ')}${sorted[0]?.text?.split(' ').length > 5 ? '…' : ''}"`)
+          const label = flowName || `"${sorted[0]?.text?.split(' ').slice(0, 5).join(' ')}${sorted[0]?.text?.split(' ').length > 5 ? '…' : ''}"`
+          lines.push(`### Flow ${fi + 1}: ${flowName ? `"${flowName}"` : label}`)
+          if (flowContext) lines.push(`Context: ${flowContext}`)
+        } else if (flowName) {
+          lines[0] = `Flow: "${flowName}" — ${project.name} (${project.prefix})`
+          if (flowContext) lines.push(`Context: ${flowContext}`, ``)
         }
         sorted.forEach((task: any, i: number) => {
           const srcLabels = inputSourceIds(task.input)
@@ -2303,6 +2362,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
             'create_task for each step (pass section_id from project_context if it belongs in an existing section).',
             'set_task_output(task_id, contract) on each producing task — its definition-of-done.',
             'set_task_input(task_id, source_task_id, contract) on each consuming task — call once per upstream source (fan-in supported). The input contract is the consumer\'s acceptance criteria for that incoming artifact.',
+            'name_flow(project_id, name, task_ids, context?) — give the flow a human name and optional shared context bag (goals, constraints, background). Pass ALL task IDs in the flow.',
             'Finally call get_flow_order to show the user the ordered flow you built.',
           ],
         },
@@ -2709,6 +2769,71 @@ Call submit_validation_result with:
       }
 
       return lines.join('\n')
+    }
+
+    case 'name_flow': {
+      const project = await resolveProject(sb, userId, args.project_id)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const taskIds = Array.isArray(args.task_ids) ? args.task_ids : []
+      if (!taskIds.length) return 'task_ids is required and must not be empty.'
+
+      const resolvedTasks = await Promise.all(taskIds.map((id: string) => resolveTask(sb, userId, id)))
+      const valid = resolvedTasks.filter(Boolean)
+      const skipped = taskIds.length - valid.length
+      if (!valid.length) return 'No valid tasks found in task_ids.'
+
+      // Reuse existing flow if any task already belongs to one
+      const existingFlowId = valid.find((t: any) => t.flow_id)?.flow_id || null
+      let flowId: string
+      if (existingFlowId) {
+        await sb.from('flows').update({ name: args.name, context: args.context || null, updated_at: new Date().toISOString() }).eq('id', existingFlowId).eq('user_id', userId)
+        flowId = existingFlowId
+      } else {
+        const { data: flow, error } = await sb.from('flows').insert({ user_id: userId, project_id: project.id, name: args.name, context: args.context || null }).select('id').single()
+        if (error || !flow) throw new Error(error?.message || 'Failed to create flow')
+        flowId = flow.id
+      }
+
+      await sb.from('tasks').update({ flow_id: flowId }).in('id', valid.map((t: any) => t.id))
+      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} linked.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''} Flow ID: ${flowId.slice(0, 8)}…`
+    }
+
+    case 'get_flow_context': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      if (!task.flow_id) return `"${task.text}" is not linked to a named flow. Call name_flow to give the flow a name and context.`
+
+      const { data: flow } = await sb.from('flows').select('id, name, context, created_at').eq('id', task.flow_id).eq('user_id', userId).maybeSingle()
+      if (!flow) return `Flow record not found for "${task.text}".`
+
+      const { data: members } = await sb.from('tasks').select('short_id, text, status, project:projects(prefix)').eq('flow_id', flow.id).eq('user_id', userId)
+      const lines = [
+        `Flow: ${flow.name}`,
+        `ID: ${flow.id.slice(0, 8)}…`,
+        `Tasks: ${(members || []).length}`,
+        ...(flow.context ? ['', 'Context:', flow.context] : []),
+        '',
+        'Members:',
+        ...(members || []).map((t: any) => {
+          const prefix = t.project?.prefix
+          const ref = prefix && t.short_id != null ? `${prefix}-${t.short_id}` : `#${t.short_id}`
+          return `  [${t.status}] ${ref} — ${t.text}`
+        }),
+      ]
+      return lines.join('\n')
+    }
+
+    case 'update_flow_context': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      if (!task.flow_id) return `"${task.text}" is not linked to a named flow. Call name_flow first.`
+
+      const updates: any = { updated_at: new Date().toISOString() }
+      if (args.context !== undefined) updates.context = args.context
+      if (args.name) updates.name = args.name
+
+      await sb.from('flows').update(updates).eq('id', task.flow_id).eq('user_id', userId)
+      return `Flow updated.${args.name ? ` Renamed to "${args.name}".` : ''}${args.context !== undefined ? ' Context saved.' : ''}`
     }
 
     case 'confirm_contract': {
