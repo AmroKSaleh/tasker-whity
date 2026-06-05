@@ -2378,6 +2378,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (!consumers.length) {
         if (!selfRules.length) return `"${producer.text}" has no downstream consumer and no output contract — nothing to validate. Add a definition-of-done with set_task_output, or set_task_input on a downstream task.`
         const selfBlessed = outputContract(producer.output).confirmed
+        const selfEdgeRetry = (producer.output?.validation_ledgers?.['self']?.retry_count ?? producer.output?.retry_count) || 0
         return JSON.stringify({
           status: 'needs_agent_validation',
           instruction: 'Endpoint task (no downstream consumer). Evaluate the producer\'s own output contract (self-check) against the actual produced output, then call submit_validation_result with the per-rule results.',
@@ -2387,7 +2388,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           self_check_rules: selfRules,
           contract_status: { gate_contract: 'none', output_contract: selfBlessed ? 'confirmed' : 'provisional' },
           ...(!selfBlessed ? { provisional_warning: 'Output contract is PROVISIONAL (not confirmed by a human). Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to bless the quality bar.' } : {}),
-          retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
+          retry_info: { retry_count: selfEdgeRetry, retry_limit: 3, retries_remaining: Math.max(0, 3 - selfEdgeRetry) },
         })
       }
 
@@ -2443,6 +2444,7 @@ Call submit_validation_result with:
 
       const artifactReady = !!storedArtifact
       const isProvisional = (!gateContractBlessed && gateRules.length > 0) || (!selfContractBlessed && selfRules.length > 0)
+      const edgeRetry = (producer.output?.validation_ledgers?.[consumer.id]?.retry_count ?? producer.output?.retry_count) || 0
       return JSON.stringify({
         status: hasJudgment && !artifactReady ? 'needs_artifact' : 'needs_agent_validation',
         artifact_stored: artifactReady,
@@ -2461,7 +2463,7 @@ Call submit_validation_result with:
           output_contract: selfRules.length ? (selfContractBlessed ? 'confirmed' : 'provisional') : 'none',
         },
         ...(isProvisional ? { provisional_warning: 'One or more contracts are PROVISIONAL (not confirmed by a human). Validation will proceed but ledger entries will be stamped contract_blessed: false. Use confirm_contract to bless the quality bar.' } : {}),
-        retry_info: { retry_count: (producer.output?.retry_count || 0), retry_limit: 3, retries_remaining: Math.max(0, 3 - (producer.output?.retry_count || 0)) },
+        retry_info: { retry_count: edgeRetry, retry_limit: 3, retries_remaining: Math.max(0, 3 - edgeRetry) },
         ...(hasJudgment ? { validator_agent_prompt: validatorPrompt } : {}),
       })
     }
@@ -2558,7 +2560,12 @@ Call submit_validation_result with:
       const validationStatus = valid ? 'valid' : 'invalid'
 
       const prevOutput = (producer.output && typeof producer.output === 'object') ? producer.output : {}
-      const prevRetryCount = typeof prevOutput.retry_count === 'number' ? prevOutput.retry_count : 0
+      const prevLedgers = (prevOutput.validation_ledgers && typeof prevOutput.validation_ledgers === 'object') ? prevOutput.validation_ledgers : {}
+      const edgeKey = targetId || 'self'
+      const prevEdgeLedger = prevLedgers[edgeKey] || {}
+      // Per-edge retry count — fan-out safe (falls back to flat field for old data)
+      const prevRetryCount = typeof prevEdgeLedger.retry_count === 'number' ? prevEdgeLedger.retry_count
+        : (typeof prevOutput.retry_count === 'number' ? prevOutput.retry_count : 0)
       const RETRY_LIMIT = 3
 
       let reopened = false
@@ -2575,9 +2582,21 @@ Call submit_validation_result with:
         }
       }
 
+      const edgeLedgerEntry = {
+        validation_status: validationStatus,
+        validated_against: targetId,
+        validated_at: checkedAt,
+        ledger,
+        retry_count: valid ? 0 : newRetryCount,
+        ...(action === 'ask_human' ? { retry_blocked: true } : {}),
+      }
+
       await sb.from('tasks').update({
         output: {
           ...prevOutput,
+          // Per-edge ledger (fan-out safe — each consumer keeps its own record)
+          validation_ledgers: { ...prevLedgers, [edgeKey]: edgeLedgerEntry },
+          // Flat fields kept for backward compat (single-edge / endpoint tasks)
           validation_status: validationStatus,
           validated_against: targetId,
           validated_at: checkedAt,
@@ -2614,33 +2633,67 @@ Call submit_validation_result with:
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
       const out: any = task.output
-      if (!out || (!out.ledger && !out.validation_status && !out.feedback)) return `No validation has been run on "${task.text}" yet.`
+      if (!out || (!out.ledger && !out.validation_status && !out.feedback && !out.validation_ledgers)) return `No validation has been run on "${task.text}" yet.`
 
-      const status = out.validation_status || 'pending'
-      const lines = [`Validation status: ${status}`]
-      if (typeof out.retry_count === 'number' && out.retry_count > 0) {
-        lines.push(`Retry count: ${out.retry_count}/3${out.retry_blocked ? ' (limit reached — awaiting human direction)' : ''}`)
+      const lines: string[] = []
+
+      const renderEdgeLedger = (edgeLedger: any, label: string) => {
+        const status = edgeLedger.validation_status || 'pending'
+        lines.push(`${label} — ${status}`)
+        if (typeof edgeLedger.retry_count === 'number' && edgeLedger.retry_count > 0) {
+          lines.push(`  Retry count: ${edgeLedger.retry_count}/3${edgeLedger.retry_blocked ? ' (limit reached — awaiting human direction)' : ''}`)
+        }
+        const ledger = edgeLedger.ledger || []
+        const selfGraded = ledger.filter((l: any) => l.kind === 'judgment' && (!l.validator || l.validator === 'self'))
+        if (selfGraded.length) lines.push(`  ⚠ Self-graded judgment rules (${selfGraded.length}): ${selfGraded.map((l: any) => l.label).join(', ')}`)
+        const weakEv = ledger.filter((l: any) => l.kind === 'check' && l.evidence_quality === 'weak')
+        if (weakEv.length) lines.push(`  ⚠ Weak evidence (${weakEv.length}): ${weakEv.map((l: any) => l.label).join(', ')}`)
+        const unblessed = ledger.filter((l: any) => l.contract_blessed === false)
+        if (unblessed.length) lines.push(`  ⚠ Provisional contract (${unblessed.length} rule${unblessed.length !== 1 ? 's' : ''} graded against unconfirmed bar)`)
+        if (ledger.length) {
+          ledger.forEach((l: any) => {
+            lines.push(`  ${l.status === 'pass' ? '✓' : '✗'} [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`)
+          })
+        }
       }
-      const selfGradedEntries = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.kind === 'judgment' && (!l.validator || l.validator === 'self')) : []
-      if (selfGradedEntries.length) {
-        lines.push(`⚠ Self-graded judgment rules (${selfGradedEntries.length}): ${selfGradedEntries.map((l: any) => l.label).join(', ')} — treat with caution`)
+
+      if (out.validation_ledgers && typeof out.validation_ledgers === 'object') {
+        const edgeKeys = Object.keys(out.validation_ledgers)
+        if (edgeKeys.length > 1) {
+          // Fan-out: show each edge separately
+          lines.push(`Validation for "${task.text}" (${edgeKeys.length} edges):`)
+          edgeKeys.forEach(key => {
+            const edgeLedger = out.validation_ledgers[key]
+            const edgeLabel = key === 'self' ? 'Self-check' : `→ consumer ${key.slice(0, 8)}…`
+            lines.push('')
+            renderEdgeLedger(edgeLedger, edgeLabel)
+          })
+        } else if (edgeKeys.length === 1) {
+          renderEdgeLedger(out.validation_ledgers[edgeKeys[0]], `Validation for "${task.text}"`)
+        }
+      } else {
+        // Fall back to flat fields (old data)
+        const status = out.validation_status || 'pending'
+        lines.push(`Validation status: ${status}`)
+        if (typeof out.retry_count === 'number' && out.retry_count > 0) {
+          lines.push(`Retry count: ${out.retry_count}/3${out.retry_blocked ? ' (limit reached — awaiting human direction)' : ''}`)
+        }
+        const selfGraded = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.kind === 'judgment' && (!l.validator || l.validator === 'self')) : []
+        if (selfGraded.length) lines.push(`⚠ Self-graded judgment rules (${selfGraded.length}): ${selfGraded.map((l: any) => l.label).join(', ')} — treat with caution`)
+        const weakEv = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.kind === 'check' && l.evidence_quality === 'weak') : []
+        if (weakEv.length) lines.push(`⚠ Weak evidence on check rules (${weakEv.length}): ${weakEv.map((l: any) => l.label).join(', ')} — note too short to be a real run result`)
+        const unblessed = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.contract_blessed === false) : []
+        if (unblessed.length) lines.push(`⚠ Provisional contract (${unblessed.length} rule${unblessed.length !== 1 ? 's' : ''} graded against unconfirmed bar) — use confirm_contract to bless the quality bar`)
+        if (Array.isArray(out.ledger) && out.ledger.length) {
+          lines.push('', 'Last check (per rule):')
+          out.ledger.forEach((l: any) => {
+            lines.push(`  ${l.status === 'pass' ? '✓' : '✗'} [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`)
+          })
+        } else if (out.feedback) {
+          lines.push(`Feedback: ${out.feedback}`)
+        }
       }
-      const weakEvidence = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.kind === 'check' && l.evidence_quality === 'weak') : []
-      if (weakEvidence.length) {
-        lines.push(`⚠ Weak evidence on check rules (${weakEvidence.length}): ${weakEvidence.map((l: any) => l.label).join(', ')} — note too short to be a real run result`)
-      }
-      const unblessedEntries = Array.isArray(out.ledger) ? out.ledger.filter((l: any) => l.contract_blessed === false) : []
-      if (unblessedEntries.length) {
-        lines.push(`⚠ Provisional contract (${unblessedEntries.length} rule${unblessedEntries.length !== 1 ? 's' : ''} graded against unconfirmed bar) — use confirm_contract to bless the quality bar`)
-      }
-      if (Array.isArray(out.ledger) && out.ledger.length) {
-        lines.push('', 'Last check (per rule):')
-        out.ledger.forEach((l: any) => {
-          lines.push(`  ${l.status === 'pass' ? '✓' : '✗'} [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`)
-        })
-      } else if (out.feedback) {
-        lines.push(`Feedback: ${out.feedback}`) // legacy shape
-      }
+
       return lines.join('\n')
     }
 
