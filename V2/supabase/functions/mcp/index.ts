@@ -308,7 +308,7 @@ const ASSISTANT_DIRECTIVES = [
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and use AskUserQuestion to present the failures to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then call validate_output — if judgment rules exist, the response includes a complete validator_agent_prompt with the artifact already embedded (served from the server, not from you). Spawn a validator subagent using the Agent tool and pass validator_agent_prompt as the prompt — do not modify it. The subagent grades and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. For kind=check rules only (deterministic counts/commands) you may self-evaluate without a subagent.',
-  'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. How: (1) word/character count → count manually word-by-word or run `echo "..." | wc -w` via Bash and put the exact number in the note; (2) command (e.g. "npm test exits 0") → run it with the Bash tool, capture stdout/stderr, put the exit code + output in the note; (3) keyword/pattern → read the artifact and search it, put the match result in the note; (4) file existence → use Glob/Read, put the found path in the note. Submitting a check result with no note is REJECTED by Tasker. A note of "I checked, it passes" is not evidence — the raw observed value is.',
+  'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. How: (1) word/character count → count manually word-by-word or run `echo "..." | wc -w` via Bash and put the exact number in the note; (2) command (e.g. "npm test exits 0") → run it with the Bash tool, capture stdout/stderr, put the exit code + output in the note; (3) keyword/pattern → read the artifact and search it, put the match result in the note; (4) file existence → use Glob/Read, put the found path in the note. Submitting a check result with no note is REJECTED. A note of "I checked, it passes" is not evidence — the raw observed value is. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) also REQUIRES a note — the specific deficiency: what exactly did not meet the rule and why. "fail" alone is REJECTED. This applies to the validator subagent too.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -935,7 +935,7 @@ const TOOLS = [
             properties: {
               rule_id: { type: 'string', description: 'id of the rule (from validate_output\'s output)' },
               status: { type: 'string', enum: ['pass', 'fail'], description: 'Did the output meet this rule?' },
-              note: { type: 'string', description: 'REQUIRED for kind=check rules: the raw observed result of actually running the check — command stdout, exact word/character count, pattern match result, file path found. Not a claim — the actual value. For kind=judgment: your reasoning (required on fail, recommended on pass).' },
+              note: { type: 'string', description: 'REQUIRED for kind=check rules (pass or fail): the raw observed result of actually running the check — command stdout, exact word/character count, pattern match result, file path found. REQUIRED for any fail (any kind): the specific deficiency — what did not meet the rule and why. Not a claim — concrete evidence. For kind=judgment pass: reasoning recommended but not required.' },
             },
             required: ['rule_id', 'status'],
           },
@@ -2475,18 +2475,23 @@ Call submit_validation_result with:
       const ruleById = new Map<string, any>()
       ;[...gateRules, ...selfRules].forEach((r: any) => ruleById.set(r.id, r))
 
-      // Reject check rules submitted without evidence (note is mandatory for kind=check)
+      // Reject results missing required notes:
+      // - kind=check always needs a note (the actual observed value — pass or fail)
+      // - any fail (any kind) needs a note (the specific deficiency)
       const unevidenced = results.filter((res: any) => {
         const rule = ruleById.get(res.rule_id)
-        return rule?.kind === 'check' && !res.note
+        return !res.note && (rule?.kind === 'check' || res.status === 'fail')
       })
       if (unevidenced.length) {
         return JSON.stringify({
           error: 'missing_evidence',
-          message: `${unevidenced.length} kind=check rule(s) submitted without evidence. Check rules require a note with the actual observed result — the raw output, count, or command stdout. Not a claim; the real value.`,
+          message: `${unevidenced.length} rule(s) submitted without a required note. Requirements: (1) kind=check rules always need a note — the actual observed result (count, command stdout, pattern match). (2) Any failing rule needs a note — the specific deficiency, not just "fail". Submitting without is rejected.`,
           rules_needing_evidence: unevidenced.map((res: any) => {
             const rule = ruleById.get(res.rule_id)
-            return { rule_id: res.rule_id, label: rule?.label || res.rule_id, rule: rule?.rule }
+            const reason = rule?.kind === 'check'
+              ? 'kind=check — note must contain the actual observed value'
+              : 'status=fail — note must describe the specific deficiency'
+            return { rule_id: res.rule_id, label: rule?.label || res.rule_id, rule: rule?.rule, reason }
           }),
         })
       }
