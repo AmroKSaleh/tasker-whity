@@ -993,6 +993,17 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_flow_audit',
+    description: 'Full validation audit trail for a flow — who validated, when, which rules passed/failed, evidence notes, retry counts, and contract blessing status. Returns a step-by-step report across all tasks in the flow. Use for compliance review, debugging a failed run, or understanding what the flow produced and why.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Any task in the flow (UUID or short ID). The tool finds all other tasks in the same flow automatically.' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
     name: 'get_task_connections',
     description: 'Returns the direct (1-hop) dependencies of a task: tasks it directly requires (blockers) and tasks that directly depend on it (dependents). Use this to understand the immediate context of a single task without seeing the entire flow.',
     inputSchema: {
@@ -2143,6 +2154,125 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       ]
 
       return insights.filter(l => l && l !== '').join('\n')
+    }
+
+    case 'get_flow_audit': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+
+      // Get project + flow info
+      const { data: taskFull } = await sb.from('tasks')
+        .select('id, project_id, project:projects(id, name, prefix)')
+        .eq('id', task.id).eq('user_id', userId).maybeSingle()
+      if (!taskFull) return 'Task not found.'
+
+      const project = taskFull.project
+      const projectId = taskFull.project_id
+
+      let flowName: string | null = null
+      let flowContext: string | null = null
+      if (task.flow_id) {
+        const { data: flow } = await sb.from('flows').select('name, context').eq('id', task.flow_id).eq('user_id', userId).maybeSingle()
+        if (flow) { flowName = flow.name; flowContext = flow.context }
+      }
+
+      const { data: allTasks } = await sb.from('tasks')
+        .select('id, text, status, short_id, input, output, flow_id')
+        .eq('project_id', projectId).eq('user_id', userId)
+      if (!allTasks?.length) return 'No tasks found.'
+
+      const taskById = new Map(allTasks.map((t: any) => [t.id, t]))
+
+      // Find the component containing this task (flow_id membership or BFS)
+      let componentIds: Set<string>
+      if (task.flow_id) {
+        componentIds = new Set(allTasks.filter((t: any) => t.flow_id === task.flow_id).map((t: any) => t.id))
+      } else {
+        const adj = new Map(allTasks.map((t: any) => [t.id, new Set<string>()]))
+        allTasks.forEach((t: any) => {
+          for (const src of inputSourceIds(t.input)) {
+            if (adj.has(src)) { adj.get(t.id)!.add(src); adj.get(src)!.add(t.id) }
+          }
+        })
+        componentIds = new Set<string>([task.id])
+        const queue = [task.id]
+        while (queue.length) {
+          const curr = queue.shift()!
+          for (const nb of (adj.get(curr) || [])) {
+            if (!componentIds.has(nb)) { componentIds.add(nb); queue.push(nb) }
+          }
+        }
+      }
+
+      // Topo sort the component
+      const componentTasks = [...componentIds].map(id => taskById.get(id)).filter(Boolean)
+      const depths = new Map<string, number>()
+      const auditDepth = (id: string, stack = new Set<string>()): number => {
+        if (depths.has(id)) return depths.get(id)!
+        if (stack.has(id)) return 0
+        stack.add(id)
+        const srcs = inputSourceIds(taskById.get(id)?.input).filter((s: string) => taskById.has(s))
+        const d = srcs.length ? Math.max(...srcs.map((s: string) => auditDepth(s, stack) + 1)) : 0
+        depths.set(id, d); return d
+      }
+      componentTasks.forEach((t: any) => auditDepth(t.id))
+      const sorted = componentTasks.sort((a: any, b: any) => (depths.get(a.id) ?? 0) - (depths.get(b.id) ?? 0))
+
+      const prefix = project?.prefix || ''
+      const taskRef = (t: any) => prefix && t.short_id != null ? `${prefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
+      const statusIcon = (s: string) => s === 'done' ? '✓' : s === 'in_progress' ? '▶' : '○'
+      const SEP = '─'.repeat(56)
+
+      const lines: string[] = [
+        `Audit Trail — ${flowName ? `"${flowName}"` : `${project?.name || projectId} (unnamed flow)`}`,
+        ...(flowContext ? [`Context: ${flowContext}`] : []),
+        '',
+      ]
+
+      let totalValidated = 0, totalPass = 0, totalFail = 0, totalRetries = 0, totalBlocked = 0, totalProvisional = 0
+
+      sorted.forEach((t: any, i: number) => {
+        lines.push(SEP)
+        lines.push(`Step ${i + 1}  ${statusIcon(t.status)}  ${taskRef(t)} — ${t.text}`)
+        const ledgers = t.output?.validation_ledgers
+
+        if (!ledgers || !Object.keys(ledgers).length) {
+          lines.push(t.output?.ledger?.length ? '  [legacy ledger — re-validate to upgrade]' : '  No validation recorded.')
+        } else {
+          Object.entries(ledgers).forEach(([edgeKey, edgeLedger]: [string, any]) => {
+            totalValidated++
+            const consumerTask = edgeKey !== 'self' ? taskById.get(edgeKey) : null
+            const gateLabel = consumerTask ? `→ ${taskRef(consumerTask)} "${consumerTask.text.slice(0, 40)}${consumerTask.text.length > 40 ? '…' : ''}"` : 'Self-check'
+            const vstatus = edgeLedger.validation_status || 'unknown'
+            if (vstatus === 'valid') totalPass++; else totalFail++
+            const retries = edgeLedger.retry_count || 0
+            if (retries > 0) totalRetries += retries
+            if (edgeLedger.retry_blocked) totalBlocked++
+
+            const validators = [...new Set((edgeLedger.ledger || []).map((l: any) => l.validator).filter(Boolean))]
+            const validatorStr = validators.length ? validators.join(', ') : 'unverified'
+            const allBlessed = (edgeLedger.ledger || []).every((l: any) => l.contract_blessed !== false)
+            if (!allBlessed) totalProvisional++
+
+            lines.push('')
+            lines.push(`  Gate: ${gateLabel}`)
+            lines.push(`  Status: ${vstatus.toUpperCase()} | Validator: ${validatorStr} | Contract: ${allBlessed ? 'confirmed' : 'PROVISIONAL'}`)
+            if (edgeLedger.validated_at) lines.push(`  At: ${edgeLedger.validated_at}`)
+            if (retries > 0) lines.push(`  Retries: ${retries}${edgeLedger.retry_blocked ? ' (limit reached)' : ''}`)
+            lines.push('')
+            ;(edgeLedger.ledger || []).forEach((l: any) => {
+              const ev = l.evidence_quality ? ` [${l.evidence_quality} evidence]` : ''
+              lines.push(`  ${l.status === 'pass' ? '✓' : '✗'} [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity} · ${l.kind}] ${l.label}${ev}`)
+              if (l.note) lines.push(`      ↳ ${l.note}`)
+            })
+          })
+        }
+        lines.push('')
+      })
+
+      lines.push(SEP)
+      lines.push(`Summary: ${sorted.length} tasks | ${totalValidated} edges validated | ${totalPass} pass | ${totalFail} fail | ${totalRetries} retries | ${totalBlocked} human-blocked | ${totalProvisional} provisional contract${totalProvisional !== 1 ? 's' : ''}`)
+      return lines.join('\n')
     }
 
     case 'get_flow_order': {
