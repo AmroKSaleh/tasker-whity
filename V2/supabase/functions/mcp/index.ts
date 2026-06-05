@@ -197,13 +197,13 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
       .select('id').eq('user_id', userId).eq('prefix', prefix).maybeSingle()
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, input, output, status, short_id, flow_id').eq('project_id', project.id).eq('short_id', shortId).maybeSingle()
+        .select('id, text, input, output, status, short_id, flow_id, flow_step').eq('project_id', project.id).eq('short_id', shortId).maybeSingle()
       if (task) return task
     }
   }
   // Fall back to UUID
   const { data } = await sb.from('tasks')
-    .select('id, text, input, output, status, short_id, flow_id').eq('id', taskRef).eq('user_id', userId).maybeSingle()
+    .select('id, text, input, output, status, short_id, flow_id, flow_step').eq('id', taskRef).eq('user_id', userId).maybeSingle()
   return data ?? null
 }
 
@@ -2202,7 +2202,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       }
 
       const { data: allTasks } = await sb.from('tasks')
-        .select('id, text, status, short_id, input, output, flow_id')
+        .select('id, text, status, short_id, flow_step, input, output, flow_id')
         .eq('project_id', projectId).eq('user_id', userId)
       if (!allTasks?.length) return 'No tasks found.'
 
@@ -2229,22 +2229,29 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         }
       }
 
-      // Topo sort the component
+      // Sort: persistent flow_step if available, else topo-sort
       const componentTasks = [...componentIds].map(id => taskById.get(id)).filter(Boolean)
-      const depths = new Map<string, number>()
-      const auditDepth = (id: string, stack = new Set<string>()): number => {
-        if (depths.has(id)) return depths.get(id)!
-        if (stack.has(id)) return 0
-        stack.add(id)
-        const srcs = inputSourceIds(taskById.get(id)?.input).filter((s: string) => taskById.has(s))
-        const d = srcs.length ? Math.max(...srcs.map((s: string) => auditDepth(s, stack) + 1)) : 0
-        depths.set(id, d); return d
+      const hasFlowSteps = componentTasks.some((t: any) => t.flow_step != null)
+      let sorted: any[]
+      if (hasFlowSteps) {
+        sorted = componentTasks.sort((a: any, b: any) => (a.flow_step ?? 999) - (b.flow_step ?? 999))
+      } else {
+        const depths = new Map<string, number>()
+        const auditDepth = (id: string, stack = new Set<string>()): number => {
+          if (depths.has(id)) return depths.get(id)!
+          if (stack.has(id)) return 0
+          stack.add(id)
+          const srcs = inputSourceIds(taskById.get(id)?.input).filter((s: string) => taskById.has(s))
+          const d = srcs.length ? Math.max(...srcs.map((s: string) => auditDepth(s, stack) + 1)) : 0
+          depths.set(id, d); return d
+        }
+        componentTasks.forEach((t: any) => auditDepth(t.id))
+        sorted = componentTasks.sort((a: any, b: any) => (depths.get(a.id) ?? 0) - (depths.get(b.id) ?? 0))
       }
-      componentTasks.forEach((t: any) => auditDepth(t.id))
-      const sorted = componentTasks.sort((a: any, b: any) => (depths.get(a.id) ?? 0) - (depths.get(b.id) ?? 0))
 
       const prefix = project?.prefix || ''
       const taskRef = (t: any) => prefix && t.short_id != null ? `${prefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
+      const auditStepLabel = (t: any, i: number) => t.flow_step != null ? `Step ${t.flow_step} · ${taskRef(t)}` : `Step ${i + 1} · ${taskRef(t)}`
       const statusIcon = (s: string) => s === 'done' ? '✓' : s === 'in_progress' ? '▶' : '○'
       const SEP = '─'.repeat(56)
 
@@ -2258,7 +2265,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       sorted.forEach((t: any, i: number) => {
         lines.push(SEP)
-        lines.push(`Step ${i + 1}  ${statusIcon(t.status)}  ${taskRef(t)} — ${t.text}`)
+        lines.push(`${auditStepLabel(t, i)}  ${statusIcon(t.status)}  — ${t.text}`)
         const ledgers = t.output?.validation_ledgers
 
         if (!ledgers || !Object.keys(ledgers).length) {
@@ -2305,7 +2312,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (!project) return `Project "${args.project_id}" not found.`
 
       const { data: tasks } = await sb.from('tasks')
-        .select('id, text, status, priority, short_id, input, sort_order, section_id, flow_id')
+        .select('id, text, status, priority, short_id, flow_step, input, sort_order, section_id, flow_id')
         .eq('project_id', project.id)
         .eq('user_id', userId)
 
@@ -2353,9 +2360,12 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       if (!targetFlows.length) return `No dependency flows found in project "${project.name}". Use set_task_input / set_task_output to connect tasks into flows.`
 
-      // Topological sort within a flow
+      // Topological sort within a flow (prefers flow_step, falls back to graph depth)
       function topoSort(component: Set<string>): any[] {
         const flowTasks = [...component].map(id => taskById.get(id)).filter(Boolean)
+        if (flowTasks.some((t: any) => t.flow_step != null)) {
+          return flowTasks.sort((a: any, b: any) => (a.flow_step ?? 999) - (b.flow_step ?? 999))
+        }
         const depths = new Map<string, number>()
         function depth(id: string, stack = new Set<string>()): number {
           if (depths.has(id)) return depths.get(id)!
@@ -2377,6 +2387,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       const statusIcon = (s: string) => s === 'done' ? '✓' : s === 'in_progress' ? '▶' : '○'
       const taskLabel = (t: any) => t.prefix ? `${t.prefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
+      const orderStepLabel = (t: any, i: number) => t.flow_step != null ? `Step ${t.flow_step} · ${taskLabel(t)}` : `Step ${i + 1} · ${taskLabel(t)}`
 
       // Look up named flows for any tasks that have flow_id set
       const flowIds = [...new Set((tasks || []).map((t: any) => t.flow_id).filter(Boolean))]
@@ -2410,7 +2421,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
             .map((sid: string) => taskById.get(sid)).filter(Boolean).map((s: any) => taskLabel(s))
           const dep = srcLabels.length ? ` ← ${srcLabels.join(', ')}` : ''
           const prio = task.priority ? ` [${task.priority}]` : ''
-          lines.push(`Step ${i + 1}  ${statusIcon(task.status)}  ${taskLabel(task)} — ${task.text}${prio}${dep}`)
+          lines.push(`${orderStepLabel(task, i)}  ${statusIcon(task.status)}  — ${task.text}${prio}${dep}`)
         })
         if (targetFlows.length > 1) lines.push(``)
       })
@@ -2485,7 +2496,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         if (!flow) return `Flow "${args.flow_id}" not found.`
         flowRecord = flow
         const { data: tasks } = await sb.from('tasks')
-          .select('id, text, status, priority, short_id, input, output, sort_order, project_id, project:projects(name, prefix)')
+          .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, project:projects(name, prefix)')
           .eq('flow_id', flow.id).eq('user_id', userId)
         flowTasks = tasks || []
       } else if (args.task_id) {
@@ -2497,7 +2508,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           const { data: flow } = await sb.from('flows').select('id, name, context, project_id').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
           flowRecord = flow || null
           const { data: tasks } = await sb.from('tasks')
-            .select('id, text, status, priority, short_id, input, output, sort_order, project_id, project:projects(name, prefix)')
+            .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, project:projects(name, prefix)')
             .eq('flow_id', anchor.flow_id).eq('user_id', userId)
           flowTasks = tasks || []
         } else {
@@ -2509,7 +2520,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           if (!projectId) return `Could not determine project for task "${args.task_id}". Pass project_id.`
 
           const { data: allTasks } = await sb.from('tasks')
-            .select('id, text, status, priority, short_id, input, output, sort_order, project_id, project:projects(name, prefix)')
+            .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, project:projects(name, prefix)')
             .eq('project_id', projectId).eq('user_id', userId)
           const all = allTasks || []
           const taskById = new Map(all.map((t: any) => [t.id, t]))
@@ -2540,27 +2551,39 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       if (!flowTasks.length) return 'No tasks found in this flow.'
 
-      // Topo-sort the flow tasks
-      const taskById = new Map(flowTasks.map((t: any) => [t.id, t]))
-      const depths = new Map<string, number>()
-      function depth(id: string, stack = new Set<string>()): number {
-        if (depths.has(id)) return depths.get(id)!
-        if (stack.has(id)) return 0
-        stack.add(id)
-        const srcs = inputSourceIds(taskById.get(id)?.input).filter((s: string) => taskById.has(s))
-        const d = srcs.length ? Math.max(...srcs.map((s: string) => depth(s, stack) + 1)) : 0
-        depths.set(id, d)
-        return d
+      // Sort: use persistent flow_step if available, fall back to topo-sort
+      const hasSteps = flowTasks.some((t: any) => t.flow_step != null)
+      let sorted: any[]
+      if (hasSteps) {
+        sorted = [...flowTasks].sort((a: any, b: any) => (a.flow_step ?? 999) - (b.flow_step ?? 999))
+      } else {
+        const taskById2 = new Map(flowTasks.map((t: any) => [t.id, t]))
+        const depths2 = new Map<string, number>()
+        function depth2(id: string, stack = new Set<string>()): number {
+          if (depths2.has(id)) return depths2.get(id)!
+          if (stack.has(id)) return 0
+          stack.add(id)
+          const srcs = inputSourceIds(taskById2.get(id)?.input).filter((s: string) => taskById2.has(s))
+          const d = srcs.length ? Math.max(...srcs.map((s: string) => depth2(s, stack) + 1)) : 0
+          depths2.set(id, d)
+          return d
+        }
+        flowTasks.forEach((t: any) => depth2(t.id))
+        sorted = [...flowTasks].sort((a: any, b: any) => {
+          const da = depths2.get(a.id) ?? 0
+          const db = depths2.get(b.id) ?? 0
+          return da !== db ? da - db : (a.sort_order ?? 0) - (b.sort_order ?? 0)
+        })
       }
-      flowTasks.forEach((t: any) => depth(t.id))
-      const sorted = [...flowTasks].sort((a: any, b: any) => {
-        const da = depths.get(a.id) ?? 0
-        const db = depths.get(b.id) ?? 0
-        return da !== db ? da - db : (a.sort_order ?? 0) - (b.sort_order ?? 0)
-      })
 
       const prefix = sorted[0]?.project?.prefix || ''
+      const taskById = new Map(sorted.map((t: any) => [t.id, t]))
       const taskRef = (t: any) => prefix && t.short_id != null ? `${prefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
+      // Primary label: "Step N · TDE-103" when step is known, else just "TDE-103"
+      const stepLabel = (t: any, i: number) => {
+        const step = t.flow_step ?? (i + 1)
+        return `Step ${step} · ${taskRef(t)}`
+      }
       const statusIcon = (s: string) => s === 'done' ? '✓' : s === 'in_progress' ? '▶' : '○'
 
       const completedCount = sorted.filter((t: any) => t.status === 'done').length
@@ -2575,7 +2598,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         lines.push(`\nStatus: COMPLETE — all steps done.`)
         lines.push(`\nSteps:`)
         sorted.forEach((t: any, i: number) => {
-          lines.push(`  Step ${i + 1}  ${statusIcon(t.status)}  ${taskRef(t)} — ${t.text}`)
+          lines.push(`  ${statusIcon(t.status)}  ${stepLabel(t, i)} — ${t.text}`)
         })
         return lines.join('\n')
       }
@@ -2588,14 +2611,14 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         const isCurrent = i === pendingFrom
         const marker = isDone ? '✓ DONE' : isCurrent ? '▶ NEXT' : '○ WAITING'
         lines.push(``)
-        lines.push(`Step ${i + 1}  [${marker}]  ${taskRef(t)} — ${t.text}`)
+        lines.push(`${stepLabel(t, i)}  [${marker}]  — ${t.text}`)
 
         // Incoming gate contracts (what this task demands from its producers)
         const edges = inputEdges(t.input)
         if (edges.length) {
           edges.forEach((e: any) => {
             const src = taskById.get(e.source_task_id)
-            const srcLabel = src ? `${taskRef(src)} "${src.text.slice(0, 35)}${src.text.length > 35 ? '…' : ''}"` : e.source_task_id.slice(0, 8)
+            const srcLabel = src ? `${stepLabel(src, sorted.indexOf(src))} "${src.text.slice(0, 35)}${src.text.length > 35 ? '…' : ''}"` : e.source_task_id.slice(0, 8)
             lines.push(`  Requires output from: ${srcLabel}`)
             const gateRules = e.contract?.rules || []
             if (gateRules.length) {
@@ -2627,7 +2650,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
       lines.push('')
       lines.push('── EXECUTION PROTOCOL ─────────────────────────────')
-      lines.push(`Resume at Step ${pendingFrom + 1}: ${taskRef(sorted[pendingFrom])} — "${sorted[pendingFrom].text}"`)
+      lines.push(`Resume at ${stepLabel(sorted[pendingFrom], pendingFrom)}: "${sorted[pendingFrom].text}"`)
       lines.push('')
       lines.push('For each step:')
       lines.push('  1. Call get_task(task_id) — sets it in_progress automatically.')
@@ -3226,8 +3249,36 @@ Call submit_validation_result with:
         flowId = flow.id
       }
 
-      await sb.from('tasks').update({ flow_id: flowId }).in('id', valid.map((t: any) => t.id))
-      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} linked.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''} Flow ID: ${flowId.slice(0, 8)}…`
+      // Topo-sort the valid tasks and assign flow_step (1-based)
+      // Tie-break by original task_ids order (agent lists them in intended order)
+      const flowTaskById = new Map(valid.map((t: any) => [t.id, t]))
+      const originalOrder = new Map(valid.map((t: any, i: number) => [t.id, i]))
+      const flowDepths = new Map<string, number>()
+      function flowDepth(id: string, stack = new Set<string>()): number {
+        if (flowDepths.has(id)) return flowDepths.get(id)!
+        if (stack.has(id)) return 0
+        stack.add(id)
+        const srcs = inputSourceIds(flowTaskById.get(id)?.input).filter((s: string) => flowTaskById.has(s))
+        const d = srcs.length ? Math.max(...srcs.map((s: string) => flowDepth(s, stack) + 1)) : 0
+        flowDepths.set(id, d)
+        return d
+      }
+      valid.forEach((t: any) => flowDepth(t.id))
+      const sortedFlow = [...valid].sort((a: any, b: any) => {
+        const da = flowDepths.get(a.id) ?? 0
+        const db = flowDepths.get(b.id) ?? 0
+        return da !== db ? da - db : (originalOrder.get(a.id) ?? 0) - (originalOrder.get(b.id) ?? 0)
+      })
+
+      await Promise.all(sortedFlow.map((t: any, i: number) =>
+        sb.from('tasks').update({ flow_id: flowId, flow_step: i + 1 }).eq('id', t.id)
+      ))
+
+      const stepList = sortedFlow.map((t: any, i: number) => {
+        const ref = t.short_id != null ? `#${t.short_id}` : t.id.slice(0, 8)
+        return `  Step ${i + 1}: ${ref} — ${t.text}`
+      }).join('\n')
+      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…`
     }
 
     case 'get_flow_context': {
@@ -3238,7 +3289,7 @@ Call submit_validation_result with:
       const { data: flow } = await sb.from('flows').select('id, name, context, created_at').eq('id', task.flow_id).eq('user_id', userId).maybeSingle()
       if (!flow) return `Flow record not found for "${task.text}".`
 
-      const { data: members } = await sb.from('tasks').select('short_id, text, status, project:projects(prefix)').eq('flow_id', flow.id).eq('user_id', userId)
+      const { data: members } = await sb.from('tasks').select('short_id, flow_step, text, status, project:projects(prefix)').eq('flow_id', flow.id).eq('user_id', userId).order('flow_step', { ascending: true, nullsFirst: false })
       const lines = [
         `Flow: ${flow.name}`,
         `ID: ${flow.id.slice(0, 8)}…`,
@@ -3249,7 +3300,8 @@ Call submit_validation_result with:
         ...(members || []).map((t: any) => {
           const prefix = t.project?.prefix
           const ref = prefix && t.short_id != null ? `${prefix}-${t.short_id}` : `#${t.short_id}`
-          return `  [${t.status}] ${ref} — ${t.text}`
+          const stepStr = t.flow_step != null ? `Step ${t.flow_step} · ` : ''
+          return `  [${t.status}] ${stepStr}${ref} — ${t.text}`
         }),
       ]
       return lines.join('\n')
