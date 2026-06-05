@@ -316,7 +316,7 @@ const ASSISTANT_DIRECTIVES = [
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
-  'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and use AskUserQuestion to present the failures to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
+  'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and call get_task_critique on the producer task to get the clean validator notes, then use AskUserQuestion to present those findings to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
   'FLOW IDENTITY: After persisting a new flow (after all create_task + set_task_output + set_task_input calls), call name_flow with all task IDs and a descriptive name (e.g. "Blog Post Publication Flow"). Optionally add a context string — the goal, constraints, or background that applies to all tasks. At the start of any flow run, call get_flow_context to orient yourself. Use update_flow_context to log progress or decisions that future agents in the flow should know.',
   'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. How: (1) word/character count → count manually word-by-word or run `echo "..." | wc -w` via Bash and put the exact number in the note; (2) command (e.g. "npm test exits 0") → run it with the Bash tool, capture stdout/stderr, put the exit code + output in the note; (3) keyword/pattern → read the artifact and search it, put the match result in the note; (4) file existence → use Glob/Read, put the found path in the note. Submitting a check result with no note is REJECTED. A note of "I checked, it passes" is not evidence — the raw observed value is. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) also REQUIRES a note — the specific deficiency: what exactly did not meet the rule and why. "fail" alone is REJECTED. This applies to the validator subagent too.',
@@ -990,6 +990,18 @@ const TOOLS = [
         task_id: { type: 'string', description: 'Optional: task UUID or short ID (e.g. TDE-31) to focus on that task\'s specific flow. If omitted, returns all flows in the project.' },
       },
       required: ['project_id'],
+    },
+  },
+  {
+    name: 'get_task_critique',
+    description: 'Get the validator\'s critique for a task — what passed, what failed, and the specific notes from the independent validator subagent. Cleaner than get_validation_feedback for the "what did the validator say?" question. Surface this to the human when action=ask_human, or call it to understand why a gate failed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'The producer task (UUID or short ID)' },
+        target_task_id: { type: 'string', description: 'Optional: which consumer edge\'s critique to show. Required only if the producer feeds more than one task.' },
+      },
+      required: ['task_id'],
     },
   },
   {
@@ -2795,11 +2807,29 @@ Call submit_validation_result with:
         ...(action === 'ask_human' ? { retry_blocked: true } : {}),
       }
 
+      const allBlessed = ledger.every((l: any) => l.contract_blessed !== false)
+      const critiqueEntry = {
+        validated_at: checkedAt,
+        validator: validator || 'unverified',
+        contract_blessed: allBlessed,
+        overall: validationStatus,
+        fails: ledger.filter((l: any) => l.status === 'fail').map((l: any) => ({
+          rule_id: l.rule_id, label: l.label, kind: l.kind, severity: l.severity, source: l.source, note: l.note,
+        })),
+        passes: ledger.filter((l: any) => l.status === 'pass').map((l: any) => ({
+          rule_id: l.rule_id, label: l.label, kind: l.kind, severity: l.severity, source: l.source, note: l.note,
+        })),
+      }
+
+      const prevCritiques = (prevOutput.critiques && typeof prevOutput.critiques === 'object') ? prevOutput.critiques : {}
+
       await sb.from('tasks').update({
         output: {
           ...prevOutput,
           // Per-edge ledger (fan-out safe — each consumer keeps its own record)
           validation_ledgers: { ...prevLedgers, [edgeKey]: edgeLedgerEntry },
+          // Per-edge critique (clean human-readable notes from the validator)
+          critiques: { ...prevCritiques, [edgeKey]: critiqueEntry },
           // Flat fields kept for backward compat (single-edge / endpoint tasks)
           validation_status: validationStatus,
           validated_against: targetId,
@@ -2831,6 +2861,89 @@ Call submit_validation_result with:
             ? `Output REJECTED — retry limit reached (${RETRY_LIMIT} attempts). Stop and ask the human via AskUserQuestion — show them the failures and ask how to proceed.`
             : `Output REJECTED by ${targetText ? `"${targetText}"'s` : 'the'} acceptance criteria — ${blockingFails.length} blocker(s). Attempt ${newRetryCount}/${RETRY_LIMIT}.${reopened ? ' Producer reopened.' : ''} Fix, re-complete the task, then call validate_output + submit_validation_result again.`,
       })
+    }
+
+    case 'get_task_critique': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const out = task.output
+      const critiques = (out?.critiques && typeof out.critiques === 'object') ? out.critiques : {}
+      const keys = Object.keys(critiques)
+
+      if (!keys.length && !out?.ledger) return `No validation critique recorded for "${task.text}" yet. Run validate_output + submit_validation_result first.`
+
+      // Resolve which edge to show
+      let edgeKey: string | null = null
+      if (args.target_task_id) {
+        const target = await resolveTask(sb, userId, args.target_task_id)
+        if (!target) return `Target task "${args.target_task_id}" not found.`
+        if (critiques[target.id]) { edgeKey = target.id }
+        else return `No critique found for the edge to "${target.text}". Either validation hasn't run for that edge yet, or use get_validation_feedback for raw ledger data.`
+      } else if (keys.length === 1) {
+        edgeKey = keys[0]
+      } else if (keys.length > 1) {
+        return JSON.stringify({
+          error: 'ambiguous_edge',
+          message: `"${task.text}" has critiques for ${keys.length} consumer edges. Re-call with target_task_id to pick one.`,
+          available_edges: keys,
+        })
+      }
+
+      const critique = edgeKey ? critiques[edgeKey] : null
+
+      // Fallback to flat ledger (old data before TDE-215)
+      if (!critique && out?.ledger) {
+        const fails = (out.ledger as any[]).filter((l: any) => l.status === 'fail')
+        const passes = (out.ledger as any[]).filter((l: any) => l.status === 'pass')
+        const lines = [
+          `Critique for "${task.text}" [legacy format — re-validate to upgrade]`,
+          `Status: ${out.validation_status || 'unknown'} | Validator: ${out.ledger[0]?.validator || 'unverified'}`,
+          '',
+        ]
+        if (fails.length) {
+          lines.push(`FAILED (${fails.length}):`)
+          fails.forEach((l: any) => {
+            lines.push(`  ✗ [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity} · ${l.kind}] ${l.label}`)
+            lines.push(`      ${l.note || '(no note)'}`)
+          })
+        } else {
+          lines.push('All rules passed.')
+        }
+        if (passes.length) {
+          lines.push('', `PASSED (${passes.length}):`)
+          passes.forEach((l: any) => {
+            lines.push(`  ✓ [${l.source === 'input' ? 'gate' : 'self'} · ${l.severity} · ${l.kind}] ${l.label}`)
+            if (l.note) lines.push(`      ${l.note}`)
+          })
+        }
+        return lines.join('\n')
+      }
+
+      if (!critique) return `No critique found for "${task.text}".`
+
+      const lines = [
+        `Critique for "${task.text}"`,
+        `Status: ${critique.overall?.toUpperCase()} | Validator: ${critique.validator} | Contract: ${critique.contract_blessed ? 'confirmed' : 'PROVISIONAL'}`,
+        `At: ${critique.validated_at}`,
+        '',
+      ]
+      if (critique.fails?.length) {
+        lines.push(`FAILED (${critique.fails.length}):`)
+        critique.fails.forEach((f: any) => {
+          lines.push(`  ✗ [${f.source === 'input' ? 'gate' : 'self'} · ${f.severity} · ${f.kind}] ${f.label}`)
+          lines.push(`      ${f.note || '(no note)'}`)
+        })
+      } else {
+        lines.push('All rules passed.')
+      }
+      if (critique.passes?.length) {
+        lines.push('', `PASSED (${critique.passes.length}):`)
+        critique.passes.forEach((p: any) => {
+          lines.push(`  ✓ [${p.source === 'input' ? 'gate' : 'self'} · ${p.severity} · ${p.kind}] ${p.label}`)
+          if (p.note) lines.push(`      ${p.note}`)
+        })
+      }
+      return lines.join('\n')
     }
 
     case 'get_validation_feedback': {
