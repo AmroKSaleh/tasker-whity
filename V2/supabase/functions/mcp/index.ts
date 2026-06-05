@@ -319,6 +319,7 @@ const ASSISTANT_DIRECTIVES = [
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and call get_task_critique on the producer task to get the clean validator notes, then use AskUserQuestion to present those findings to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
   'FLOW IDENTITY: After persisting a new flow (after all create_task + set_task_output + set_task_input calls), call name_flow with all task IDs and a descriptive name (e.g. "Blog Post Publication Flow"). Optionally add a context string — the goal, constraints, or background that applies to all tasks. At the start of any flow run, call get_flow_context to orient yourself. Use update_flow_context to log progress or decisions that future agents in the flow should know.',
+  'RUN FLOW: When the user asks you to run, execute, or start a flow — call run_flow first (with flow_id or any task_id in the flow). Read the playbook it returns. Then self-sequence through every step in order: execute → store_artifact → complete_task → validate → handle action. Do NOT prompt the user between steps unless action=ask_human. The flow runs to completion (or human intervention) in one session.',
   'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. How: (1) word/character count → count manually word-by-word or run `echo "..." | wc -w` via Bash and put the exact number in the note; (2) command (e.g. "npm test exits 0") → run it with the Bash tool, capture stdout/stderr, put the exit code + output in the note; (3) keyword/pattern → read the artifact and search it, put the match result in the note; (4) file existence → use Glob/Read, put the found path in the note. Submitting a check result with no note is REJECTED. A note of "I checked, it passes" is not evidence — the raw observed value is. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) also REQUIRES a note — the specific deficiency: what exactly did not meet the rule and why. "fail" alone is REJECTED. This applies to the validator subagent too.',
 ]
 
@@ -1062,6 +1063,18 @@ const TOOLS = [
         name: { type: 'string', description: 'Optional: rename the flow' },
       },
       required: ['task_id'],
+    },
+  },
+  {
+    name: 'run_flow',
+    description: 'Get the full execution playbook for an existing flow — ordered steps with their contracts, current status, and the step-by-step protocol to run the flow to completion. Call this at the start of any flow run. The playbook tells you exactly what to produce at each step, what the quality gates check, and how to sequence store_artifact → complete_task → validate_output → submit_validation_result for each handoff.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id: { type: 'string', description: 'Flow UUID (from name_flow). Preferred if you have it.' },
+        task_id: { type: 'string', description: 'Any task in the flow — the server will find the whole flow from it. Use when you only have a task reference.' },
+        project_id: { type: 'string', description: 'Project slug, prefix, or UUID. Required when using task_id with a short ID like TDE-12.' },
+      },
     },
   },
   {
@@ -2458,6 +2471,182 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         lines.push(`## Blocks`)
         lines.push(`  (none — no tasks depend directly on this one)`)
       }
+
+      return lines.join('\n')
+    }
+
+    case 'run_flow': {
+      // Resolve the flow — either directly by flow_id, or by finding the connected component a task belongs to.
+      let flowRecord: any = null
+      let flowTasks: any[] = []
+
+      if (args.flow_id) {
+        const { data: flow } = await sb.from('flows').select('id, name, context, project_id').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+        if (!flow) return `Flow "${args.flow_id}" not found.`
+        flowRecord = flow
+        const { data: tasks } = await sb.from('tasks')
+          .select('id, text, status, priority, short_id, input, output, sort_order, project_id, project:projects(name, prefix)')
+          .eq('flow_id', flow.id).eq('user_id', userId)
+        flowTasks = tasks || []
+      } else if (args.task_id) {
+        const anchor = await resolveTask(sb, userId, args.task_id)
+        if (!anchor) return `Task "${args.task_id}" not found.`
+
+        // If the anchor has a flow_id, fetch the whole named flow
+        if (anchor.flow_id) {
+          const { data: flow } = await sb.from('flows').select('id, name, context, project_id').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+          flowRecord = flow || null
+          const { data: tasks } = await sb.from('tasks')
+            .select('id, text, status, priority, short_id, input, output, sort_order, project_id, project:projects(name, prefix)')
+            .eq('flow_id', anchor.flow_id).eq('user_id', userId)
+          flowTasks = tasks || []
+        } else {
+          // BFS over the I/O graph to find the connected component
+          const project = args.project_id
+            ? await resolveProject(sb, userId, args.project_id)
+            : null
+          const projectId = project?.id || (await sb.from('tasks').select('project_id').eq('id', anchor.id).maybeSingle()).data?.project_id
+          if (!projectId) return `Could not determine project for task "${args.task_id}". Pass project_id.`
+
+          const { data: allTasks } = await sb.from('tasks')
+            .select('id, text, status, priority, short_id, input, output, sort_order, project_id, project:projects(name, prefix)')
+            .eq('project_id', projectId).eq('user_id', userId)
+          const all = allTasks || []
+          const taskById = new Map(all.map((t: any) => [t.id, t]))
+
+          const adj = new Map(all.map((t: any) => [t.id, new Set<string>()]))
+          all.forEach((t: any) => {
+            for (const src of inputSourceIds(t.input)) {
+              if (adj.has(src)) { adj.get(t.id)!.add(src); adj.get(src)!.add(t.id) }
+            }
+          })
+
+          const component = new Set<string>()
+          const queue = [anchor.id]
+          const visited = new Set([anchor.id])
+          while (queue.length) {
+            const curr = queue.shift()!
+            component.add(curr)
+            for (const nb of (adj.get(curr) || [])) {
+              if (!visited.has(nb)) { visited.add(nb); queue.push(nb) }
+            }
+          }
+          if (component.size <= 1) return `Task "${anchor.text}" has no I/O connections — not part of a flow. Use set_task_input / set_task_output to link tasks into a flow, or call build_new_flow to design one.`
+          flowTasks = [...component].map((id: string) => taskById.get(id)).filter(Boolean)
+        }
+      } else {
+        return 'Provide either flow_id or task_id to identify the flow.'
+      }
+
+      if (!flowTasks.length) return 'No tasks found in this flow.'
+
+      // Topo-sort the flow tasks
+      const taskById = new Map(flowTasks.map((t: any) => [t.id, t]))
+      const depths = new Map<string, number>()
+      function depth(id: string, stack = new Set<string>()): number {
+        if (depths.has(id)) return depths.get(id)!
+        if (stack.has(id)) return 0
+        stack.add(id)
+        const srcs = inputSourceIds(taskById.get(id)?.input).filter((s: string) => taskById.has(s))
+        const d = srcs.length ? Math.max(...srcs.map((s: string) => depth(s, stack) + 1)) : 0
+        depths.set(id, d)
+        return d
+      }
+      flowTasks.forEach((t: any) => depth(t.id))
+      const sorted = [...flowTasks].sort((a: any, b: any) => {
+        const da = depths.get(a.id) ?? 0
+        const db = depths.get(b.id) ?? 0
+        return da !== db ? da - db : (a.sort_order ?? 0) - (b.sort_order ?? 0)
+      })
+
+      const prefix = sorted[0]?.project?.prefix || ''
+      const taskRef = (t: any) => prefix && t.short_id != null ? `${prefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
+      const statusIcon = (s: string) => s === 'done' ? '✓' : s === 'in_progress' ? '▶' : '○'
+
+      const completedCount = sorted.filter((t: any) => t.status === 'done').length
+      const pendingFrom = sorted.findIndex((t: any) => t.status !== 'done')
+      const allDone = completedCount === sorted.length
+
+      const lines: string[] = []
+      lines.push(flowRecord ? `Flow: "${flowRecord.name}"` : `Flow (unnamed — call name_flow to register it)`)
+      if (flowRecord?.context) lines.push(`Context: ${flowRecord.context}`)
+      lines.push(`Progress: ${completedCount}/${sorted.length} steps complete`)
+      if (allDone) {
+        lines.push(`\nStatus: COMPLETE — all steps done.`)
+        lines.push(`\nSteps:`)
+        sorted.forEach((t: any, i: number) => {
+          lines.push(`  Step ${i + 1}  ${statusIcon(t.status)}  ${taskRef(t)} — ${t.text}`)
+        })
+        return lines.join('\n')
+      }
+      lines.push('')
+
+      // Per-step details
+      lines.push('── STEPS ──────────────────────────────────────────')
+      sorted.forEach((t: any, i: number) => {
+        const isDone = t.status === 'done'
+        const isCurrent = i === pendingFrom
+        const marker = isDone ? '✓ DONE' : isCurrent ? '▶ NEXT' : '○ WAITING'
+        lines.push(``)
+        lines.push(`Step ${i + 1}  [${marker}]  ${taskRef(t)} — ${t.text}`)
+
+        // Incoming gate contracts (what this task demands from its producers)
+        const edges = inputEdges(t.input)
+        if (edges.length) {
+          edges.forEach((e: any) => {
+            const src = taskById.get(e.source_task_id)
+            const srcLabel = src ? `${taskRef(src)} "${src.text.slice(0, 35)}${src.text.length > 35 ? '…' : ''}"` : e.source_task_id.slice(0, 8)
+            lines.push(`  Requires output from: ${srcLabel}`)
+            const gateRules = e.contract?.rules || []
+            if (gateRules.length) {
+              const blessed = e.contract?.confirmed ? 'confirmed' : 'PROVISIONAL'
+              lines.push(`  Gate contract [${blessed}]:`)
+              gateRules.forEach((r: any) => {
+                lines.push(`    [${r.severity} · ${r.kind}] ${r.label}: ${r.rule}`)
+              })
+            }
+          })
+        }
+
+        // Output contract (what this task must produce)
+        const outContract = outputContract(t.output)
+        if (outContract.rules.length) {
+          const blessed = outContract.confirmed ? 'confirmed' : 'PROVISIONAL'
+          lines.push(`  Output contract [${blessed}]:`)
+          outContract.rules.forEach((r: any) => {
+            lines.push(`    [${r.severity} · ${r.kind}] ${r.label}: ${r.rule}`)
+          })
+        }
+
+        // Validation status if already run
+        const vs = t.output?.validation_status
+        if (vs) {
+          lines.push(`  Last validation: ${vs.toUpperCase()}${t.output?.validated_at ? ` at ${t.output.validated_at}` : ''}`)
+        }
+      })
+
+      lines.push('')
+      lines.push('── EXECUTION PROTOCOL ─────────────────────────────')
+      lines.push(`Resume at Step ${pendingFrom + 1}: ${taskRef(sorted[pendingFrom])} — "${sorted[pendingFrom].text}"`)
+      lines.push('')
+      lines.push('For each step:')
+      lines.push('  1. Call get_task(task_id) — sets it in_progress automatically.')
+      lines.push('  2. Do the work. Produce the artifact.')
+      lines.push('  3. Call store_artifact(task_id, verbatim_content) — REQUIRED before completing if judgment output rules exist.')
+      lines.push('  4. Call complete_task(task_id).')
+      lines.push('  5. Validate the output:')
+      lines.push('       A. Check-only rules → call submit_validation_result directly (skip validate_output).')
+      lines.push('       B. Judgment rules → call validate_output to get validator_agent_prompt, then spawn a fresh')
+      lines.push('          adversarial validator subagent via the Agent tool passing that prompt unmodified.')
+      lines.push('  6. On action=pass → proceed to the next step.')
+      lines.push('     On action=regenerate → redo this step, re-validate. Max 3 attempts.')
+      lines.push('     On action=ask_human → call get_task_critique, then use AskUserQuestion to present to the human.')
+      lines.push('  7. Repeat until all steps are done.')
+      lines.push('')
+      lines.push('Rules:')
+      lines.push('  • Do NOT skip a gate — every step with a gate contract MUST be validated before the next step runs.')
+      lines.push('  • The validator subagent starts from a FAIL prior — it needs concrete evidence in the artifact to flip to pass.')
+      lines.push('  • If a task has no output contract, complete it and move on (no validation needed).')
 
       return lines.join('\n')
     }
