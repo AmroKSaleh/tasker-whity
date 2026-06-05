@@ -257,6 +257,16 @@ function normalizeRule(r: any, i: number): any {
   }
 }
 
+// Detect vague rules that are hard to enforce or trivially self-pass.
+const VAGUE_RULE_WORDS = /\b(readable|clarity|clear|good|nice|appropriate|reasonable|relevant|professional|adequate|sufficient|proper|well.written|high.quality|comprehensive|thorough|engaging|interesting|helpful|useful)\b/i
+function lintRule(r: any): string | null {
+  const text = (r.rule || '').trim()
+  if (text.length < 15) return 'rule is too short to be checkable — add a specific, measurable criterion'
+  const match = text.match(VAGUE_RULE_WORDS)
+  if (match) return `vague language "${match[0]}" — replace with a concrete, verifiable criterion (e.g. instead of "readable" → "each sentence under 25 words, no unexplained jargon"; instead of "comprehensive" → "covers all N sections listed in the outline")`
+  return null
+}
+
 // Upstream source tasks NOT yet done (the blockers for a fan-in task). Reads both I/O shapes.
 async function unmetSources(sb: any, input: any): Promise<Array<{ id: string, text: string, status: string }>> {
   const ids = inputSourceIds(input)
@@ -2283,7 +2293,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           '1. GROUND THE START: use project_context below and read the repo if relevant, then ask the user what they already have / where they are starting from. Do not ask about things you can already see.',
           '2. PIN THE GOAL' + (args.goal ? ` (stated: "${args.goal}")` : '') + ': confirm the end goal and treat it as the FINAL task\'s output contract.',
           '3. FORWARD-DECOMPOSE one step at a time toward the goal, recommending a path each time, building the ordered chain of tasks.',
-          '4. AUTHOR A CONTRACT PER HANDOFF: for each task propose an output contract (its definition-of-done) and the next task\'s input contract (its acceptance criteria) as structured, CONTEXT-FREE rules — describe the shape of acceptable output, never this run\'s subject. Only make a step its own task if it produces a distinct, checkable output a later step depends on (a contract-worthy handoff); otherwise it is a sub-detail of a task, not its own task.',
+          '4. AUTHOR A CONTRACT PER HANDOFF: for each task propose an output contract (its definition-of-done) and the next task\'s input contract (its acceptance criteria) as structured, CONTEXT-FREE rules — describe the shape of acceptable output, never this run\'s subject. Only make a step its own task if it produces a distinct, checkable output a later step depends on (a contract-worthy handoff); otherwise it is a sub-detail of a task, not its own task. RULE QUALITY: push toward sharp, checkable rules. Prefer kind=check with concrete params (word count, test command, file existence). For kind=judgment, require an objective criterion ("each sentence under 25 words" not "readable") and a stated way to verify it. Actively push back on vague rules like "good quality", "clear", "comprehensive" — ask the user what SPECIFICALLY makes it pass.',
           '5. PRESENT THE WHOLE PROPOSED FLOW (tasks + dependency edges + contracts) and ask for ONE confirmation.',
           '6. ON CONFIRM, PERSIST (see persistence).',
         ],
@@ -2322,9 +2332,11 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const { error } = await sb.from('tasks').update({ input: { edges } }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
+      const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set input edge on ${args.task_id}: consumes ${args.source_task_id}` +
         (rules.length ? ` with ${rules.length} contract rule${rules.length !== 1 ? 's' : ''} (PROVISIONAL — confirm via confirm_contract)` : ' (no contract rules yet)') +
         `. Total input edges: ${edges.length}.`
+        + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
     }
 
     case 'set_task_output': {
@@ -2342,7 +2354,9 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
+      const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is PROVISIONAL until confirmed by a human via confirm_contract. Consumers are derived from tasks that list this as a source.`
+        + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
     }
 
     case 'store_artifact': {
