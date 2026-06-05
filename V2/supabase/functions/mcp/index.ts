@@ -307,7 +307,7 @@ const ASSISTANT_DIRECTIVES = [
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and use AskUserQuestion to present the failures to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
-  'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When validate_output returns judgment rules, use the Agent tool to spawn an independent validator subagent: copy the validator_agent_prompt from the response, replace the [ARTIFACT] placeholder with the actual produced content, and pass the whole thing as the agent prompt. The subagent has no memory of the work, grades fresh, and calls submit_validation_result itself with validator="independent-subagent". You do NOT grade judgment rules yourself. For kind=check rules (deterministic counts/commands/patterns) you may self-evaluate — no independence needed there. Pass validator="human" only if a human explicitly reviewed instead of a subagent.',
+  'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then call validate_output — if judgment rules exist, the response includes a complete validator_agent_prompt with the artifact already embedded (served from the server, not from you). Spawn a validator subagent using the Agent tool and pass validator_agent_prompt as the prompt — do not modify it. The subagent grades and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. For kind=check rules only (deterministic counts/commands) you may self-evaluate without a subagent.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -893,6 +893,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'store_artifact',
+    description: 'Store the actual produced output for a task before completing it. The artifact is embedded directly into the validator_agent_prompt returned by validate_output — the independent validator subagent receives the content from the server, not from the executor. REQUIRED before complete_task on any task whose output contract contains kind=judgment rules.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID — the PRODUCER' },
+        content: { type: 'string', description: 'The actual produced output — verbatim, not a summary. This is exactly what the independent validator will grade.' },
+        format: { type: 'string', enum: ['text', 'markdown', 'code', 'json'], description: 'Optional format hint for the validator. Default: text.' },
+      },
+      required: ['task_id', 'content'],
+    },
+  },
+  {
     name: 'validate_output',
     description: 'PHASE 1 of a handoff check. Returns the rules to evaluate — the CONSUMER\'s input contract for this edge (the gate) plus the producer\'s own output contract (self-check) — with an instruction for YOU (the agent) to evaluate each rule against the actual produced output, then report results via submit_validation_result. Tasker does NOT run the checks; you do. Does not itself return a verdict.',
     inputSchema: {
@@ -1242,6 +1255,20 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (task.input && !proceed_anyway) {
         const unmet = await unmetSources(sb, task.input)
         if (unmet.length) return flowBlockedResponse(unmet)
+      }
+
+      // Block completion if judgment output rules exist but no artifact stored
+      if (!proceed_anyway) {
+        const out = (task.output && typeof task.output === 'object') ? task.output : {}
+        const judgmentRules = (out.contract?.rules || []).filter((r: any) => r.kind === 'judgment')
+        if (judgmentRules.length && !out.artifact) {
+          return JSON.stringify({
+            blocked: true,
+            reason: `"${task.text}" has ${judgmentRules.length} kind=judgment output rule(s) but no artifact has been stored. Call store_artifact with the verbatim produced content first — this is what the independent validator will grade. Then call complete_task again.`,
+            judgment_rules: judgmentRules.map((r: any) => ({ id: r.id, label: r.label, rule: r.rule })),
+            bypass: 'Pass proceed_anyway: true to skip this check (marks validation as unverified).',
+          })
+        }
       }
 
       await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString() }).eq('id', task.id)
@@ -2303,6 +2330,22 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Consumers are derived from tasks that list this as a source.`
     }
 
+    case 'store_artifact': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+      await sb.from('tasks').update({
+        output: {
+          ...prev,
+          artifact: args.content,
+          artifact_format: args.format || 'text',
+          artifact_stored_at: new Date().toISOString(),
+        },
+      }).eq('id', task.id)
+      const wordCount = String(args.content).split(/\s+/).filter(Boolean).length
+      return `Artifact stored on "${task.text}" (${wordCount} words, format: ${args.format || 'text'}). Call complete_task when ready — if the task has judgment output rules, validate_output will now embed this artifact directly in the validator prompt.`
+    }
+
     case 'validate_output': {
       const producer = await resolveTask(sb, userId, args.task_id)
       if (!producer) return `Task "${args.task_id}" not found.`
@@ -2349,18 +2392,20 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const gateRules = edge?.contract?.rules || []
 
       const hasJudgment = gateRules.some((r: any) => r.kind === 'judgment')
+      const storedArtifact: string | null = producer.output?.artifact || null
       const allRuleIds = [...gateRules, ...selfRules].map((r: any) => r.id).join(', ')
       const rulesBlock = [...gateRules, ...selfRules].map((r: any) =>
-        `[${r.id}] ${r.label} (${r.kind}, ${r.severity}${r.source !== undefined ? '' : ''})\nRule: ${r.rule}${r.description ? `\nContext: ${r.description}` : ''}`
+        `[${r.id}] ${r.label} (${r.kind}, ${r.severity})\nRule: ${r.rule}${r.description ? `\nContext: ${r.description}` : ''}`
       ).join('\n\n')
+      const artifactBlock = storedArtifact
+        ? `── ARTIFACT (${producer.output?.artifact_format || 'text'}) ─────────────────────────────────────\n${storedArtifact}\n─────────────────────────────────────────────────────────────`
+        : `── ARTIFACT ─────────────────────────────────────────────────\n[NO ARTIFACT STORED — executor must call store_artifact first. Do not proceed with grading.]\n─────────────────────────────────────────────────────────────`
       const validatorPrompt = `You are an independent quality validator for a Tasker flow. You have no prior context on how this artifact was produced — grade it strictly based only on what you see below.
 
 PRODUCER: ${producer.text} (task_id: ${producer.id})
 CONSUMER: ${consumer.text} (target_task_id: ${consumer.id})
 
-── ARTIFACT ─────────────────────────────────────────────────
-[PASTE THE PRODUCED ARTIFACT HERE before spawning — replace this entire line with the actual content]
-─────────────────────────────────────────────────────────────
+${artifactBlock}
 
 ── RULES ────────────────────────────────────────────────────
 ${rulesBlock}
@@ -2376,11 +2421,15 @@ Call submit_validation_result with:
   validator: "independent-subagent"
   results: one {rule_id, status, note} per rule — you must cover all rule IDs: ${allRuleIds}`
 
+      const artifactReady = !!storedArtifact
       return JSON.stringify({
-        status: 'needs_agent_validation',
-        instruction: hasJudgment
-          ? 'This gate has kind=judgment rules. Spawn a validator subagent using the Agent tool: copy validator_agent_prompt, replace [ARTIFACT] with the produced content, pass as the agent prompt. The subagent grades and calls submit_validation_result independently. You handle kind=check rules yourself, the subagent handles everything.'
-          : 'All rules are kind=check (deterministic). Evaluate each against the actual produced output, then call submit_validation_result with your per-rule results.',
+        status: hasJudgment && !artifactReady ? 'needs_artifact' : 'needs_agent_validation',
+        artifact_stored: artifactReady,
+        instruction: !hasJudgment
+          ? 'All rules are kind=check (deterministic). Evaluate each against the actual produced output, then call submit_validation_result.'
+          : !artifactReady
+            ? 'Judgment rules require an independent validator. Call store_artifact with the verbatim produced content first, then call validate_output again — the artifact will be embedded in validator_agent_prompt automatically.'
+            : 'Artifact is stored. Spawn a validator subagent using the Agent tool with the validator_agent_prompt below — it is complete, no edits needed. The subagent grades and calls submit_validation_result independently.',
         producer: producer.text,
         target: consumer.text,
         target_task_id: consumer.id,
