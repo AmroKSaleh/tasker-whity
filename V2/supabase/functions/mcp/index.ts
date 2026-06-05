@@ -197,7 +197,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
       .select('id').eq('user_id', userId).eq('prefix', prefix).maybeSingle()
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, input, output, status, short_id, flow_id, flow_step').eq('project_id', project.id).eq('short_id', shortId).maybeSingle()
+        .select('id, text, input, output, status, short_id, flow_id, flow_step').eq('project_id', project.id).eq('short_id', shortId).eq('user_id', userId).maybeSingle()
       if (task) return task
     }
   }
@@ -983,6 +983,17 @@ const TOOLS = [
     },
   },
   {
+    name: 'list_flows',
+    description: 'List all named flows in a project — flow name, step count, overall status (pending/in_progress/done), and the flow ID you can pass to run_flow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
     name: 'get_flow_order',
     description: 'Returns tasks in a dependency flow sorted in the order they should be tackled (topological execution order). Each task gets a step number showing when it should be worked on relative to the others. Useful for understanding what to do first, second, third in a chain of dependent tasks.',
     inputSchema: {
@@ -1072,9 +1083,9 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        flow_id: { type: 'string', description: 'Flow UUID (from name_flow). Preferred if you have it.' },
+        flow_id: { type: 'string', description: 'Flow UUID or flow name (partial match OK, e.g. "define docs structure"). Preferred over task_id.' },
         task_id: { type: 'string', description: 'Any task in the flow — the server will find the whole flow from it. Use when you only have a task reference.' },
-        project_id: { type: 'string', description: 'Project slug, prefix, or UUID. Required when using task_id with a short ID like TDE-12.' },
+        project_id: { type: 'string', description: 'Project slug, prefix, or UUID. Narrows name lookup when using flow name; required when using task_id with a short ID like TDE-12.' },
       },
     },
   },
@@ -2308,6 +2319,43 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       return lines.join('\n')
     }
 
+    case 'list_flows': {
+      const project = await resolveProject(sb, userId, args.project_id)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const { data: flows } = await sb.from('flows')
+        .select('id, name, created_at')
+        .eq('project_id', project.id)
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+      if (!flows?.length) return `No named flows in project "${project.name}". Use name_flow to name a flow, or build_new_flow to create one.`
+      // For each flow, fetch task stats
+      const lines = [`Flows in ${project.name} (${project.prefix || project.slug}):\n`]
+      for (const flow of flows) {
+        const { data: tasks } = await sb.from('tasks')
+          .select('id, status, flow_step, short_id, text, project:projects(prefix)')
+          .eq('flow_id', flow.id)
+          .eq('user_id', userId)
+          .order('flow_step', { ascending: true })
+        const ts = tasks || []
+        const total = ts.length
+        const done = ts.filter((t: any) => t.status === 'done').length
+        const inProg = ts.filter((t: any) => t.status === 'in_progress').length
+        const overall = done === total && total > 0 ? 'done' : inProg > 0 || done > 0 ? 'in_progress' : 'pending'
+        lines.push(`${flow.name}`)
+        lines.push(`  id: ${flow.id}`)
+        lines.push(`  steps: ${total} · ${done}/${total} done · ${overall}`)
+        if (ts.length) {
+          const stepLines = ts.map((t: any) => {
+            const ref = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id
+            return `    Step ${t.flow_step ?? '?'} · ${ref} — ${t.text} [${t.status}]`
+          })
+          lines.push(...stepLines)
+        }
+        lines.push('')
+      }
+      return lines.join('\n')
+    }
+
     case 'get_flow_order': {
       const project = await resolveProject(sb, userId, args.project_id)
       if (!project) return `Project "${args.project_id}" not found.`
@@ -2493,7 +2541,25 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       let flowTasks: any[] = []
 
       if (args.flow_id) {
-        const { data: flow } = await sb.from('flows').select('id, name, context, project_id').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+        // Accept UUID or name (partial, case-insensitive)
+        const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
+        let flow: any = null
+        if (looksLikeUuid) {
+          const { data } = await sb.from('flows').select('id, name, context, project_id').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+          flow = data
+        } else {
+          // Name lookup — optionally scoped to a project
+          let q = sb.from('flows').select('id, name, context, project_id').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
+          if (args.project_id) {
+            const p = await resolveProject(sb, userId, args.project_id)
+            if (p) q = q.eq('project_id', p.id)
+          }
+          const { data } = await q.order('created_at', { ascending: false }).limit(5)
+          if (data && data.length === 1) { flow = data[0] }
+          else if (data && data.length > 1) {
+            return `Multiple flows match "${args.flow_id}":\n` + data.map((f: any) => `  • ${f.name} (id: ${f.id})`).join('\n') + `\nPass the exact flow id to disambiguate.`
+          }
+        }
         if (!flow) return `Flow "${args.flow_id}" not found.`
         flowRecord = flow
         const { data: tasks } = await sb.from('tasks')
