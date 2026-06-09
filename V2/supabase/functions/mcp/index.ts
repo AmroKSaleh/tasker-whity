@@ -452,6 +452,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'delete_section',
+    description: 'Delete a section. By default REFUSES if the section still has tasks (move them to another section first, e.g. via update_task/move_task_to_group). Pass delete_tasks: true to delete the section together with all its tasks and groups. Irreversible — confirm with the user before calling.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id:   { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        section_id:   { type: 'string', description: 'Section UUID' },
+        delete_tasks: { type: 'boolean', description: 'If true, delete the section AND every task/group in it. If false (default), the section must already be empty or the call is refused.' },
+      },
+      required: ['project_id', 'section_id'],
+    },
+  },
+  {
     name: 'list_tasks',
     description: 'List tasks. Done tasks are excluded by default — pass status: "all" to include them. If no project_id is provided, the user\'s default project is used when set; otherwise this requires confirmed: true to list across ALL projects.',
     inputSchema: {
@@ -927,6 +940,42 @@ const TOOLS = [
     },
   },
   {
+    name: 'remove_task_input',
+    description: 'Remove an input edge (dependency) from a task. Pass source_task_id to drop just that edge, or omit it to remove ALL input edges. The source task is untouched. Use to dismantle I/O dependencies (the delete counterpart of set_task_input).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id:        { type: 'string', description: 'The CONSUMER task (UUID or short ID)' },
+        source_task_id: { type: 'string', description: 'Optional: the upstream source whose edge to remove. Omit to remove all input edges.' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'clear_task_output',
+    description: 'Clear a task\'s output contract (its definition-of-done rules) — the delete counterpart of set_task_output. Any stored artifact and validation status are kept.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31) — the PRODUCER' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'delete_flow',
+    description: 'Delete a NAMED FLOW: removes the flow\'s name/context record and unlinks its tasks (clears flow_id/flow_step). The tasks themselves and their I/O edges are NOT deleted — only the flow grouping/identity (the delete counterpart of name_flow). To also dismantle the chain, use remove_task_input on the edges. Irreversible — confirm with the user before calling.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id:    { type: 'string', description: 'Flow UUID, or flow name (partial match OK). Or pass task_id instead.' },
+        task_id:    { type: 'string', description: 'Any task in the flow (UUID or short ID) — alternative to flow_id.' },
+        project_id: { type: 'string', description: 'Narrows a flow-name lookup; helpful with a short task_id.' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'store_artifact',
     description: 'Store the actual produced output for a task before completing it. The artifact is embedded directly into the validator_agent_prompt returned by validate_output — the independent validator subagent receives the content from the server, not from the executor. REQUIRED before complete_task on any task whose output contract contains kind=judgment rules.',
     inputSchema: {
@@ -1290,6 +1339,28 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         .select().single()
       if (error) throw new Error(error.message)
       return `Created section "${args.name}" in "${project.name}"\nid: ${data.id}`
+    }
+
+    case 'delete_section': {
+      const project = await resolveProject(sb, userId, args.project_id)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const { data: section } = await sb.from('sections')
+        .select('id, name').eq('id', args.section_id).eq('project_id', project.id).maybeSingle()
+      if (!section) return `Section not found in "${project.name}".`
+
+      const { data: secTasks } = await sb.from('tasks').select('id').eq('section_id', section.id)
+      const taskCount = secTasks?.length ?? 0
+      if (taskCount > 0 && !args.delete_tasks) {
+        return `Section "${section.name}" still has ${taskCount} task${taskCount !== 1 ? 's' : ''}. Move them to another section first, or pass delete_tasks: true to delete the section together with its tasks.`
+      }
+      if (taskCount > 0 && args.delete_tasks) {
+        const { error: te } = await sb.from('tasks').delete().eq('section_id', section.id)
+        if (te) throw new Error(te.message)
+      }
+      await sb.from('groups').delete().eq('section_id', section.id)
+      const { error } = await sb.from('sections').delete().eq('id', section.id)
+      if (error) throw new Error(error.message)
+      return `Deleted section "${section.name}"${taskCount > 0 && args.delete_tasks ? ` and its ${taskCount} task${taskCount !== 1 ? 's' : ''}` : ''}.`
     }
 
     case 'list_tasks': {
@@ -2879,6 +2950,67 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is AI-QA'd (QA is performed by AI, not a meat sack) until a human confirms it via confirm_contract. Consumers are derived from tasks that list this as a source.`
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
+    }
+
+    case 'remove_task_input': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const edges = inputEdges(task.input)
+      if (!edges.length) return `"${task.text}" has no input edges to remove.`
+      let kept: any[]
+      if (args.source_task_id) {
+        const source = await resolveTask(sb, userId, args.source_task_id)
+        const srcId = source?.id || args.source_task_id
+        kept = edges.filter((e: any) => e.source_task_id !== srcId && e.source_task_id !== args.source_task_id)
+        if (kept.length === edges.length) return `No input edge from "${args.source_task_id}" found on "${task.text}".`
+      } else {
+        kept = []
+      }
+      const { error } = await sb.from('tasks').update({ input: { edges: kept } }).eq('id', task.id)
+      if (error) throw new Error(error.message)
+      const removed = edges.length - kept.length
+      return `Removed ${removed} input edge${removed !== 1 ? 's' : ''} from "${task.text}". ${kept.length} remaining.`
+    }
+
+    case 'clear_task_output': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+      if (!prev.contract?.rules?.length) return `"${task.text}" has no output contract to clear.`
+      const output = { ...prev, contract: { rules: [], confirmed: false } }
+      const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
+      if (error) throw new Error(error.message)
+      return `Cleared the output contract on "${task.text}". Stored artifact and validation status were kept.`
+    }
+
+    case 'delete_flow': {
+      let flow: any = null
+      const looksLikeUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+      if (args.flow_id && looksLikeUuid(args.flow_id)) {
+        const { data } = await sb.from('flows').select('id, name').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+        flow = data
+      } else if (args.flow_id) {
+        let q = sb.from('flows').select('id, name').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
+        if (args.project_id) { const p = await resolveProject(sb, userId, args.project_id); if (p) q = q.eq('project_id', p.id) }
+        const { data } = await q
+        if (!data?.length) return `No flow matches "${args.flow_id}".`
+        if (data.length > 1) return `Multiple flows match "${args.flow_id}":\n` + data.map((f: any) => `  • ${f.name} (id: ${f.id})`).join('\n') + `\nPass the exact flow id.`
+        flow = data[0]
+      } else if (args.task_id) {
+        const task = await resolveTask(sb, userId, args.task_id)
+        if (!task) return `Task "${args.task_id}" not found.`
+        if (!task.flow_id) return `"${task.text}" is not linked to a named flow.`
+        const { data } = await sb.from('flows').select('id, name').eq('id', task.flow_id).eq('user_id', userId).maybeSingle()
+        flow = data
+      } else {
+        return 'Provide flow_id or task_id to identify the flow to delete.'
+      }
+      if (!flow) return 'Flow not found.'
+      const { data: unlinked } = await sb.from('tasks').update({ flow_id: null, flow_step: null }).eq('flow_id', flow.id).eq('user_id', userId).select('id')
+      const { error } = await sb.from('flows').delete().eq('id', flow.id).eq('user_id', userId)
+      if (error) throw new Error(error.message)
+      const n = unlinked?.length ?? 0
+      return `Deleted flow "${flow.name}". Unlinked ${n} task${n !== 1 ? 's' : ''} (the tasks and their I/O edges were kept).`
     }
 
     case 'store_artifact': {
