@@ -1925,7 +1925,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
           status: 'ready',
           instructions,
           settings_summary,
-          presentation: 'Show the user a brief, compact summary of their current settings (from settings_summary) — one short line or a few bullets, not the full questionnaire. Then tell them they can say "change settings" to review and adjust any of them. Do NOT render the questionnaire now. When the user does ask to change/review settings, call __init_tasker_session again with show_questionnaire: true to get the review questionnaire with their current choices marked. After showing the summary, proceed with whatever the user asked for.',
+          presentation: 'Begin your FIRST response of this session with exactly ONE compact line summarizing the current settings (from settings_summary), ending with — say "change settings" to adjust. Put this line at the very TOP, before anything else, then immediately carry on with whatever the user asked for. Format it as a single line, e.g.: `⚙ Tasker: plain-text lists · done hidden · sorting order · detailed · collaborative — say "change settings" to adjust`. Do NOT put it at the bottom, do NOT use multiple bullets, and do NOT render the questionnaire. Only show this once, on the first response. When the user later asks to change/review settings, call __init_tasker_session again with show_questionnaire: true to get the review questionnaire with their current choices marked.',
           directives: ASSISTANT_DIRECTIVES,
         })
       }
