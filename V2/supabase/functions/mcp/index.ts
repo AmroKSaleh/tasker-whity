@@ -314,6 +314,21 @@ async function getOrCreateBacklog(sb: any, projectId: string): Promise<string> {
   return data.id
 }
 
+// Returned in the `instructions` field of the initialize response — the one place the
+// MCP can teach the model at CONNECTION time, with no tool call required (clients that
+// support InitializeResult.instructions feed it into the model's context). Keep it tight:
+// the mental model + the first move + the few rules that must hold even if the model
+// never calls __init_tasker_session. The detailed playbook stays in ASSISTANT_DIRECTIVES.
+const TASKER_SERVER_INSTRUCTIONS = `Tasker is a task manager that lives inside your AI workflow. Hierarchy: Project → Section → Group → Task → Milestone. Tasks can be linked by I/O edges (one task's output is another's input) into FLOWS — multi-step processes with quality gates (contracts) between steps.
+
+FIRST MOVE: at the start of a Tasker session call __init_tasker_session. It returns the user's behavioral preferences plus the full directive playbook (task lifecycle, running flows, validation, dependency rules). Read and follow those directives.
+
+Rules that always apply, even before you call anything else:
+- To work a task, set it in_progress (get_task does this automatically). Mark it done only when genuinely, verifiably complete.
+- Flow dependencies are HARD-ENFORCED server-side: you cannot start or complete a task whose upstream source tasks aren't done. Finish upstream first, or remove the edge.
+- For a multi-step goal that needs quality checks between steps, build a flow (build_new_flow) and run it (run_flow) — don't free-form a plan.
+- Refer to tasks by short ID (e.g. TDE-52), never UUIDs. Default to pending tasks; don't surface done tasks unless asked. Don't number tasks.`
+
 // Standing behavioral directives surfaced to the connected agent at session start.
 // Advisory — the MCP can't enforce agent behavior — but injected so every agent
 // using Tasker gets a consistent baseline.
@@ -354,7 +369,7 @@ const CONTRACT_SCHEMA = {
 const TOOLS = [
   {
     name: 'list_projects',
-    description: 'List all projects with name, slug, progress stats, and context (goal, why, scope).',
+    description: 'List all projects with name, slug, progress stats, and context (goal, why, scope). If you have not yet called __init_tasker_session this session, call it first — it returns the user\'s preferences and the playbook for using Tasker correctly (task lifecycle, flows, dependency rules).',
     inputSchema: { type: 'object', properties: {}, required: [] },
   },
   {
@@ -452,7 +467,7 @@ const TOOLS = [
   },
   {
     name: 'create_task',
-    description: 'Create a new task.',
+    description: 'Create a single task. For a multi-step process toward a goal — where steps hand off to each other and need quality checks between them — do NOT create tasks ad hoc; use build_new_flow instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -468,7 +483,7 @@ const TOOLS = [
   },
   {
     name: 'update_task',
-    description: 'Update task fields. Only provided fields are changed.',
+    description: 'Update task fields. Only provided fields are changed. Note: setting status to in_progress or done is hard-blocked if the task has unmet upstream flow dependencies — finish the source task(s) first (the response explains which).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -487,7 +502,7 @@ const TOOLS = [
   },
   {
     name: 'complete_task',
-    description: 'Mark a task as done.',
+    description: 'Mark a task as done. Blocked (with an explanation) if the task has unmet upstream flow dependencies, or if it has kind=judgment output-contract rules but no artifact stored yet — in that case call store_artifact with the produced content first.',
     inputSchema: {
       type: 'object',
       properties: { task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' } },
@@ -505,7 +520,7 @@ const TOOLS = [
   },
   {
     name: 'delete_task',
-    description: 'Permanently delete a task.',
+    description: 'Permanently delete a task. Irreversible — confirm with the user before calling.',
     inputSchema: {
       type: 'object',
       properties: { task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' } },
@@ -627,7 +642,7 @@ const TOOLS = [
   },
   {
     name: 'delete_milestone',
-    description: 'Permanently delete a milestone from a task by its index (0-based).',
+    description: 'Permanently delete a milestone from a task by its index (0-based). Irreversible — confirm with the user before calling.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -728,7 +743,7 @@ const TOOLS = [
   },
   {
     name: 'delete_kb_entry',
-    description: 'Permanently delete a Knowledge Base entry by id.',
+    description: 'Permanently delete a Knowledge Base entry by id. Irreversible — confirm with the user before calling.',
     inputSchema: {
       type: 'object',
       properties: { entry_id: { type: 'string', description: 'UUID of the KB entry to delete.' } },
@@ -759,7 +774,7 @@ const TOOLS = [
   },
   {
     name: 'delete_is_entry',
-    description: 'Permanently delete an Instruction Set entry by id.',
+    description: 'Permanently delete an Instruction Set entry by id. Irreversible — confirm with the user before calling.',
     inputSchema: {
       type: 'object',
       properties: { entry_id: { type: 'string', description: 'UUID of the IS entry to delete.' } },
@@ -768,7 +783,7 @@ const TOOLS = [
   },
   {
     name: '__init_tasker_session',
-    description: 'Initialize AI session with behavioral preferences. Returns saved instructions if they exist, or questionnaire structure if first-time setup is needed. Pass show_questionnaire: true to display the questionnaire again with current choices marked.',
+    description: 'Call FIRST in any Tasker session. Returns the user\'s behavioral preferences, a summary of current settings, and the directive playbook for using Tasker well (task lifecycle, running flows, validation, dependency rules). First-time users get a setup questionnaire; pass show_questionnaire: true to review or change settings later.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -837,7 +852,7 @@ const TOOLS = [
   },
   {
     name: 'delete_group',
-    description: 'Delete a group. Optionally delete all tasks in the group, or move them to ungrouped.',
+    description: 'Delete a group. By default its tasks are moved to ungrouped (set delete_tasks: true to delete them instead). Confirm with the user before calling — especially with delete_tasks: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -862,7 +877,7 @@ const TOOLS = [
   },
   {
     name: 'analyze_section',
-    description: 'Returns structured analysis of a section without AI inference.',
+    description: 'Returns a structured, factual breakdown of a section (task counts by status, group balance, stale tasks) — no AI judgment. Use for raw numbers; use section_insights when you want interpretation and suggested actions.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -874,7 +889,7 @@ const TOOLS = [
   },
   {
     name: 'section_insights',
-    description: 'Returns AI-powered analysis of a section (what\'s working, what needs attention, suggested actions).',
+    description: 'Returns interpreted analysis of a section (what\'s working, what needs attention, suggested actions). Use analyze_section instead when you only need raw counts/facts.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3519,7 +3534,12 @@ Deno.serve(async (req: Request) => {
 
   // Allow discovery methods without auth so clients can verify the server is alive
   if (method === 'initialize') {
-    return rpcOk({ protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'tasker', version: '1.0.0' } }, id)
+    return rpcOk({
+      protocolVersion: '2024-11-05',
+      capabilities: { tools: {} },
+      serverInfo: { name: 'tasker', version: '1.0.0' },
+      instructions: TASKER_SERVER_INSTRUCTIONS,
+    }, id)
   }
   if (method === 'notifications/initialized') {
     return new Response(null, { status: 204, headers: cors })
