@@ -6,6 +6,7 @@ import DashboardPage from './pages/DashboardPage'
 import TodayPage from './pages/TodayPage'
 import FlowsPage from './pages/FlowsPage'
 import DocsPage from './pages/DocsPage'
+import DocsV2Page from './pages/DocsV2Page'
 import SettingsPage from './pages/SettingsPage'
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
 
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/flows" element={<AuthGuard><FlowsPage /></AuthGuard>} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/docs/*" element={<DocsPage />} />
+        <Route path="/docsV2/*" element={<DocsV2Page />} />
         <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
         <Route
           path="/dashboard/*"
