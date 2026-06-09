@@ -160,7 +160,7 @@ function SectionColumn({ section, filter, prefix, onAddTask, onAddDetailed, onAd
     <div
       ref={setNodeRef}
       style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
-      className="w-[264px] shrink-0 flex flex-col border-r border-line"
+      className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0"
     >
       <div className="relative h-11 px-3.5 flex items-center justify-between border-b border-line-2 bg-surf-2 sticky top-0 z-[2]">
         <div className="flex items-center gap-1.5 flex-1 min-w-0 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => onFocusSection(section.id)}>
@@ -184,7 +184,7 @@ function SectionColumn({ section, filter, prefix, onAddTask, onAddDetailed, onAd
           </>
         )}
       </div>
-      <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 pb-12 flex flex-col gap-1.5 col-body">
+      <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 flex flex-col gap-1.5 col-body">
         {addingGroup && (
           <input
             autoFocus
@@ -629,11 +629,11 @@ export default function ProjectBoard({ project }) {
                   <>
                     {/* Ungrouped tasks column */}
                     {focusedUngrouped.length > 0 && (
-                      <div className="w-[264px] shrink-0 flex flex-col border-r border-line">
+                      <div className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0">
                         <div className="relative h-11 px-3.5 flex items-center border-b border-line-2 bg-surf-2 sticky top-0 z-[2]">
                           <Kicker count={focusedUngrouped.length}>General</Kicker>
                         </div>
-                        <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 pb-12 flex flex-col gap-1.5 col-body">
+                        <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 flex flex-col gap-1.5 col-body">
                           <DroppableList sectionId={focusedSectionId} groupId={null} items={focusedUngrouped.map(t => t.id)}>
                             {focusedUngrouped.map(t => (
                               <SortableCard key={t.id} task={t} sectionId={focusedSectionId} groupId={null} prefix={project.prefix}
@@ -648,11 +648,11 @@ export default function ProjectBoard({ project }) {
                     {(focusedSection?.groups ?? []).map(group => {
                       const filteredTasks = group.tasks.filter(t => matchFilter(t, filter))
                       return (
-                        <div key={group.id} className="w-[264px] shrink-0 flex flex-col border-r border-line">
+                        <div key={group.id} className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0">
                           <div className="relative h-11 px-3.5 flex items-center justify-between border-b border-line-2 bg-surf-2 sticky top-0 z-[2]">
                             <Kicker count={filteredTasks.length}>{group.name}</Kicker>
                           </div>
-                          <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 pb-12 flex flex-col gap-1.5 col-body">
+                          <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 flex flex-col gap-1.5 col-body">
                             <DroppableList sectionId={focusedSectionId} groupId={group.id} items={filteredTasks.map(t => t.id)}>
                               {filteredTasks.map(t => (
                                 <SortableCard key={t.id} task={t} sectionId={focusedSectionId} groupId={group.id} prefix={project.prefix}

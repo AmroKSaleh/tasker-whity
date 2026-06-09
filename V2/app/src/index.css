@@ -133,6 +133,14 @@
 .col-body::-webkit-scrollbar { width: 6px; }
 .col-body::-webkit-scrollbar-thumb { background: var(--color-line); border-radius: 3px; }
 
+/* Real spacer instead of padding-bottom: browsers clip a flex-column scroll
+   container's padding-bottom from the scrollable area, hiding the last child
+   (the Add task button) once the column overflows. The board is locked to the
+   viewport height, so the column's bottom sits at the very bottom edge — a
+   generous spacer lets the last task/Add-task button scroll clear of the OS
+   taskbar (which can overlap the browser's bottom strip). */
+.col-body::after { content: ''; display: block; flex: 0 0 auto; height: 4.5rem; }
+
 /* ── Semantic buttons ── */
 .btn {
   display: inline-flex; align-items: center; gap: 6px;
