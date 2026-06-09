@@ -189,15 +189,17 @@ async function pushTaskToGitHub(
 // ── Task resolver helper ──────────────────────────────────────
 async function resolveTask(sb: any, userId: string, taskRef: string) {
   // Accept PREFIX-NNN short IDs (e.g. TDE-31)
-  const shortMatch = taskRef.match(/^([A-Za-z]{2,4})-(\d+)$/)
+  const shortMatch = taskRef.match(/^([A-Za-z]{2,6})-(\d+)$/)
   if (shortMatch) {
-    const prefix = shortMatch[1].toUpperCase()
+    const prefix = shortMatch[1]
     const shortId = parseInt(shortMatch[2], 10)
-    const { data: project } = await sb.from('projects')
-      .select('id').eq('user_id', userId).eq('prefix', prefix).maybeSingle()
+    // Use resolveProject (ilike, slug, or UUID) so the lookup is consistent with all other tools
+    const project = await resolveProject(sb, userId, prefix)
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, input, output, status, short_id, flow_id, flow_step').eq('project_id', project.id).eq('short_id', shortId).eq('user_id', userId).maybeSingle()
+        .select('id, text, input, output, status, short_id, flow_id, flow_step')
+        .eq('project_id', project.id).eq('short_id', shortId).eq('user_id', userId)
+        .maybeSingle()
       if (task) return task
     }
   }
@@ -1890,9 +1892,20 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const { show_questionnaire } = args
 
       if (instructions && !show_questionnaire) {
+        const settings_summary = {
+          task_list_format: instructions.task_list_format === 'plain_text' ? 'plain text' :
+                            instructions.task_list_format === 'markdown_table' ? 'markdown table' : 'numbered list',
+          show_completed_tasks: instructions.show_completed_tasks ? 'shown' : 'hidden',
+          rank_tasks_by: instructions.rank_tasks_by === 'sorting_order' ? 'sorting order' : 'task priority',
+          communication_style: instructions.communication_style,
+          multiple_tasks_handling: instructions.multiple_tasks_handling,
+          show_project_context: instructions.show_project_context ? 'shown' : 'hidden',
+        }
         return JSON.stringify({
           status: 'ready',
           instructions,
+          settings_summary,
+          presentation: 'Show the user a brief, compact summary of their current settings (from settings_summary) — one short line or a few bullets, not the full questionnaire. Then tell them they can say "change settings" to review and adjust any of them. Do NOT render the questionnaire now. When the user does ask to change/review settings, call __init_tasker_session again with show_questionnaire: true to get the review questionnaire with their current choices marked. After showing the summary, proceed with whatever the user asked for.',
           directives: ASSISTANT_DIRECTIVES,
         })
       }
@@ -2059,16 +2072,22 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const group = await resolveGroup(sb, userId, args.group_id)
       if (!group) return `Group not found or access denied.`
 
+      // Count affected rows via the returned data length — the `count` field on a
+      // chained update/delete select is unreliable here and reports 0 even on success.
       let result = ''
       if (args.delete_tasks) {
-        const { count } = await sb.from('tasks').delete().eq('group_id', args.group_id).select('*', { count: 'exact' })
-        result = `Deleted group "${group.name}". ${count ?? 0} task${(count ?? 0) !== 1 ? 's' : ''} deleted.`
+        const { data, error } = await sb.from('tasks').delete().eq('group_id', group.id).select('id')
+        if (error) throw new Error(error.message)
+        const n = data?.length ?? 0
+        result = `Deleted group "${group.name}". ${n} task${n !== 1 ? 's' : ''} deleted.`
       } else {
-        const { count } = await sb.from('tasks').update({ group_id: null }).eq('group_id', args.group_id).select('*', { count: 'exact' })
-        result = `Deleted group "${group.name}". ${count ?? 0} task${(count ?? 0) !== 1 ? 's' : ''} moved to ungrouped.`
+        const { data, error } = await sb.from('tasks').update({ group_id: null }).eq('group_id', group.id).select('id')
+        if (error) throw new Error(error.message)
+        const n = data?.length ?? 0
+        result = `Deleted group "${group.name}". ${n} task${n !== 1 ? 's' : ''} moved to ungrouped.`
       }
 
-      const { error } = await sb.from('groups').delete().eq('id', args.group_id)
+      const { error } = await sb.from('groups').delete().eq('id', group.id)
       if (error) throw new Error(error.message)
 
       return result
@@ -2078,14 +2097,16 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
 
-      const updates: any = { group_id: args.group_id ?? null }
+      // Treat empty string / "null" as a request to ungroup, not an invalid uuid.
+      const targetGroup = (args.group_id == null || args.group_id === '' || args.group_id === 'null') ? null : args.group_id
+      const updates: any = { group_id: targetGroup }
       if (args.section_id) updates.section_id = args.section_id
 
       const { error } = await sb.from('tasks').update(updates).eq('id', task.id)
       if (error) throw new Error(error.message)
 
-      if (args.group_id) {
-        const { data: group } = await sb.from('groups').select('name').eq('id', args.group_id).single()
+      if (targetGroup) {
+        const { data: group } = await sb.from('groups').select('name').eq('id', targetGroup).single()
         return `Moved task ${task.prefix ? `${task.prefix}-${task.short_id}` : task.id} to group "${group?.name ?? 'Unknown'}"`
       } else {
         return `Moved task ${task.prefix ? `${task.prefix}-${task.short_id}` : task.id} to ungrouped`

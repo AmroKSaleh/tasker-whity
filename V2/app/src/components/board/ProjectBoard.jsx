@@ -167,7 +167,7 @@ function SectionColumn({ section, filter, prefix, onAddTask, onAddDetailed, onAd
           <button {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing text-mute-2 hover:text-mute -ml-1" title="Drag to reorder section">
             <GripVertical size={13} />
           </button>
-          <Kicker count={section.totalCount} className={dim ? 'text-mute-2' : undefined}>{section.name}</Kicker>
+          <Kicker count={section.completedCount} total={section.totalCount} className={dim ? 'text-mute-2' : undefined}>{section.name}</Kicker>
         </div>
         <button className="icon-btn w-[22px] h-[22px]" onClick={() => setMenuOpen(o => !o)}><MoreHorizontal size={11} /></button>
         {menuOpen && (
@@ -422,12 +422,16 @@ export default function ProjectBoard({ project }) {
     sections.map(section => {
       const sectionGroups = groups.filter(g => g.section_id === section.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
       const sectionTasks = tasks.filter(t => t.section_id === section.id)
-      const ungroupedTasks = sectionTasks.filter(t => !t.group_id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+      // A task whose group_id points to a group not in this section (stale/foreign group_id)
+      // would otherwise match neither the ungrouped bucket nor any group here, and vanish.
+      const groupIds = new Set(sectionGroups.map(g => g.id))
+      const ungroupedTasks = sectionTasks.filter(t => !t.group_id || !groupIds.has(t.group_id)).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
       const enrichedGroups = sectionGroups.map(g => ({
         ...g,
         tasks: sectionTasks.filter(t => t.group_id === g.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)),
       }))
-      return { ...section, ungroupedTasks, groups: enrichedGroups, totalCount: sectionTasks.length }
+      const completedCount = sectionTasks.filter(t => t.status === 'done').length
+      return { ...section, ungroupedTasks, groups: enrichedGroups, totalCount: sectionTasks.length, completedCount }
     }), [tasks, sections, groups])
 
   const filterCounts = useMemo(() => ({

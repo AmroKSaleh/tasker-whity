@@ -3,11 +3,13 @@ import clsx from 'clsx'
 import { Star, Play, ChevronLeft, ChevronRight } from 'lucide-react'
 
 // ── Kicker — the editorial mono section label ──
-export function Kicker({ children, count, className = '', accent = false }) {
+export function Kicker({ children, count, total, className = '', accent = false }) {
   return (
     <span className={clsx('kicker', className)} style={accent ? { color: 'var(--color-priority-rush)' } : undefined}>
       <span>{children}</span>
-      {count != null && (
+      {total != null ? (
+        <span className="ml-1.5 font-medium text-mute-2">{count ?? 0}/{total}</span>
+      ) : count != null && (
         <span className="ml-1.5 font-medium text-mute-2">{String(count).padStart(2, '0')}</span>
       )}
     </span>
