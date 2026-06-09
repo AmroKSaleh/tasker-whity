@@ -269,31 +269,35 @@ function lintRule(r: any): string | null {
   return null
 }
 
-// Upstream source tasks NOT yet done (the blockers for a fan-in task). Reads both I/O shapes.
-async function unmetSources(sb: any, input: any): Promise<Array<{ id: string, text: string, status: string }>> {
-  const ids = inputSourceIds(input)
+// All upstream tasks NOT yet done, walking the WHOLE chain (transitive), not just direct parents.
+// Dedupes via `seen` and is cycle-safe. Only recurses past tasks that are themselves unmet —
+// a done source means its own upstream is already satisfied.
+async function unmetSourcesDeep(sb: any, input: any, seen = new Set<string>()): Promise<Array<{ id: string, text: string, status: string }>> {
+  const ids = inputSourceIds(input).filter((id: string) => !seen.has(id))
   if (!ids.length) return []
-  const { data } = await sb.from('tasks').select('id, text, status').in('id', ids)
-  return (data || []).filter((t: any) => t.status !== 'done')
+  ids.forEach((id: string) => seen.add(id))
+  const { data } = await sb.from('tasks').select('id, text, status, input').in('id', ids)
+  const result: Array<{ id: string, text: string, status: string }> = []
+  for (const t of (data || [])) {
+    if (t.status !== 'done') {
+      result.push({ id: t.id, text: t.text, status: t.status })
+      const deeper = await unmetSourcesDeep(sb, t.input, seen)
+      result.push(...deeper)
+    }
+  }
+  return result
 }
 
-// Build the standard "flow blocked, ask the user" response from a list of unmet upstream tasks.
-function flowBlockedResponse(unmet: Array<{ text: string, status: string }>): string {
+// Hard block: dependencies are enforced server-side, no agent-settable override.
+function flowHardBlockedResponse(unmet: Array<{ text: string, status: string }>): string {
   const names = unmet.map(s => `"${s.text}"`).join(', ')
-  const first = unmet[0]
   const single = unmet.length === 1
   return JSON.stringify({
     status: 'flow_blocked',
-    action_required: 'ASK_USER',
-    instruction: 'Do NOT proceed silently. Present this to the user as a dialog using the AskUserQuestion tool (a clickable prompt, like a permission request). Show the two options below and wait for their choice. If they choose to override, retry this same tool call with proceed_anyway: true.',
-    message: `This task is part of a flow that requires ${names} to be complete first.`,
-    question: single
-      ? `"${first.text}" isn't done yet (${first.status}). How do you want to proceed?`
-      : `${unmet.length} upstream tasks aren't done yet (${names}). How do you want to proceed?`,
-    options: [
-      { label: single ? `Complete "${first.text}" first` : `Complete the ${unmet.length} upstream tasks first`, recommended: true },
-      { label: 'Start anyway (override)', proceed_anyway: true },
-    ],
+    blocked: true,
+    enforced: true,
+    message: `Blocked: this task depends on ${names}, which ${single ? 'is' : 'are'} not done yet. Dependencies are enforced — there is no override. Finish the upstream task${single ? '' : 's'} first, or, if the dependency no longer applies, remove the edge with set_task_input before retrying.`,
+    unmet: unmet.map(s => ({ text: s.text, status: s.status })),
   })
 }
 
@@ -1333,10 +1337,11 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const task = await resolveTask(sb, userId, task_id)
       if (!task) return 'Task not found.'
 
-      // Check for unmet flow step when starting work (fan-in: all sources must be done)
-      if ((patch.status === 'in_progress' || patch.status === 'done') && task.input && !proceed_anyway) {
-        const unmet = await unmetSources(sb, task.input)
-        if (unmet.length) return flowBlockedResponse(unmet)
+      // Enforce flow dependencies (full upstream chain) when starting or completing work.
+      // Hard block — not bypassable via proceed_anyway. Finish upstream or drop the edge.
+      if ((patch.status === 'in_progress' || patch.status === 'done') && task.input) {
+        const unmet = await unmetSourcesDeep(sb, task.input)
+        if (unmet.length) return flowHardBlockedResponse(unmet)
       }
 
       if (patch.status === 'done') {
@@ -1365,10 +1370,10 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return 'Task not found.'
 
-      // Check for unmet flow step (fan-in: all sources must be done)
-      if (task.input && !proceed_anyway) {
-        const unmet = await unmetSources(sb, task.input)
-        if (unmet.length) return flowBlockedResponse(unmet)
+      // Enforce flow dependencies (full upstream chain). Hard block — not bypassable.
+      if (task.input) {
+        const unmet = await unmetSourcesDeep(sb, task.input)
+        if (unmet.length) return flowHardBlockedResponse(unmet)
       }
 
       // Block completion if judgment output rules exist but no artifact stored
@@ -1443,7 +1448,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       let justStarted = false
       let flowWarning: { names: string, first: string, status: string, count: number } | null = null
       if (full.status === 'pending' && !args.peek) {
-        const unmet = await unmetSources(sb, full.input)
+        const unmet = await unmetSourcesDeep(sb, full.input)
         if (unmet.length) {
           flowWarning = {
             names: unmet.map((u: any) => `"${u.text}"`).join(', '),
@@ -1501,7 +1506,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         const dep = flowWarning.count === 1
           ? `"${flowWarning.first}", which is not done yet (currently: ${flowWarning.status})`
           : `${flowWarning.count} upstream tasks that are not done yet (${flowWarning.names})`
-        lines.push(`⚠️ FLOW DEPENDENCY — NOT STARTED: This task depends on ${dep}. Its status was left as pending. Do NOT proceed silently — present this to the user via your interactive question tool (AskUserQuestion in Claude Code, AskQuestion in Cursor, or the equivalent): option 1 (recommended) complete the upstream task(s) first; option 2 start anyway. If they choose start-anyway, set this task to in_progress by calling update_task with proceed_anyway: true.`)
+        lines.push(`⛔ FLOW DEPENDENCY — BLOCKED: This task depends on ${dep}. Dependencies are enforced server-side — it was left pending and cannot be started or completed until the upstream task(s) are done. Work the upstream task(s) first, or, if the dependency no longer applies, remove the edge with set_task_input. There is no override.`)
       } else if (justStarted) {
         lines.push('▶ Status auto-set to in_progress — you are now working on this task.')
       }
