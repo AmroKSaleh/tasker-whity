@@ -327,7 +327,8 @@ Rules that always apply, even before you call anything else:
 - To work a task, set it in_progress (get_task does this automatically). Mark it done only when genuinely, verifiably complete.
 - Flow dependencies are HARD-ENFORCED server-side: you cannot start or complete a task whose upstream source tasks aren't done. Finish upstream first, or remove the edge.
 - For a multi-step goal that needs quality checks between steps, build a flow (build_new_flow) and run it (run_flow) — don't free-form a plan.
-- Refer to tasks by short ID (e.g. TDE-52), never UUIDs. Default to pending tasks; don't surface done tasks unless asked. Don't number tasks.`
+- Refer to tasks by short ID (e.g. TDE-52), never UUIDs. Default to pending tasks; don't surface done tasks unless asked. Don't number tasks.
+- ORGANIC TASK LIFECYCLE: when a discussion, decision, or exploration task reaches a clear conclusion in conversation, mark it done and open a follow-up action task capturing the outcome — without waiting to be told. Limit: only when the conclusion is unambiguous and the next step is obvious. Don't create tasks speculatively.`
 
 // Standing behavioral directives surfaced to the connected agent at session start.
 // Advisory — the MCP can't enforce agent behavior — but injected so every agent
