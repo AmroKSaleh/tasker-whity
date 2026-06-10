@@ -597,13 +597,14 @@ const TOOLS = [
   },
   {
     name: 'create_is_entry',
-    description: 'Create a new Instruction Set entry for a project. Use this to save directives, rules, or guidelines that govern how work in this project should be done. IS entries are automatically injected into every get_task response.',
+    description: 'Create a new project Instruction Set entry — directives/rules that govern how work in this project is done. Auto-injected into every get_task. Set universal:true for rules that must apply even inside a flow that has its own IS (e.g. short IDs, deploy rules, code style); otherwise a flow IS replaces non-universal project rules for that flow\'s tasks.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
         title:      { type: 'string', description: 'Short title for the directive' },
         content:    { type: 'string', description: 'The instruction content (markdown supported)' },
+        universal:  { type: 'boolean', description: 'If true, this rule always applies, even inside a flow with its own IS. Default false.' },
       },
       required: ['project_id', 'title', 'content'],
     },
@@ -774,13 +775,14 @@ const TOOLS = [
   },
   {
     name: 'update_is_entry',
-    description: 'Update an Instruction Set entry by id. Provide title and/or content — only provided fields change.',
+    description: 'Update a project Instruction Set entry by id. Provide title, content, and/or universal — only provided fields change.',
     inputSchema: {
       type: 'object',
       properties: {
-        entry_id: { type: 'string', description: 'UUID of the IS entry. Get it via list_is_entries or get_project_is.' },
-        title:    { type: 'string', description: 'New title (optional)' },
-        content:  { type: 'string', description: 'New content (optional, markdown supported)' },
+        entry_id:  { type: 'string', description: 'UUID of the IS entry. Get it via list_is_entries or get_project_is.' },
+        title:     { type: 'string', description: 'New title (optional)' },
+        content:   { type: 'string', description: 'New content (optional, markdown supported)' },
+        universal: { type: 'boolean', description: 'Set true so this rule applies even inside flows with their own IS; false to scope it to non-flow / fallback only.' },
       },
       required: ['entry_id'],
     },
@@ -791,6 +793,132 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: { entry_id: { type: 'string', description: 'UUID of the IS entry to delete.' } },
+      required: ['entry_id'],
+    },
+  },
+  {
+    name: 'get_flow_is',
+    description: 'Get a flow\'s Instruction Set — the directives that govern tasks in this flow. When a flow has its own IS it REPLACES the project\'s non-universal IS for that flow\'s tasks (universal project rules still apply). Identify the flow by flow_id (UUID or name) or any task_id in it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id:    { type: 'string', description: 'Flow UUID or name (partial match OK)' },
+        task_id:    { type: 'string', description: 'Any task in the flow (UUID or short ID) — alternative to flow_id' },
+        project_id: { type: 'string', description: 'Narrows a flow-name lookup' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'list_flow_is_entries',
+    description: 'List a flow\'s IS entries (id + title + updated_at only). Cheap discovery before update/delete. Identify the flow by flow_id or task_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id:    { type: 'string', description: 'Flow UUID or name' },
+        task_id:    { type: 'string', description: 'Any task in the flow' },
+        project_id: { type: 'string', description: 'Narrows a flow-name lookup' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'create_flow_is_entry',
+    description: 'Add an Instruction Set entry to a flow. Once a flow has any IS entry, its IS governs the flow\'s tasks (replacing the project\'s non-universal IS; universal project rules still apply). Identify the flow by flow_id or task_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id:    { type: 'string', description: 'Flow UUID or name' },
+        task_id:    { type: 'string', description: 'Any task in the flow' },
+        project_id: { type: 'string', description: 'Narrows a flow-name lookup' },
+        title:      { type: 'string', description: 'Short title for the directive' },
+        content:    { type: 'string', description: 'The instruction content (markdown supported)' },
+      },
+      required: ['title', 'content'],
+    },
+  },
+  {
+    name: 'update_flow_is_entry',
+    description: 'Update a flow IS entry by id. Provide title and/or content — only provided fields change.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id: { type: 'string', description: 'UUID of the flow IS entry (from list_flow_is_entries)' },
+        title:    { type: 'string', description: 'New title (optional)' },
+        content:  { type: 'string', description: 'New content (optional)' },
+      },
+      required: ['entry_id'],
+    },
+  },
+  {
+    name: 'delete_flow_is_entry',
+    description: 'Permanently delete a flow IS entry by id. If it was the flow\'s last IS entry, the flow\'s tasks revert to the full project IS. Irreversible — confirm with the user.',
+    inputSchema: {
+      type: 'object',
+      properties: { entry_id: { type: 'string', description: 'UUID of the flow IS entry to delete.' } },
+      required: ['entry_id'],
+    },
+  },
+  {
+    name: 'get_flow_kb',
+    description: 'Get a flow\'s Knowledge Base — reference material auto-loaded on every task in the flow. Identify the flow by flow_id (UUID or name) or any task_id in it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id:    { type: 'string', description: 'Flow UUID or name (partial match OK)' },
+        task_id:    { type: 'string', description: 'Any task in the flow' },
+        project_id: { type: 'string', description: 'Narrows a flow-name lookup' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'list_flow_kb_entries',
+    description: 'List a flow\'s KB entries (id + title + updated_at only). Cheap discovery before update/delete. Identify the flow by flow_id or task_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id:    { type: 'string', description: 'Flow UUID or name' },
+        task_id:    { type: 'string', description: 'Any task in the flow' },
+        project_id: { type: 'string', description: 'Narrows a flow-name lookup' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'create_flow_kb_entry',
+    description: 'Add a Knowledge Base entry to a flow. Flow KB auto-loads on every task in the flow (unlike project KB, which is on-demand). Identify the flow by flow_id or task_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id:    { type: 'string', description: 'Flow UUID or name' },
+        task_id:    { type: 'string', description: 'Any task in the flow' },
+        project_id: { type: 'string', description: 'Narrows a flow-name lookup' },
+        title:      { type: 'string', description: 'Short title for the entry' },
+        content:    { type: 'string', description: 'The content to save (markdown supported)' },
+      },
+      required: ['title', 'content'],
+    },
+  },
+  {
+    name: 'update_flow_kb_entry',
+    description: 'Update a flow KB entry by id. Provide title and/or content — only provided fields change.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id: { type: 'string', description: 'UUID of the flow KB entry (from list_flow_kb_entries)' },
+        title:    { type: 'string', description: 'New title (optional)' },
+        content:  { type: 'string', description: 'New content (optional)' },
+      },
+      required: ['entry_id'],
+    },
+  },
+  {
+    name: 'delete_flow_kb_entry',
+    description: 'Permanently delete a flow KB entry by id. Irreversible — confirm with the user.',
+    inputSchema: {
+      type: 'object',
+      properties: { entry_id: { type: 'string', description: 'UUID of the flow KB entry to delete.' } },
       required: ['entry_id'],
     },
   },
@@ -1183,6 +1311,29 @@ async function resolveGroup(sb: any, userId: string, groupId: string) {
   return group
 }
 
+// Resolve a named flow from { flow_id (UUID or name) | task_id }. Returns {id, name} or null.
+async function resolveFlow(sb: any, userId: string, args: any): Promise<{ id: string, name: string } | null> {
+  const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
+  if (args.flow_id && isUuid(args.flow_id)) {
+    const { data } = await sb.from('flows').select('id, name').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+    return data || null
+  }
+  if (args.flow_id) {
+    let q = sb.from('flows').select('id, name').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
+    if (args.project_id) { const p = await resolveProject(sb, userId, args.project_id); if (p) q = q.eq('project_id', p.id) }
+    const { data } = await q
+    return (data && data.length === 1) ? data[0] : null
+  }
+  if (args.task_id) {
+    const task = await resolveTask(sb, userId, args.task_id)
+    if (task?.flow_id) {
+      const { data } = await sb.from('flows').select('id, name').eq('id', task.flow_id).eq('user_id', userId).maybeSingle()
+      return data || null
+    }
+  }
+  return null
+}
+
 // ── Tool handlers ─────────────────────────────────────────────
 async function runTool(sb: any, userId: string, name: string, args: any): Promise<string> {
   switch (name) {
@@ -1571,18 +1722,47 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         })
       }
 
-      // Inject project IS automatically
+      // Inject the governing Instruction Set (TDE-233 flow-level IS).
+      // - Task not in a flow → full project IS (as before).
+      // - Task in a flow that has its own IS → universal project IS + flow IS
+      //   (the project's non-universal IS is suppressed for this task).
+      // - Task in a flow with no flow IS → full project IS (safe fallback).
       if (full.project_id) {
-        const { data: isEntries } = await sb.from('project_instructions')
-          .select('title, content')
+        const { data: projIs } = await sb.from('project_instructions')
+          .select('title, content, universal')
           .eq('project_id', full.project_id)
           .order('created_at')
-        if (isEntries?.length) {
+        let flowIs: any[] = []
+        if (full.flow_id) {
+          const { data } = await sb.from('flow_instructions')
+            .select('title, content').eq('flow_id', full.flow_id).order('created_at')
+          flowIs = data || []
+        }
+        if (flowIs.length) {
+          const universalProj = (projIs || []).filter((e: any) => e.universal)
+          if (universalProj.length) {
+            lines.push('\n---')
+            lines.push('# Project Instruction Set (universal)')
+            for (const entry of universalProj) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+          }
+          lines.push('\n---')
+          lines.push('# Flow Instruction Set (governs this flow — replaces the project\'s non-universal IS)')
+          for (const entry of flowIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+        } else if (projIs?.length) {
           lines.push('\n---')
           lines.push('# Project Instruction Set')
-          for (const entry of isEntries) {
-            lines.push(`\n## ${entry.title}\n\n${entry.content}`)
-          }
+          for (const entry of projIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+        }
+      }
+
+      // Inject the flow's Knowledge Base on every task in the flow (TDE-233).
+      if (full.flow_id) {
+        const { data: flowKb } = await sb.from('flow_knowledge')
+          .select('title, content').eq('flow_id', full.flow_id).order('created_at')
+        if (flowKb?.length) {
+          lines.push('\n---')
+          lines.push('# Flow Knowledge Base')
+          for (const entry of flowKb) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
         }
       }
 
@@ -1630,10 +1810,10 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const project = await resolveProject(sb, userId, args.project_id)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data, error } = await sb.from('project_instructions')
-        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content })
+        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content, universal: args.universal === true })
         .select().single()
       if (error) throw new Error(error.message)
-      return `Created IS entry "${data.title}" in "${project.name}".`
+      return `Created IS entry "${data.title}" in "${project.name}".${data.universal ? ' Marked universal — it applies even inside flows that have their own IS.' : ''}`
     }
 
     case 'get_knowledge_base': {
@@ -1703,9 +1883,10 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
     case 'update_is_entry': {
       const fields: any = {}
-      if (args.title   !== undefined) fields.title   = args.title
-      if (args.content !== undefined) fields.content = args.content
-      if (!Object.keys(fields).length) return 'No fields to update. Provide title or content.'
+      if (args.title     !== undefined) fields.title     = args.title
+      if (args.content   !== undefined) fields.content   = args.content
+      if (args.universal !== undefined) fields.universal = args.universal === true
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, or universal.'
       const { data, error } = await sb.from('project_instructions')
         .update(fields)
         .eq('id', args.entry_id)
@@ -1714,7 +1895,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         .maybeSingle()
       if (error) throw new Error(error.message)
       if (!data) return `IS entry "${args.entry_id}" not found.`
-      return `Updated IS entry "${data.title}".`
+      return `Updated IS entry "${data.title}".${args.universal !== undefined ? (data.universal ? ' Now universal (applies even inside flows).' : ' No longer universal.') : ''}`
     }
 
     case 'delete_is_entry': {
@@ -1727,6 +1908,84 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (error) throw new Error(error.message)
       if (!data) return `IS entry "${args.entry_id}" not found.`
       return `Deleted IS entry "${data.title}".`
+    }
+
+    // ── Flow-level Instruction Set (TDE-233) ──
+    case 'get_flow_is': {
+      const flow = await resolveFlow(sb, userId, args)
+      if (!flow) return `Flow not found. Pass flow_id (UUID or name) or a task_id that belongs to the flow.`
+      const { data: entries } = await sb.from('flow_instructions').select('id, title, content').eq('flow_id', flow.id).order('created_at')
+      if (!entries?.length) return `No flow IS defined for "${flow.name}". Tasks in this flow fall back to the project IS.`
+      return [`# Flow Instruction Set — ${flow.name}`, '', ...entries.map((e: any) => `## ${e.title}  (id: ${e.id})\n\n${e.content}`)].join('\n\n---\n\n')
+    }
+    case 'list_flow_is_entries': {
+      const flow = await resolveFlow(sb, userId, args)
+      if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
+      const { data } = await sb.from('flow_instructions').select('id, title, updated_at').eq('flow_id', flow.id).order('created_at')
+      if (!data?.length) return `No flow IS entries for "${flow.name}".`
+      return data.map((e: any) => `[id: ${e.id}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+    }
+    case 'create_flow_is_entry': {
+      const flow = await resolveFlow(sb, userId, args)
+      if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
+      const { data, error } = await sb.from('flow_instructions').insert({ flow_id: flow.id, user_id: userId, title: args.title, content: args.content }).select().single()
+      if (error) throw new Error(error.message)
+      return `Created flow IS entry "${data.title}" on flow "${flow.name}". Flow IS now governs this flow's tasks (replacing the project's non-universal IS).`
+    }
+    case 'update_flow_is_entry': {
+      const fields: any = {}
+      if (args.title   !== undefined) fields.title   = args.title
+      if (args.content !== undefined) fields.content = args.content
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title or content.'
+      const { data, error } = await sb.from('flow_instructions').update(fields).eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return `Flow IS entry "${args.entry_id}" not found.`
+      return `Updated flow IS entry "${data.title}".`
+    }
+    case 'delete_flow_is_entry': {
+      const { data, error } = await sb.from('flow_instructions').delete().eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return `Flow IS entry "${args.entry_id}" not found.`
+      return `Deleted flow IS entry "${data.title}".`
+    }
+
+    // ── Flow-level Knowledge Base (TDE-233) ──
+    case 'get_flow_kb': {
+      const flow = await resolveFlow(sb, userId, args)
+      if (!flow) return `Flow not found. Pass flow_id (UUID or name) or a task_id that belongs to the flow.`
+      const { data: entries } = await sb.from('flow_knowledge').select('id, title, content').eq('flow_id', flow.id).order('created_at')
+      if (!entries?.length) return `No flow KB entries for "${flow.name}".`
+      return [`# Flow Knowledge Base — ${flow.name}`, '', ...entries.map((e: any) => `## ${e.title}  (id: ${e.id})\n\n${e.content}`)].join('\n\n---\n\n')
+    }
+    case 'list_flow_kb_entries': {
+      const flow = await resolveFlow(sb, userId, args)
+      if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
+      const { data } = await sb.from('flow_knowledge').select('id, title, updated_at').eq('flow_id', flow.id).order('created_at')
+      if (!data?.length) return `No flow KB entries for "${flow.name}".`
+      return data.map((e: any) => `[id: ${e.id}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+    }
+    case 'create_flow_kb_entry': {
+      const flow = await resolveFlow(sb, userId, args)
+      if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
+      const { data, error } = await sb.from('flow_knowledge').insert({ flow_id: flow.id, user_id: userId, title: args.title, content: args.content }).select().single()
+      if (error) throw new Error(error.message)
+      return `Created flow KB entry "${data.title}" on flow "${flow.name}". It auto-loads on every task in this flow.`
+    }
+    case 'update_flow_kb_entry': {
+      const fields: any = {}
+      if (args.title   !== undefined) fields.title   = args.title
+      if (args.content !== undefined) fields.content = args.content
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title or content.'
+      const { data, error } = await sb.from('flow_knowledge').update(fields).eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return `Flow KB entry "${args.entry_id}" not found.`
+      return `Updated flow KB entry "${data.title}".`
+    }
+    case 'delete_flow_kb_entry': {
+      const { data, error } = await sb.from('flow_knowledge').delete().eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return `Flow KB entry "${args.entry_id}" not found.`
+      return `Deleted flow KB entry "${data.title}".`
     }
 
     case 'list_milestones': {
