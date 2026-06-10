@@ -1239,7 +1239,7 @@ const TOOLS = [
   },
   {
     name: 'name_flow',
-    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). The name appears in get_flow_order output and can be retrieved with get_flow_context.',
+    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1247,6 +1247,7 @@ const TOOLS = [
         name: { type: 'string', description: 'Human name for the flow (e.g. "Blog Post Publication Flow")' },
         task_ids: { type: 'array', items: { type: 'string' }, description: 'All task IDs in the flow (UUIDs or short IDs).' },
         context: { type: 'string', description: 'Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow.' },
+        short_id: { type: 'string', description: 'Optional custom short ID (e.g. "BKT-F3"). Must be unique across all your flows. Auto-generated if omitted.' },
       },
       required: ['project_id', 'name', 'task_ids'],
     },
@@ -1264,13 +1265,14 @@ const TOOLS = [
   },
   {
     name: 'update_flow_context',
-    description: 'Update the shared context bag for a named flow, or rename it. Pass any task ID in the flow.',
+    description: 'Update the shared context bag for a named flow, or rename it, or set/change its short ID. Pass any task ID in the flow.',
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Any task in the flow' },
         context: { type: 'string', description: 'New shared context (replaces existing)' },
         name: { type: 'string', description: 'Optional: rename the flow' },
+        short_id: { type: 'string', description: 'Optional: set or change the flow short ID (e.g. "BKT-F2"). Must be unique across all your flows.' },
       },
       required: ['task_id'],
     },
@@ -2694,7 +2696,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const project = await resolveProject(sb, userId, args.project_id)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: flows } = await sb.from('flows')
-        .select('id, name, created_at')
+        .select('id, name, short_id, created_at')
         .eq('project_id', project.id)
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
@@ -2712,7 +2714,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         const done = ts.filter((t: any) => t.status === 'done').length
         const inProg = ts.filter((t: any) => t.status === 'in_progress').length
         const overall = done === total && total > 0 ? 'done' : inProg > 0 || done > 0 ? 'in_progress' : 'pending'
-        lines.push(`${flow.name}`)
+        lines.push(flow.short_id ? `${flow.name}  [${flow.short_id}]` : flow.name)
         lines.push(`  id: ${flow.id}`)
         lines.push(`  steps: ${total} · ${done}/${total} done · ${overall}`)
         if (ts.length) {
@@ -2916,11 +2918,11 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
         let flow: any = null
         if (looksLikeUuid) {
-          const { data } = await sb.from('flows').select('id, name, context, project_id').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+          const { data } = await sb.from('flows').select('id, name, short_id, context, project_id').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
           flow = data
         } else {
           // Name lookup — optionally scoped to a project
-          let q = sb.from('flows').select('id, name, context, project_id').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
+          let q = sb.from('flows').select('id, name, short_id, context, project_id').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
           if (args.project_id) {
             const p = await resolveProject(sb, userId, args.project_id)
             if (p) q = q.eq('project_id', p.id)
@@ -2943,7 +2945,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
         // If the anchor has a flow_id, fetch the whole named flow
         if (anchor.flow_id) {
-          const { data: flow } = await sb.from('flows').select('id, name, context, project_id').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+          const { data: flow } = await sb.from('flows').select('id, name, short_id, context, project_id').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
           flowRecord = flow || null
           const { data: tasks } = await sb.from('tasks')
             .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, project:projects(name, prefix)')
@@ -3029,7 +3031,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const allDone = completedCount === sorted.length
 
       const lines: string[] = []
-      lines.push(flowRecord ? `Flow: "${flowRecord.name}"` : `Flow (unnamed — call name_flow to register it)`)
+      lines.push(flowRecord ? `Flow: "${flowRecord.name}"${flowRecord.short_id ? `  [${flowRecord.short_id}]` : ''}` : `Flow (unnamed — call name_flow to register it)`)
       if (flowRecord?.context) lines.push(`Context: ${flowRecord.context}`)
       lines.push(`Progress: ${completedCount}/${sorted.length} steps complete`)
       if (allDone) {
@@ -3770,14 +3772,38 @@ Call submit_validation_result with:
       const skipped = taskIds.length - valid.length
       if (!valid.length) return 'No valid tasks found in task_ids.'
 
+      // Compute short_id: use provided, or auto-generate
+      let shortId: string | null = args.short_id || null
+      if (!shortId) {
+        const prefix = project.prefix
+        if (prefix) {
+          // Pattern: PREFIX-F{n}, find the highest N already used for this prefix
+          const { data: existing } = await sb.from('flows').select('short_id').eq('user_id', userId).like('short_id', `${prefix}-F%`)
+          const usedNums = (existing || []).map((f: any) => {
+            const m = f.short_id?.match(/^.+-F(\d+)$/)
+            return m ? parseInt(m[1], 10) : 0
+          })
+          const nextN = usedNums.length ? Math.max(...usedNums) + 1 : 1
+          shortId = `${prefix}-F${nextN}`
+        } else {
+          // Prefix-less: Flow Name - F{n}, where n = count of existing short_ids on prefix-less projects + 1
+          const { count } = await sb.from('flows')
+            .select('id', { count: 'exact', head: true })
+            .eq('user_id', userId)
+            .not('short_id', 'is', null)
+          const nextN = (count ?? 0) + 1
+          shortId = `${args.name} - F${nextN}`
+        }
+      }
+
       // Reuse existing flow if any task already belongs to one
       const existingFlowId = valid.find((t: any) => t.flow_id)?.flow_id || null
       let flowId: string
       if (existingFlowId) {
-        await sb.from('flows').update({ name: args.name, context: args.context || null, updated_at: new Date().toISOString() }).eq('id', existingFlowId).eq('user_id', userId)
+        await sb.from('flows').update({ name: args.name, context: args.context || null, short_id: shortId, updated_at: new Date().toISOString() }).eq('id', existingFlowId).eq('user_id', userId)
         flowId = existingFlowId
       } else {
-        const { data: flow, error } = await sb.from('flows').insert({ user_id: userId, project_id: project.id, name: args.name, context: args.context || null }).select('id').single()
+        const { data: flow, error } = await sb.from('flows').insert({ user_id: userId, project_id: project.id, name: args.name, context: args.context || null, short_id: shortId }).select('id').single()
         if (error || !flow) throw new Error(error?.message || 'Failed to create flow')
         flowId = flow.id
       }
@@ -3811,7 +3837,7 @@ Call submit_validation_result with:
         const ref = t.short_id != null ? `#${t.short_id}` : t.id.slice(0, 8)
         return `  Step ${i + 1}: ${ref} — ${t.text}`
       }).join('\n')
-      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…`
+      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…  Short ID: ${shortId}`
     }
 
     case 'get_flow_context': {
@@ -3819,12 +3845,12 @@ Call submit_validation_result with:
       if (!task) return `Task "${args.task_id}" not found.`
       if (!task.flow_id) return `"${task.text}" is not linked to a named flow. Call name_flow to give the flow a name and context.`
 
-      const { data: flow } = await sb.from('flows').select('id, name, context, created_at').eq('id', task.flow_id).eq('user_id', userId).maybeSingle()
+      const { data: flow } = await sb.from('flows').select('id, name, short_id, context, created_at').eq('id', task.flow_id).eq('user_id', userId).maybeSingle()
       if (!flow) return `Flow record not found for "${task.text}".`
 
       const { data: members } = await sb.from('tasks').select('short_id, flow_step, text, status, project:projects(prefix)').eq('flow_id', flow.id).eq('user_id', userId).order('flow_step', { ascending: true, nullsFirst: false })
       const lines = [
-        `Flow: ${flow.name}`,
+        `Flow: ${flow.name}${flow.short_id ? `  [${flow.short_id}]` : ''}`,
         `ID: ${flow.id.slice(0, 8)}…`,
         `Tasks: ${(members || []).length}`,
         ...(flow.context ? ['', 'Context:', flow.context] : []),
@@ -3848,9 +3874,14 @@ Call submit_validation_result with:
       const updates: any = { updated_at: new Date().toISOString() }
       if (args.context !== undefined) updates.context = args.context
       if (args.name) updates.name = args.name
+      if (args.short_id !== undefined) updates.short_id = args.short_id || null
 
       await sb.from('flows').update(updates).eq('id', task.flow_id).eq('user_id', userId)
-      return `Flow updated.${args.name ? ` Renamed to "${args.name}".` : ''}${args.context !== undefined ? ' Context saved.' : ''}`
+      const parts = []
+      if (args.name) parts.push(`Renamed to "${args.name}".`)
+      if (args.context !== undefined) parts.push('Context saved.')
+      if (args.short_id !== undefined) parts.push(args.short_id ? `Short ID set to "${args.short_id}".` : 'Short ID cleared.')
+      return `Flow updated.${parts.length ? ' ' + parts.join(' ') : ''}`
     }
 
     case 'confirm_contract': {
