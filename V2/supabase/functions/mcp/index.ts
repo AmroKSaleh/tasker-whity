@@ -735,6 +735,34 @@ const TOOLS = [
     },
   },
   {
+    name: 'github_push_file',
+    description: 'Commit a text file to a path in a connected GitHub repo — the canonical way to persist flow/task artifacts to version control. If the file already exists it is updated (the existing SHA is fetched automatically). Path convention for flow artifacts: .tasker/artifacts/{flow-short-id}/{filename}. Requires a GitHub account connected via github_connect and a repo to write to (falls back to the project\'s linked repo if task_id is supplied and omitted).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path:    { type: 'string', description: 'File path within the repo, e.g. ".tasker/artifacts/BKT-F1/report.md"' },
+        content: { type: 'string', description: 'Text content to write' },
+        repo:    { type: 'string', description: 'GitHub repo in "owner/name" format (e.g. "acme/my-project"). Falls back to the project\'s linked repo when task_id is provided.' },
+        task_id: { type: 'string', description: 'Optional: any task in the flow — used to derive the repo and suggested artifact path when repo is omitted.' },
+        message: { type: 'string', description: 'Commit message. Defaults to "chore: store Tasker artifact".' },
+      },
+      required: ['path', 'content'],
+    },
+  },
+  {
+    name: 'github_read_file',
+    description: 'Read a file from a connected GitHub repo. Returns the decoded text content. Use to retrieve a previously stored flow/task artifact.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        path:    { type: 'string', description: 'File path within the repo, e.g. ".tasker/artifacts/BKT-F1/report.md"' },
+        repo:    { type: 'string', description: 'GitHub repo in "owner/name" format. Falls back to the project\'s linked repo when task_id is provided.' },
+        task_id: { type: 'string', description: 'Optional: any task in the flow — used to derive the repo when repo is omitted.' },
+      },
+      required: ['path'],
+    },
+  },
+  {
     name: 'list_kb_entries',
     description: 'List Knowledge Base entries for a project — returns id + title + updated_at only (no content). Use this for cheap discovery before update/delete operations.',
     inputSchema: {
@@ -1106,13 +1134,15 @@ const TOOLS = [
   },
   {
     name: 'store_artifact',
-    description: 'Store the actual produced output for a task before completing it. The artifact is embedded directly into the validator_agent_prompt returned by validate_output — the independent validator subagent receives the content from the server, not from the executor. REQUIRED before complete_task on any task whose output contract contains kind=judgment rules.',
+    description: 'Store the actual produced output for a task before completing it. The artifact is embedded directly into the validator_agent_prompt returned by validate_output — the independent validator subagent receives the content from the server, not from the executor. REQUIRED before complete_task on any task whose output contract contains kind=judgment rules. Pass commit_to_repo: true + filename to also commit the artifact to the project\'s linked GitHub repo at .tasker/artifacts/{flow-short-id or task-short-id}/{filename}.',
     inputSchema: {
       type: 'object',
       properties: {
-        task_id: { type: 'string', description: 'Task UUID or short ID — the PRODUCER' },
-        content: { type: 'string', description: 'The actual produced output — verbatim, not a summary. This is exactly what the independent validator will grade.' },
-        format: { type: 'string', enum: ['text', 'markdown', 'code', 'json'], description: 'Optional format hint for the validator. Default: text.' },
+        task_id:        { type: 'string', description: 'Task UUID or short ID — the PRODUCER' },
+        content:        { type: 'string', description: 'The actual produced output — verbatim, not a summary. This is exactly what the independent validator will grade.' },
+        format:         { type: 'string', enum: ['text', 'markdown', 'code', 'json'], description: 'Optional format hint for the validator. Default: text.' },
+        commit_to_repo: { type: 'boolean', description: 'If true, also commit the artifact to the project\'s linked GitHub repo. Requires the project to have a linked repo (github_import_project) and a connected GitHub account.' },
+        filename:       { type: 'string', description: 'Filename for the committed file (e.g. "report.md"). Required when commit_to_repo is true. The path in the repo will be .tasker/artifacts/{flow-short-id or task-short-id}/{filename}.' },
       },
       required: ['task_id', 'content'],
     },
@@ -2048,7 +2078,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         return `Failed to validate token: ${err.message}`
       }
       await sb.from('user_settings').upsert({ user_id: userId, github_access_token: token })
-      return `Connected GitHub account: ${ghUser.login}${ghUser.name ? ` (${ghUser.name})` : ''}. You can now use github_list_repos, github_import_project, github_sync_issues, and push changes back with github_push_task / github_push_project.`
+      return `Connected GitHub account: ${ghUser.login}${ghUser.name ? ` (${ghUser.name})` : ''}. You can now use github_list_repos, github_import_project, github_sync_issues, push changes back with github_push_task / github_push_project, and commit flow artifacts to the repo with github_push_file / github_read_file.`
     }
 
     case 'github_disconnect': {
@@ -2237,6 +2267,63 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       if (created) parts.push(`  ${created} issue(s) created`)
       if (failed) parts.push(`  ${failed} failed:`, ...errors)
       return parts.join('\n')
+    }
+
+    case 'github_push_file': {
+      const ghToken = await loadGitHubToken(sb, userId)
+      if (!ghToken) return 'No GitHub account connected. Use github_connect first.'
+
+      // Resolve repo — explicit arg or fall back to the task's project repo
+      let repo: string | null = args.repo || null
+      if (!repo && args.task_id) {
+        const task = await resolveTask(sb, userId, args.task_id)
+        if (task) {
+          const { data: proj } = await sb.from('projects').select('github_repo').eq('id', task.project_id).maybeSingle()
+          repo = proj?.github_repo || null
+        }
+      }
+      if (!repo) return 'No repo specified and no linked repo found. Pass repo: "owner/name" or supply a task_id whose project has a linked repo.'
+
+      const path: string = args.path
+      const content: string = args.content
+      const message: string = args.message || 'chore: store Tasker artifact'
+
+      // Check if file already exists (need SHA for updates)
+      let sha: string | undefined
+      try {
+        const existing = await githubFetch(ghToken, `/repos/${repo}/contents/${path}`)
+        sha = existing.sha
+      } catch (_) { /* file doesn't exist yet, that's fine */ }
+
+      const body: any = { message, content: btoa(unescape(encodeURIComponent(content))) }
+      if (sha) body.sha = sha
+
+      await githubFetch(ghToken, `/repos/${repo}/contents/${path}`, {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      })
+
+      return `${sha ? 'Updated' : 'Created'} file "${path}" in ${repo}.`
+    }
+
+    case 'github_read_file': {
+      const ghToken = await loadGitHubToken(sb, userId)
+      if (!ghToken) return 'No GitHub account connected. Use github_connect first.'
+
+      let repo: string | null = args.repo || null
+      if (!repo && args.task_id) {
+        const task = await resolveTask(sb, userId, args.task_id)
+        if (task) {
+          const { data: proj } = await sb.from('projects').select('github_repo').eq('id', task.project_id).maybeSingle()
+          repo = proj?.github_repo || null
+        }
+      }
+      if (!repo) return 'No repo specified and no linked repo found. Pass repo: "owner/name" or supply a task_id whose project has a linked repo.'
+
+      const file = await githubFetch(ghToken, `/repos/${repo}/contents/${args.path}`)
+      if (!file.content) return `File "${args.path}" found but has no readable content (may be a binary or large file).`
+      const decoded = decodeURIComponent(escape(atob(file.content.replace(/\n/g, ''))))
+      return `File: ${args.path}\nRepo: ${repo}\nSize: ${file.size} bytes\n\n---\n\n${decoded}`
     }
 
     case '__init_tasker_session': {
@@ -3288,7 +3375,42 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         },
       }).eq('id', task.id)
       const wordCount = String(args.content).split(/\s+/).filter(Boolean).length
-      return `Artifact stored on "${task.text}" (${wordCount} words, format: ${args.format || 'text'}). Call complete_task when ready — if the task has judgment output rules, validate_output will now embed this artifact directly in the validator prompt.`
+      let repoNote = ''
+      if (args.commit_to_repo && args.filename) {
+        const ghToken = await loadGitHubToken(sb, userId)
+        if (ghToken) {
+          const { data: proj } = await sb.from('projects').select('github_repo, prefix').eq('id', task.project_id).maybeSingle()
+          if (proj?.github_repo) {
+            // Determine artifact folder: use flow short_id > flow id prefix > task short_id
+            let folder = `${task.project_id.slice(0, 8)}`
+            if (task.flow_id) {
+              const { data: flow } = await sb.from('flows').select('short_id, id').eq('id', task.flow_id).maybeSingle()
+              folder = flow?.short_id || flow?.id?.slice(0, 8) || folder
+            } else if (task.short_id != null && proj.prefix) {
+              folder = `${proj.prefix}-${task.short_id}`
+            }
+            const filePath = `.tasker/artifacts/${folder}/${args.filename}`
+            try {
+              let sha: string | undefined
+              try {
+                const existing = await githubFetch(ghToken, `/repos/${proj.github_repo}/contents/${filePath}`)
+                sha = existing.sha
+              } catch (_) {}
+              const body: any = { message: `chore: store Tasker artifact (${folder})`, content: btoa(unescape(encodeURIComponent(args.content))) }
+              if (sha) body.sha = sha
+              await githubFetch(ghToken, `/repos/${proj.github_repo}/contents/${filePath}`, { method: 'PUT', body: JSON.stringify(body) })
+              repoNote = ` Also committed to ${proj.github_repo} at ${filePath}.`
+            } catch (err: any) {
+              repoNote = ` (GitHub commit failed: ${err.message})`
+            }
+          } else {
+            repoNote = ' (skipped GitHub commit — project has no linked repo)'
+          }
+        } else {
+          repoNote = ' (skipped GitHub commit — no GitHub account connected)'
+        }
+      }
+      return `Artifact stored on "${task.text}" (${wordCount} words, format: ${args.format || 'text'}).${repoNote} Call complete_task when ready — if the task has judgment output rules, validate_output will now embed this artifact directly in the validator prompt.`
     }
 
     case 'validate_output': {
