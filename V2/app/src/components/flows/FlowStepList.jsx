@@ -22,7 +22,7 @@ function RuleRow({ rule }) {
   )
 }
 
-export default function FlowStepList({ steps, prefix }) {
+export default function FlowStepList({ steps, prefix, onTaskClick }) {
   const [open, setOpen] = useState(() => new Set())
   const toggle = id => setOpen(prev => {
     const n = new Set(prev)
@@ -45,7 +45,7 @@ export default function FlowStepList({ steps, prefix }) {
         return (
           <div key={task.id} className="border-b border-line-2 last:border-b-0">
             <button
-              onClick={() => toggle(task.id)}
+              onClick={() => onTaskClick ? onTaskClick(task.id) : toggle(task.id)}
               className="w-full flex items-center gap-2.5 py-2.5 px-2 text-left rounded-md hover:bg-surf-2 transition-colors"
             >
               <ChevronRight size={13} className={clsx('text-mute-2 transition-transform shrink-0', isOpen && 'rotate-90')} />

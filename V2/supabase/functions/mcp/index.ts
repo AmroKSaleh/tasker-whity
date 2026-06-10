@@ -1321,6 +1321,53 @@ const TOOLS = [
     },
   },
   {
+    name: 'save_flow_as_template',
+    description: 'Save an existing flow as a reusable Flow Template. Captures the step structure, titles, detail scaffolds, and contracts. The template can later be instantiated via instantiate_flow_template to create a new flow pre-populated with the same structure.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id: { type: 'string', description: 'Flow UUID or name to save as a template.' },
+        task_id: { type: 'string', description: 'Any task in the flow — alternative to flow_id.' },
+        name: { type: 'string', description: 'Name for the template (e.g. "Blog Post Publication").' },
+        description: { type: 'string', description: 'Optional description of what this template is for.' },
+      },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'list_flow_templates',
+    description: 'List all saved Flow Templates for the current user, with step counts.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'instantiate_flow_template',
+    description: 'Create a new flow from a saved Flow Template. Copies the scaffold structure into real tasks in the specified project/section. Provide context (e.g. the goal or subject) to fill {{placeholders}} in step titles and details. Returns the created task IDs and calls name_flow automatically.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        template_id: { type: 'string', description: 'UUID of the template to instantiate.' },
+        template_name: { type: 'string', description: 'Template name (partial match) — alternative to template_id.' },
+        project_id: { type: 'string', description: 'Project prefix, slug, or UUID to create the flow in.' },
+        section_id: { type: 'string', description: 'Section UUID to place tasks in. If omitted, a new section is created.' },
+        flow_name: { type: 'string', description: 'Name for the new flow. Defaults to the template name.' },
+        context: { type: 'object', description: 'Key/value pairs used to fill {{placeholders}} in step titles/details. E.g. { "topic": "TDE-152 launch" }.' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'recompute_flow_steps',
+    description: 'Recompute and re-stamp the step order (flow_step) for a named flow. Use this after adding, removing, or changing I/O edges — name_flow stamps step numbers at creation time and they go stale if the DAG is edited afterward. Accepts flow_id (UUID or name) or any task_id in the flow.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id: { type: 'string', description: 'Flow UUID or flow name (partial match OK). Preferred over task_id.' },
+        task_id: { type: 'string', description: 'Any task in the flow — the server finds the flow from it.' },
+        project_id: { type: 'string', description: 'Narrows name or short-ID lookup.' },
+      },
+    },
+  },
+  {
     name: 'build_new_flow',
     description: 'Start building a NEW flow — a chain of contract-linked tasks toward a goal (sections/groups are just filing; the flow is the I/O chain). Call this when the user wants to create a multi-step process/flow from scratch. It does NOT build anything itself: it returns an interview playbook + the project\'s current tasks/sections (grounding). YOU then run a grill-me-style interview, propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
     inputSchema: {
@@ -3274,10 +3321,42 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const { error } = await sb.from('tasks').update({ input: { edges } }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
+      // Auto-recompute flow_step if either task belongs to a named flow.
+      const flowId = task.flow_id || source.flow_id || null
+      let recomputeNote = ''
+      if (flowId) {
+        const { data: flowMembers } = await sb.from('tasks')
+          .select('id, text, short_id, input')
+          .eq('flow_id', flowId).eq('user_id', userId)
+        if (flowMembers?.length) {
+          // Fetch the freshly updated task so inputSourceIds sees the new edge
+          const { data: freshTask } = await sb.from('tasks').select('id, input').eq('id', task.id).single()
+          const memberMap = new Map(flowMembers.map((t: any) => [t.id, t]))
+          if (freshTask) memberMap.set(task.id, freshTask)
+          const memberArr = [...memberMap.values()]
+          const rdepths = new Map<string, number>()
+          function rdepth(id: string, stack = new Set<string>()): number {
+            if (rdepths.has(id)) return rdepths.get(id)!
+            if (stack.has(id)) return 0
+            stack.add(id)
+            const srcs = inputSourceIds(memberMap.get(id)?.input).filter((s: string) => memberMap.has(s))
+            const d = srcs.length ? Math.max(...srcs.map((s: string) => rdepth(s, stack) + 1)) : 0
+            rdepths.set(id, d)
+            return d
+          }
+          memberArr.forEach((t: any) => rdepth(t.id))
+          const rsorted = [...memberArr].sort((a: any, b: any) => (rdepths.get(a.id) ?? 0) - (rdepths.get(b.id) ?? 0))
+          await Promise.all(rsorted.map((t: any, i: number) =>
+            sb.from('tasks').update({ flow_step: i + 1 }).eq('id', t.id)
+          ))
+          recomputeNote = ` Step order auto-recomputed (${rsorted.length} tasks renumbered).`
+        }
+      }
+
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set input edge on ${args.task_id}: consumes ${args.source_task_id}` +
         (rules.length ? ` with ${rules.length} contract rule${rules.length !== 1 ? 's' : ''} (AI-QA'd — QA is performed by AI, not a meat sack. confirm_contract to have a human bless it)` : ' (no contract rules yet)') +
-        `. Total input edges: ${edges.length}.`
+        `. Total input edges: ${edges.length}.${recomputeNote}`
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
     }
 
@@ -3963,6 +4042,55 @@ Call submit_validation_result with:
       return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…  Short ID: ${shortId}`
     }
 
+    case 'recompute_flow_steps': {
+      // Resolve the flow record
+      let flow: any = null
+      let flowTasks: any[] = []
+      if (args.flow_id) {
+        const { data: f } = await sb.from('flows').select('id, name').or(`id.eq.${args.flow_id},name.ilike.%${args.flow_id}%`).eq('user_id', userId).maybeSingle()
+        if (!f) return `Flow "${args.flow_id}" not found.`
+        flow = f
+      } else if (args.task_id) {
+        const anchor = await resolveTask(sb, userId, args.task_id)
+        if (!anchor) return `Task "${args.task_id}" not found.`
+        if (!anchor.flow_id) return `Task "${anchor.text}" is not linked to a named flow.`
+        const { data: f } = await sb.from('flows').select('id, name').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+        if (!f) return `Flow record not found for task "${anchor.text}".`
+        flow = f
+      } else {
+        return 'Provide flow_id or task_id.'
+      }
+      const { data: tasks } = await sb.from('tasks')
+        .select('id, text, short_id, input')
+        .eq('flow_id', flow.id).eq('user_id', userId)
+      if (!tasks?.length) return `No tasks found in flow "${flow.name}".`
+      const taskById = new Map(tasks.map((t: any) => [t.id, t]))
+      const depths = new Map<string, number>()
+      function recomputeDepth(id: string, stack = new Set<string>()): number {
+        if (depths.has(id)) return depths.get(id)!
+        if (stack.has(id)) return 0
+        stack.add(id)
+        const srcs = inputSourceIds(taskById.get(id)?.input).filter((s: string) => taskById.has(s))
+        const d = srcs.length ? Math.max(...srcs.map((s: string) => recomputeDepth(s, stack) + 1)) : 0
+        depths.set(id, d)
+        return d
+      }
+      tasks.forEach((t: any) => recomputeDepth(t.id))
+      const sorted = [...tasks].sort((a: any, b: any) => {
+        const da = depths.get(a.id) ?? 0
+        const db = depths.get(b.id) ?? 0
+        return da !== db ? da - db : 0
+      })
+      await Promise.all(sorted.map((t: any, i: number) =>
+        sb.from('tasks').update({ flow_step: i + 1 }).eq('id', t.id)
+      ))
+      const stepList = sorted.map((t: any, i: number) => {
+        const ref = t.short_id != null ? `#${t.short_id}` : t.id.slice(0, 8)
+        return `  Step ${i + 1}: ${ref} — ${t.text}`
+      }).join('\n')
+      return `Recomputed step order for flow "${flow.name}" — ${sorted.length} tasks renumbered.\n\n${stepList}`
+    }
+
     case 'get_flow_context': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
@@ -4055,6 +4183,161 @@ Call submit_validation_result with:
       }
 
       return `Unknown contract_type "${contractType}". Use "output" or "input".`
+    }
+
+    case 'save_flow_as_template': {
+      // Resolve source flow tasks
+      let sourceTasks: any[] = []
+      let flowName = args.name
+      if (args.flow_id || args.task_id) {
+        let flowId: string | null = null
+        if (args.task_id) {
+          const anchor = await resolveTask(sb, userId, args.task_id)
+          flowId = anchor?.flow_id || null
+          if (!flowId) {
+            // Unnamed flow: fetch all tasks from the connected component via the task's project
+            // For simplicity, skip unnamed flows
+            return `Task "${args.task_id}" is not linked to a named flow. Name the flow first with name_flow, then save as template.`
+          }
+        } else {
+          const { data: f } = await sb.from('flows').select('id, name').or(`id.eq.${args.flow_id},name.ilike.%${args.flow_id}%`).eq('user_id', userId).maybeSingle()
+          flowId = f?.id || null
+          if (!flowId) return `Flow "${args.flow_id}" not found.`
+        }
+        const { data: tasks } = await sb.from('tasks')
+          .select('id, text, detail, input, output, flow_step')
+          .eq('flow_id', flowId).eq('user_id', userId)
+          .order('flow_step', { ascending: true, nullsFirst: false })
+        sourceTasks = tasks || []
+      }
+      if (!sourceTasks.length && (args.flow_id || args.task_id)) {
+        return 'No tasks found in the specified flow.'
+      }
+
+      const { data: tmpl, error: tmplErr } = await sb.from('flow_templates')
+        .insert({ user_id: userId, name: flowName, description: args.description || null })
+        .select('id').single()
+      if (tmplErr || !tmpl) throw new Error(tmplErr?.message || 'Failed to create template')
+
+      if (sourceTasks.length) {
+        await Promise.all(sourceTasks.map((t: any, i: number) =>
+          sb.from('flow_template_steps').insert({
+            template_id: tmpl.id,
+            step_order: t.flow_step ?? (i + 1),
+            title: t.text,
+            detail_scaffold: t.detail || null,
+            input_contract: t.input ? JSON.stringify(t.input) : null,
+            output_contract: t.output ? JSON.stringify(t.output) : null,
+          })
+        ))
+      }
+
+      return `Flow Template "${flowName}" created (id: ${tmpl.id.slice(0, 8)}…) with ${sourceTasks.length} step${sourceTasks.length !== 1 ? 's' : ''}.`
+    }
+
+    case 'list_flow_templates': {
+      const { data: templates } = await sb.from('flow_templates')
+        .select('id, name, description, created_at')
+        .eq('user_id', userId)
+        .order('created_at', { ascending: false })
+      if (!templates?.length) return 'No flow templates saved yet. Use save_flow_as_template to create one.'
+      const lines = ['Flow Templates:\n']
+      for (const t of templates) {
+        const { count } = await sb.from('flow_template_steps')
+          .select('id', { count: 'exact', head: true }).eq('template_id', t.id)
+        lines.push(`  "${t.name}"  id: ${t.id.slice(0, 8)}…  (${count ?? 0} steps)${t.description ? `\n    ${t.description}` : ''}`)
+      }
+      return lines.join('\n')
+    }
+
+    case 'instantiate_flow_template': {
+      const project = await resolveProject(sb, userId, args.project_id)
+      if (!project) return `Project "${args.project_id}" not found.`
+
+      let templateId = args.template_id
+      if (!templateId && args.template_name) {
+        const { data: t } = await sb.from('flow_templates').select('id').ilike('name', `%${args.template_name}%`).eq('user_id', userId).maybeSingle()
+        if (!t) return `Template "${args.template_name}" not found.`
+        templateId = t.id
+      }
+      if (!templateId) return 'Provide template_id or template_name.'
+
+      const { data: template } = await sb.from('flow_templates').select('id, name').eq('id', templateId).eq('user_id', userId).maybeSingle()
+      if (!template) return `Template "${templateId}" not found.`
+
+      const { data: steps } = await sb.from('flow_template_steps')
+        .select('id, step_order, title, detail_scaffold, input_contract, output_contract')
+        .eq('template_id', templateId).order('step_order')
+      if (!steps?.length) return `Template "${template.name}" has no steps.`
+
+      // Helper: fill {{key}} placeholders from context
+      const ctx = args.context || {}
+      function fill(str: string | null): string | null {
+        if (!str) return null
+        return str.replace(/\{\{(\w+)\}\}/g, (_: string, k: string) => ctx[k] ?? `{{${k}}}`)
+      }
+
+      // Resolve section — create one if not provided
+      let sectionId = args.section_id || null
+      if (!sectionId) {
+        const { data: secs } = await sb.from('sections')
+          .select('sort_order').eq('project_id', project.id).order('sort_order', { ascending: false }).limit(1)
+        const sortOrder = ((secs?.[0]?.sort_order) ?? -1) + 1
+        const flowNameForSec = args.flow_name || template.name
+        const { data: newSec } = await sb.from('sections')
+          .insert({ project_id: project.id, name: flowNameForSec, sort_order: sortOrder })
+          .select('id').single()
+        sectionId = newSec?.id || null
+      }
+      if (!sectionId) return 'Failed to create section for flow tasks.'
+
+      const { data: { user } } = await sb.auth.getUser()
+      const idMap: Record<string, string> = {}
+
+      for (const step of steps) {
+        const title = fill(step.title) ?? step.title
+        const detail = fill(step.detail_scaffold)
+        const output = step.output_contract ? JSON.parse(step.output_contract) : null
+        const { data: task } = await sb.from('tasks')
+          .insert({
+            user_id: userId, project_id: project.id, section_id: sectionId,
+            text: title, detail: detail, status: 'pending', output,
+          })
+          .select('id').single()
+        if (task) idMap[step.id] = task.id
+      }
+
+      // Wire input edges using the new task IDs
+      for (const step of steps) {
+        const newTaskId = idMap[step.id]
+        if (!newTaskId || !step.input_contract) continue
+        const inputData = JSON.parse(step.input_contract)
+        const edges: any[] = inputData.edges || (inputData.source_task_id ? [{ source_task_id: inputData.source_task_id }] : [])
+        const resolvedEdges = edges.map((e: any) => {
+          const prevStepId = Object.keys(idMap).find(sid => {
+            const s = steps.find(x => x.id === sid)
+            return s && idMap[s.id] && e.source_task_id
+          })
+          return { ...e, source_task_id: prevStepId ? idMap[prevStepId] : e.source_task_id }
+        }).filter((e: any) => e.source_task_id && Object.values(idMap).includes(e.source_task_id))
+        if (resolvedEdges.length) {
+          await sb.from('tasks').update({ input: { edges: resolvedEdges } }).eq('id', newTaskId)
+        }
+      }
+
+      // Create named flow record and link tasks
+      const flowName = args.flow_name || template.name
+      const taskIds = steps.map(s => idMap[s.id]).filter(Boolean)
+      const { data: flowRec } = await sb.from('flows')
+        .insert({ user_id: userId, project_id: project.id, name: flowName })
+        .select('id').single()
+      if (flowRec && taskIds.length) {
+        await Promise.all(taskIds.map((tid, i) =>
+          sb.from('tasks').update({ flow_id: flowRec.id, flow_step: i + 1 }).eq('id', tid)
+        ))
+      }
+
+      return `Instantiated template "${template.name}" as flow "${flowName}" — ${taskIds.length} task${taskIds.length !== 1 ? 's' : ''} created in project "${project.name}".${Object.keys(ctx).length ? ` Context applied: ${Object.keys(ctx).join(', ')}.` : ''}`
     }
 
     default:

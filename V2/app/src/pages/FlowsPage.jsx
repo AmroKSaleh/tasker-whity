@@ -7,6 +7,7 @@ import AppShell from '../components/editorial/AppShell'
 import { Kicker, Pill } from '../components/editorial/atoms'
 import FlowGraph from '../components/flows/FlowGraph'
 import FlowStepList from '../components/flows/FlowStepList'
+import FlowTaskPanel from '../components/flows/FlowTaskPanel'
 
 const STATUS_LABEL = { done: 'DONE', in_progress: 'IN PROGRESS', pending: 'PENDING' }
 const STATUS_DOT = { done: 'bg-[#4ade80]', in_progress: 'bg-accent', pending: 'bg-line' }
@@ -40,6 +41,7 @@ function FlowCard({ flow, active, onClick }) {
 function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted }) {
   const [graphHeight, setGraphHeight] = useState(320)
   const [panel, setPanel] = useState(null) // 'is' | 'kb' | null
+  const [selectedTaskId, setSelectedTaskId] = useState(null)
   const [flowIs, setFlowIs] = useState(null)
   const [flowKb, setFlowKb] = useState(null)
   const [renaming, setRenaming] = useState(false)
@@ -48,7 +50,84 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
   const [shortIdDraft, setShortIdDraft] = useState('')
   const [shortIdError, setShortIdError] = useState('')
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [duplicating, setDuplicating] = useState(false)
+  const [savingTemplate, setSavingTemplate] = useState(false)
+  const [templateSaved, setTemplateSaved] = useState(false)
   const [busy, setBusy] = useState(false)
+
+  async function doSaveAsTemplate() {
+    if (!flow.flowRecordId) return
+    setSavingTemplate(true)
+    const { data: { user } } = await supabase.auth.getUser()
+    const { data: tmpl } = await supabase.from('flow_templates')
+      .insert({ user_id: user.id, name: flow.name, description: `Template from flow "${flow.name}"` })
+      .select('id').single()
+    if (tmpl) {
+      await Promise.all(
+        flow.steps
+          .sort((a, b) => a.step - b.step)
+          .map(({ task, step }) =>
+            supabase.from('flow_template_steps').insert({
+              template_id: tmpl.id, step_order: step,
+              title: task.text, detail_scaffold: task.detail ?? null,
+              input_contract: task.input ? JSON.stringify(task.input) : null,
+              output_contract: task.output ? JSON.stringify(task.output) : null,
+            })
+          )
+      )
+      setTemplateSaved(true)
+      setTimeout(() => setTemplateSaved(false), 3000)
+    }
+    setSavingTemplate(false)
+  }
+
+  async function doDuplicate() {
+    setBusy(true)
+    setDuplicating(false)
+    const { data: { user } } = await supabase.auth.getUser()
+    // Find the last section to append a new one after
+    const { data: secs } = await supabase.from('sections')
+      .select('sort_order').eq('project_id', flow.projectId).order('sort_order', { ascending: false }).limit(1)
+    const sortOrder = ((secs?.[0]?.sort_order) ?? -1) + 1
+    const { data: newSec } = await supabase.from('sections')
+      .insert({ project_id: flow.projectId, name: `${flow.name} (copy)`, sort_order: sortOrder })
+      .select('id').single()
+    if (!newSec) { setBusy(false); return }
+    // Create a new flow record
+    const dupName = `${flow.name} (copy)`
+    const { data: newFlow } = await supabase.from('flows')
+      .insert({ user_id: user.id, project_id: flow.projectId, name: dupName })
+      .select('id').single()
+    if (!newFlow) { setBusy(false); return }
+    // Create duplicate tasks preserving step order; remap old IDs → new IDs for edge rebuilding
+    const idMap = {}
+    const sortedSteps = [...flow.steps].sort((a, b) => a.step - b.step)
+    for (const { task, step } of sortedSteps) {
+      const { data: newTask } = await supabase.from('tasks')
+        .insert({
+          user_id: user.id, project_id: flow.projectId,
+          section_id: newSec.id, text: task.text, detail: task.detail ?? null,
+          priority: task.priority ?? null, status: 'pending',
+          flow_id: newFlow.id, flow_step: step,
+          output: task.output ?? null,
+        })
+        .select('id').single()
+      if (newTask) idMap[task.id] = newTask.id
+    }
+    // Rebuild input edges using remapped IDs
+    for (const { task } of sortedSteps) {
+      const newId = idMap[task.id]
+      if (!newId || !task.input?.edges?.length) continue
+      const newEdges = task.input.edges
+        .filter(e => idMap[e.source_task_id])
+        .map(e => ({ ...e, source_task_id: idMap[e.source_task_id] }))
+      if (newEdges.length) {
+        await supabase.from('tasks').update({ input: { edges: newEdges } }).eq('id', newId)
+      }
+    }
+    setBusy(false)
+    onChanged?.()
+  }
 
   async function doRename() {
     const name = nameDraft.trim()
@@ -162,7 +241,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
   }
 
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col h-full relative">
       <div className="px-6 pt-6 pb-3 border-b border-line-2 shrink-0">
         <button onClick={onBack} className="md:hidden flex items-center gap-1 text-[12px] text-mute mb-2">
           <ChevronLeft size={13} /> All flows
@@ -243,19 +322,51 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
             )
           })}
           <span className="flex-1" />
+          {flow.flowRecordId && (
+            <button
+              onClick={doSaveAsTemplate}
+              disabled={savingTemplate || busy}
+              className="rounded-md border border-line-2 px-2.5 py-1 text-[11px] font-semibold text-mute hover:text-ink hover:border-line transition-colors disabled:opacity-50"
+            >
+              {templateSaved ? '✓ Saved as template' : savingTemplate ? 'Saving…' : 'Save as template'}
+            </button>
+          )}
           <button
-            onClick={() => { setNameDraft(flow.name); setRenaming(true); setConfirmDelete(false) }}
+            onClick={() => { setNameDraft(flow.name); setRenaming(true); setConfirmDelete(false); setDuplicating(false) }}
             className="rounded-md border border-line-2 px-2.5 py-1 text-[11px] font-semibold text-mute hover:text-ink hover:border-line transition-colors"
           >
             Rename
           </button>
           <button
-            onClick={() => { setConfirmDelete(true); setRenaming(false) }}
+            onClick={() => { setDuplicating(d => !d); setConfirmDelete(false); setRenaming(false) }}
+            className="rounded-md border border-line-2 px-2.5 py-1 text-[11px] font-semibold text-mute hover:text-ink hover:border-line transition-colors"
+          >
+            Duplicate
+          </button>
+          <button
+            onClick={() => { setConfirmDelete(true); setRenaming(false); setDuplicating(false) }}
             className="rounded-md border border-line-2 px-2.5 py-1 text-[11px] font-semibold text-mute hover:text-[#C0432D] hover:border-[#C0432D] transition-colors"
           >
             Delete flow
           </button>
         </div>
+        {duplicating && (
+          <div className="mt-2.5 rounded-md border border-line-2 bg-surf-2 px-3 py-2.5">
+            <p className="text-[12px] text-ink leading-relaxed">
+              Duplicate <span className="font-semibold">{flow.name}</span>? Creates a copy with all {flow.stepCount} task{flow.stepCount !== 1 ? 's' : ''}, contracts, and edge structure in a new section <span className="font-mono text-[11px]">"{flow.name} (copy)"</span>. Tasks start as pending.
+            </p>
+            <div className="flex gap-2 mt-2.5">
+              <button disabled={busy} onClick={doDuplicate}
+                className="rounded-md bg-ink text-paper px-3 py-1 text-[11px] font-semibold disabled:opacity-60">
+                {busy ? 'Duplicating…' : 'Duplicate flow'}
+              </button>
+              <button disabled={busy} onClick={() => setDuplicating(false)}
+                className="rounded-md border border-line-2 px-3 py-1 text-[11px] font-semibold text-mute hover:text-ink">
+                Cancel
+              </button>
+            </div>
+          </div>
+        )}
         {confirmDelete && (
           <div className="mt-2.5 rounded-md border border-[#C0432D]/40 bg-[#C0432D]/5 px-3 py-2.5">
             <p className="text-[12px] text-ink leading-relaxed">
@@ -310,7 +421,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
         </div>
       )}
       <div className="shrink-0" style={{ height: graphHeight }}>
-        <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} />
+        <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
       </div>
       <div
         onPointerDown={startResize}
@@ -320,8 +431,23 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
         <span className="w-8 h-0.5 rounded-full bg-line group-hover:bg-mute-2 transition-colors" />
       </div>
       <div className="flex-1 overflow-auto px-4 py-3 no-scrollbar">
-        <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} />
+        <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
       </div>
+
+      {selectedTaskId && (() => {
+        const stepObj = flow.steps.find(s => s.task.id === selectedTaskId)
+        if (!stepObj) return null
+        return (
+          <FlowTaskPanel
+            task={stepObj.task}
+            stepIndex={stepObj.step}
+            totalSteps={flow.stepCount}
+            prefix={flow.projectPrefix}
+            onClose={() => setSelectedTaskId(null)}
+            onTaskUpdated={onChanged}
+          />
+        )
+      })()}
     </div>
   )
 }

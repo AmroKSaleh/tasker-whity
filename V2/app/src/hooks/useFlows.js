@@ -4,7 +4,7 @@ import { detectFlows, flowSteps } from '../lib/flowGraph'
 
 // Dedicated fetch for the Flows page: needs input/output (the contract data),
 // which the shared useAllTasks hook deliberately omits to keep the Today query lean.
-const TASK_FIELDS = 'id, project_id, section_id, text, status, priority, sort_order, short_id, input, output, flow_id'
+const TASK_FIELDS = 'id, project_id, section_id, text, detail, status, priority, sort_order, short_id, input, output, flow_id'
 const PROJECT_FIELDS = 'id, name, slug, prefix'
 
 const STATUS_RANK = { in_progress: 0, pending: 1, done: 2 }

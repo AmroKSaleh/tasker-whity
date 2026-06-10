@@ -19,14 +19,18 @@ function statusColor(status) {
 }
 
 function FlowTaskNode({ data }) {
-  const { task, prefix, step } = data
+  const { task, prefix, step, onTaskClick } = data
   const color = statusColor(task.status)
   return (
-    <div style={{
-      width: NODE_W, minHeight: NODE_H, background: 'var(--color-paper)',
-      border: `1.5px solid ${color}`, borderRadius: 8, padding: '9px 11px',
-      boxSizing: 'border-box', fontFamily: 'inherit',
-    }}>
+    <div
+      onClick={() => onTaskClick?.(task.id)}
+      style={{
+        width: NODE_W, minHeight: NODE_H, background: 'var(--color-paper)',
+        border: `1.5px solid ${color}`, borderRadius: 8, padding: '9px 11px',
+        boxSizing: 'border-box', fontFamily: 'inherit',
+        cursor: onTaskClick ? 'pointer' : 'default',
+      }}
+    >
       <Handle type="target" position={Position.Left} style={{ opacity: 0, pointerEvents: 'none' }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
         <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
@@ -47,7 +51,7 @@ function FlowTaskNode({ data }) {
 
 const nodeTypes = { flowTask: FlowTaskNode }
 
-function buildLayout(steps, prefix) {
+function buildLayout(steps, prefix, onTaskClick) {
   const g = new dagre.graphlib.Graph()
   g.setGraph({ rankdir: 'LR', nodesep: 30, ranksep: 90 })
   g.setDefaultEdgeLabel(() => ({}))
@@ -79,7 +83,7 @@ function buildLayout(steps, prefix) {
       id: s.task.id,
       type: 'flowTask',
       position: { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 },
-      data: { task: s.task, step: s.step, prefix },
+      data: { task: s.task, step: s.step, prefix, onTaskClick },
       draggable: false,
     }
   })
@@ -87,8 +91,8 @@ function buildLayout(steps, prefix) {
   return { nodes, edges }
 }
 
-export default function FlowGraph({ steps, prefix }) {
-  const { nodes, edges } = useMemo(() => buildLayout(steps, prefix), [steps, prefix])
+export default function FlowGraph({ steps, prefix, onTaskClick }) {
+  const { nodes, edges } = useMemo(() => buildLayout(steps, prefix, onTaskClick), [steps, prefix, onTaskClick])
   return (
     <div style={{ width: '100%', height: '100%', background: 'var(--color-surf-2)' }}>
       <ReactFlow

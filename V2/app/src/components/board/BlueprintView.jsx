@@ -1,6 +1,7 @@
 import { useMemo, useState, useEffect, useRef, createContext, useContext } from 'react'
 import { ReactFlow, Background, Controls, Handle, Position, getSmoothStepPath, BaseEdge, useReactFlow, useEdges, useNodes } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
+import { detectFlows as detectFlowsShared, topoDepths, inputSourceIds } from '../../lib/flowGraph'
 
 const NODE_WIDTH = 200
 const NODE_HEIGHT = 90
@@ -193,64 +194,15 @@ function TaskNode({ data }) {
 const nodeTypes = { taskNode: TaskNode, sectionLabel: SectionLabel }
 const edgeTypes = { bridge: BridgeEdge }
 
-// ── Connected-component detection ─────────────────────────────────────────────
 function detectFlows(tasks) {
-  const taskById = new Map(tasks.map(t => [t.id, t]))
-  const adj = new Map(tasks.map(t => [t.id, new Set()]))
-  tasks.forEach(t => {
-    const src = t.input?.source_task_id
-    if (src && adj.has(src)) { adj.get(t.id).add(src); adj.get(src).add(t.id) }
-  })
-  const visited = new Set()
-  const flows = []
-  tasks.forEach(t => {
-    if (visited.has(t.id) || adj.get(t.id).size === 0) return
-    const taskIds = new Set()
-    const queue = [t.id]
-    visited.add(t.id)
-    while (queue.length) {
-      const curr = queue.shift(); taskIds.add(curr)
-      for (const nb of adj.get(curr)) { if (!visited.has(nb)) { visited.add(nb); queue.push(nb) } }
-    }
-    const hasIncoming = new Set([...taskIds].filter(id => {
-      const task = taskById.get(id)
-      return task?.input?.source_task_id && taskIds.has(task.input.source_task_id)
-    }))
-    const roots = [...taskIds].filter(id => !hasIncoming.has(id))
-    const rootTask = taskById.get(roots[0])
-    const words = rootTask?.text.split(' ').slice(0, 3).join(' ') ?? ''
-    flows.push({
-      id: `flow-${flows.length}`,
-      rootTaskId: roots[0] ?? null,
-      autoName: words + (rootTask && words.length < rootTask.text.length ? '…' : ''),
-      taskIds,
-      color: FLOW_COLORS[flows.length % FLOW_COLORS.length],
-    })
-  })
-  return flows
-}
-
-// ── Topological depth ──────────────────────────────────────────────────────────
-function getTopologicalDepths(tasks) {
-  const taskById = new Map(tasks.map(t => [t.id, t]))
-  const depths = new Map()
-  function depth(id, stack = new Set()) {
-    if (depths.has(id)) return depths.get(id)
-    if (stack.has(id)) return 0
-    stack.add(id)
-    const src = taskById.get(id)?.input?.source_task_id
-    const d = src && taskById.has(src) ? depth(src, stack) + 1 : 0
-    depths.set(id, d); return d
-  }
-  tasks.forEach(t => depth(t.id))
-  return depths
+  return detectFlowsShared(tasks).map((f, i) => ({ ...f, color: FLOW_COLORS[i % FLOW_COLORS.length] }))
 }
 
 // ── Layout ─────────────────────────────────────────────────────────────────────
 function buildLayout(visibleTasks, sections, flows) {
   const flowByTaskId = new Map()
   flows.forEach(f => f.taskIds.forEach(id => flowByTaskId.set(id, f)))
-  const depths = getTopologicalDepths(visibleTasks)
+  const depths = topoDepths(visibleTasks)
   const sortedSections = sections
     .slice().sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
     .filter(s => visibleTasks.some(t => t.section_id === s.id))
@@ -267,12 +219,13 @@ function buildLayout(visibleTasks, sections, flows) {
       nodes.push({ id: task.id, type: 'taskNode', data: { task, flowColor: flow?.color ?? null }, position: { x, y: HEADER_HEIGHT + HEADER_TOP_PAD + ti * SLOT_HEIGHT } })
     })
   })
-  const edges = visibleTasks
-    .filter(t => t.input?.source_task_id && visibleIds.has(t.input.source_task_id))
-    .map(t => {
-      const flow = flowByTaskId.get(t.id)
-      return { id: `${t.input.source_task_id}->${t.id}`, source: t.input.source_task_id, target: t.id, type: 'bridge', data: { color: flow?.color ?? '#D97757', crossings: [] }, markerEnd: { type: 'arrowclosed', color: flow?.color ?? '#D97757' } }
+  const edges = []
+  visibleTasks.forEach(t => {
+    const flow = flowByTaskId.get(t.id)
+    inputSourceIds(t.input).filter(src => visibleIds.has(src)).forEach(src => {
+      edges.push({ id: `${src}->${t.id}`, source: src, target: t.id, type: 'bridge', data: { color: flow?.color ?? '#D97757', crossings: [] }, markerEnd: { type: 'arrowclosed', color: flow?.color ?? '#D97757' } })
     })
+  })
   return { nodes, edges }
 }
 
@@ -315,8 +268,8 @@ export default function BlueprintView({ tasks, sections, flowNames = {}, onRenam
     if (!isolatedTaskId) return null
     const set = new Set([isolatedTaskId])
     const root = tasks.find(t => t.id === isolatedTaskId)
-    if (root?.input?.source_task_id) set.add(root.input.source_task_id)
-    tasks.forEach(t => { if (t.input?.source_task_id === isolatedTaskId) set.add(t.id) })
+    inputSourceIds(root?.input).forEach(src => set.add(src))
+    tasks.forEach(t => { if (inputSourceIds(t.input).includes(isolatedTaskId)) set.add(t.id) })
     return set
   }, [isolatedTaskId, tasks])
 
@@ -359,18 +312,7 @@ export default function BlueprintView({ tasks, sections, flowNames = {}, onRenam
   const isolationOrderMap = useMemo(() => {
     if (!isolatedSet) return null
     const isolated = tasks.filter(t => isolatedSet.has(t.id))
-    const taskById = new Map(isolated.map(t => [t.id, t]))
-    const depths = new Map()
-    function depth(id, stack = new Set()) {
-      if (depths.has(id)) return depths.get(id)
-      if (stack.has(id)) return 0
-      stack.add(id)
-      const src = taskById.get(id)?.input?.source_task_id
-      const d = src && taskById.has(src) ? depth(src, stack) + 1 : 0
-      depths.set(id, d)
-      return d
-    }
-    isolated.forEach(t => depth(t.id))
+    const depths = topoDepths(isolated)
     const sorted = isolated.slice().sort((a, b) => {
       const da = depths.get(a.id) ?? 0
       const db = depths.get(b.id) ?? 0
