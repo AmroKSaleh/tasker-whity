@@ -4401,9 +4401,9 @@ Deno.serve(async (req: Request) => {
     switch (method) {
 
       case 'tools/call': {
-        const { name, arguments: toolArgs } = params
+        const { name, arguments: toolArgs, input: toolInput } = params
         try {
-          const text = await runTool(sb, userId, name, toolArgs ?? {})
+          const text = await runTool(sb, userId, name, toolArgs ?? toolInput ?? {})
           return toolOk(text, id)
         } catch (err: any) {
           return toolFail(err.message, id)
