@@ -84,10 +84,18 @@ function toolOk(text: string, id: any)  { return rpcOk({ content: [{ type: 'text
 function toolFail(msg: string, id: any) { return rpcOk({ content: [{ type: 'text', text: `Error: ${msg}` }], isError: true }, id) }
 
 // ── Project resolver helper ───────────────────────────────────
-async function resolveProject(sb: any, userId: string, projectId: string) {
+async function resolveProject(sb: any, userId: string, projectId: string, logContext?: { tool_name: string, raw_params: any }) {
   let { data } = await sb.from('projects').select('id, name, slug, prefix, context').eq('slug', projectId).eq('user_id', userId).maybeSingle()
   if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context').eq('id', projectId).eq('user_id', userId).maybeSingle())
   if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context').ilike('prefix', projectId).eq('user_id', userId).maybeSingle())
+  if (!data && logContext) {
+    fireAndForget(sb.from('mcp_error_logs').insert({
+      user_id: userId,
+      tool_name: logContext.tool_name,
+      raw_params: logContext.raw_params,
+      error_msg: `resolveProject failed: received project_id="${projectId}"`,
+    }))
+  }
   return data
 }
 
@@ -124,6 +132,43 @@ async function githubFetch(token: string, path: string, options: RequestInit = {
 async function loadGitHubToken(sb: any, userId: string): Promise<string | null> {
   const { data } = await sb.from('user_settings').select('github_access_token').eq('user_id', userId).maybeSingle()
   return data?.github_access_token ?? null
+}
+
+// ── Google OAuth: shared refresh + accessor (TDE foundation) ──────────────────
+// Exchange a stored refresh token for a fresh access token and persist it.
+// Returns null if not configured or the refresh failed (→ user must reconnect).
+async function refreshGoogleToken(sb: any, userId: string, refreshToken: string): Promise<string | null> {
+  const clientId = Deno.env.get('GOOGLE_CLIENT_ID')
+  const clientSecret = Deno.env.get('GOOGLE_CLIENT_SECRET')
+  if (!clientId || !clientSecret) return null
+  const res = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ client_id: clientId, client_secret: clientSecret, refresh_token: refreshToken, grant_type: 'refresh_token' }),
+  })
+  const tok = await res.json()
+  if (!res.ok || !tok.access_token) {
+    console.error('[mcp] google token refresh failed:', tok)
+    return null
+  }
+  const expiry = new Date(Date.now() + Number(tok.expires_in ?? 3600) * 1000).toISOString()
+  await sb.from('user_settings').update({ google_access_token: tok.access_token, google_token_expiry: expiry }).eq('user_id', userId)
+  return tok.access_token
+}
+
+// Return a VALID Google access token for the user, refreshing if it's expired
+// (60s skew). null if Google isn't connected or the refresh failed. This is the
+// single accessor every Google service tool (Drive/Gmail/Tasks) should call.
+// deno-lint-ignore no-unused-vars -- foundation accessor; first consumer is the Drive tool (TDE)
+async function loadGoogleAccessToken(sb: any, userId: string): Promise<string | null> {
+  const { data } = await sb.from('user_settings')
+    .select('google_access_token, google_refresh_token, google_token_expiry')
+    .eq('user_id', userId).maybeSingle()
+  if (!data?.google_access_token) return null
+  const expired = !data.google_token_expiry || new Date(data.google_token_expiry).getTime() <= Date.now() + 60_000
+  if (!expired) return data.google_access_token
+  if (!data.google_refresh_token) return null
+  return await refreshGoogleToken(sb, userId, data.google_refresh_token)
 }
 
 const GH_PRIORITY_PATTERN = /rush|urgent|critical|p0|high|important|p1|medium|p2|low|p3/
@@ -384,7 +429,7 @@ const TOOLS = [
   },
   {
     name: 'create_project',
-    description: 'Create a new project.',
+    description: 'Create a new project. Auto-seeds a baseline Instruction Set (task hygiene + working preferences); after creating, propose 2–4 project-specific IS additions for the user to confirm.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -497,13 +542,14 @@ const TOOLS = [
   },
   {
     name: 'update_task',
-    description: 'Update task fields. Only provided fields are changed. Note: setting status to in_progress or done is hard-blocked if the task has unmet upstream flow dependencies — finish the source task(s) first (the response explains which).',
+    description: 'Update task fields. Only provided fields are changed. Pass append:true to ADD the provided detail to the existing detail (separated by a blank line) instead of replacing it — use it to accumulate notes/context on a task without resending the whole field. Note: setting status to in_progress or done is hard-blocked if the task has unmet upstream flow dependencies — finish the source task(s) first (the response explains which).',
     inputSchema: {
       type: 'object',
       properties: {
         task_id:    { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         text:       { type: 'string' },
-        detail:     { type: 'string', description: 'Task context' },
+        detail:     { type: 'string', description: 'Task context. Replaces the existing detail unless append:true is also passed.' },
+        append:     { type: 'boolean', description: 'If true, the provided detail is appended to the existing detail (separated by a blank line) instead of replacing it. Default false. Lets you add notes/context without resending the whole field.' },
         priority:   { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
         status:     { type: 'string', enum: ['pending', 'in_progress', 'done'] },
         due_date:   { type: 'string' },
@@ -1415,7 +1461,8 @@ async function resolveFlow(sb: any, userId: string, args: any): Promise<{ id: st
 }
 
 // ── Tool handlers ─────────────────────────────────────────────
-async function runTool(sb: any, userId: string, name: string, args: any): Promise<string> {
+async function runTool(sb: any, userId: string, name: string, args: any, rawParams?: any): Promise<string> {
+  const logCtx = { tool_name: name, raw_params: rawParams }
   switch (name) {
 
     case 'list_projects': {
@@ -1444,7 +1491,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'get_project': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const [{ data: sections }, { data: tasks }] = await Promise.all([
         sb.from('sections').select('*').eq('project_id', project.id).order('sort_order'),
@@ -1496,11 +1543,17 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
         .select().single()
       if (error) throw new Error(error.message)
       await getOrCreateBacklog(sb, data.id)
-      return `Created project "${name}"\nslug: ${data.slug}\nid:   ${data.id}`
+
+      // A baseline Instruction Set (task hygiene + working preferences) is seeded
+      // automatically by an AFTER INSERT trigger on `projects` (TDE-193), so it applies
+      // to every creation path. Here we just nudge the assistant to tailor it.
+      return `Created project "${name}"\nslug: ${data.slug}\nid:   ${data.id}` +
+        `\n\nA baseline Instruction Set (task hygiene + working preferences) was applied automatically.` +
+        `\n\nNEXT — tailor it: from what you know about this project (stack, language, conventions, workflow, output/commit style), propose 2–4 specific IS additions and ask the user to confirm before adding them via create_is_entry. Set universal:true for rules that must hold even inside flows (e.g. code style, deploy rules). Don't assume — propose, then add only what's confirmed.`
     }
 
     case 'update_project_context': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const merged = { ...(project.context ?? {}), ...args.context }
       await sb.from('projects').update({ context: merged }).eq('id', project.id)
@@ -1508,7 +1561,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'update_project': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const updates: Record<string, string> = {}
       if (args.name) updates.name = args.name
@@ -1529,7 +1582,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
 
     case 'delete_project': {
       if (!args.confirmed) return 'You must set confirmed: true to delete a project. This is permanent and cannot be undone.'
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: taskRows } = await sb.from('tasks').select('id').eq('project_id', project.id)
       const taskIds = (taskRows ?? []).map((t: any) => t.id)
@@ -1552,7 +1605,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'list_sections': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data } = await sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order')
       if (!data?.length) return `No sections in "${project.name}".`
@@ -1560,7 +1613,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'create_section': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: existing } = await sb.from('sections')
         .select('sort_order').eq('project_id', project.id).order('sort_order', { ascending: false }).limit(1).maybeSingle()
@@ -1573,7 +1626,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'delete_section': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: section } = await sb.from('sections')
         .select('id, name').eq('id', args.section_id).eq('project_id', project.id).maybeSingle()
@@ -1628,7 +1681,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const project = await resolveProject(sb, userId, project_id)
       if (!project) return `Project "${project_id}" not found.`
       const resolvedSectionId = section_id ?? await getOrCreateBacklog(sb, project.id)
-      let siblingQuery = sb.from('tasks').select('sort_order').eq('project_id', project.id).eq('section_id', resolvedSectionId)
+      const siblingQuery = sb.from('tasks').select('sort_order').eq('project_id', project.id).eq('section_id', resolvedSectionId)
       const { data: lastSibling } = await siblingQuery.order('sort_order', { ascending: false }).limit(1).maybeSingle()
       const sortOrder = (lastSibling?.sort_order ?? -1) + 1
       const { data, error } = await sb.from('tasks').insert({
@@ -1647,12 +1700,22 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'update_task': {
-      const { task_id, proceed_anyway, ...updates } = args
+      const { task_id, append, ...updates } = args
       const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned']
       const patch: Record<string, any> = {}
       for (const k of allowed) if (k === 'group_id' ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
       const task = await resolveTask(sb, userId, task_id)
       if (!task) return 'Task not found.'
+
+      // Append mode (TDE-181): add to the existing detail instead of replacing it, so
+      // callers can accumulate notes/context on a task without resending the whole field.
+      let appended = false
+      if (append === true && patch.detail !== undefined) {
+        const { data: cur } = await sb.from('tasks').select('detail').eq('id', task.id).maybeSingle()
+        const existing = (cur?.detail ?? '').trim()
+        patch.detail = existing ? `${existing}\n\n${patch.detail}` : patch.detail
+        appended = true
+      }
 
       // Enforce flow dependencies (full upstream chain) when starting or completing work.
       // Hard block — not bypassable via proceed_anyway. Finish upstream or drop the edge.
@@ -1679,7 +1742,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       }
 
       await sb.from('tasks').update(patch).eq('id', task.id)
-      return `Updated "${task.text}".`
+      return `Updated "${task.text}".${appended ? ' (appended to detail)' : ''}`
     }
 
     case 'complete_task': {
@@ -1862,7 +1925,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'get_project_is': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: entries } = await sb.from('project_instructions')
         .select('id, title, content')
@@ -1877,7 +1940,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'create_kb_entry': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data, error } = await sb.from('project_knowledge')
         .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content })
@@ -1887,7 +1950,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'create_is_entry': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data, error } = await sb.from('project_instructions')
         .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content, universal: args.universal === true })
@@ -1897,7 +1960,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'get_knowledge_base': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: entries } = await sb.from('project_knowledge')
         .select('id, title, content, updated_at')
@@ -1912,7 +1975,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'list_kb_entries': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data } = await sb.from('project_knowledge')
         .select('id, title, updated_at')
@@ -1951,7 +2014,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'list_is_entries': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data } = await sb.from('project_instructions')
         .select('id, title, updated_at')
@@ -2202,7 +2265,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
       const ghToken = await loadGitHubToken(sb, userId)
       if (!ghToken) return 'No GitHub account connected. Use github_connect first.'
 
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       const { data: fullProject } = await sb.from('projects')
@@ -2280,7 +2343,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     case 'github_push_project': {
       const ghToken = await loadGitHubToken(sb, userId)
       if (!ghToken) return 'No GitHub account connected. Use github_connect first.'
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: fullProject } = await sb.from('projects')
         .select('github_repo').eq('id', project.id).maybeSingle()
@@ -2501,7 +2564,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'list_groups': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       let query = sb.from('groups').select('id, name, section_id, sections(name)', { count: 'exact' }).eq('project_id', project.id)
@@ -2525,7 +2588,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'create_group': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       const { data: section } = await sb.from('sections').select('id').eq('id', args.section_id).eq('project_id', project.id).single()
@@ -2601,7 +2664,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'analyze_section': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       const { data: section } = await sb.from('sections').select('*').eq('id', args.section_id).eq('project_id', project.id).single()
@@ -2650,7 +2713,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'section_insights': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       const { data: section } = await sb.from('sections').select('*').eq('id', args.section_id).eq('project_id', project.id).single()
@@ -2828,7 +2891,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'list_flows': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: flows } = await sb.from('flows')
         .select('id, name, short_id, created_at')
@@ -2865,7 +2928,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'get_flow_order': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       const { data: tasks } = await sb.from('tasks')
@@ -3250,7 +3313,7 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
     }
 
     case 'build_new_flow': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       // Project grounding (codebase-first, applied to Tasker's own data): existing
@@ -3474,7 +3537,9 @@ async function runTool(sb: any, userId: string, name: string, args: any): Promis
               try {
                 const existing = await githubFetch(ghToken, `/repos/${proj.github_repo}/contents/${filePath}`)
                 sha = existing.sha
-              } catch (_) {}
+              } catch {
+                // no existing file at this path yet — create it without a sha
+              }
               const body: any = { message: `chore: store Tasker artifact (${folder})`, content: btoa(unescape(encodeURIComponent(args.content))) }
               if (sha) body.sha = sha
               await githubFetch(ghToken, `/repos/${proj.github_repo}/contents/${filePath}`, { method: 'PUT', body: JSON.stringify(body) })
@@ -3964,7 +4029,7 @@ Call submit_validation_result with:
     }
 
     case 'name_flow': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const taskIds = Array.isArray(args.task_ids) ? args.task_ids : []
       if (!taskIds.length) return 'task_ids is required and must not be empty.'
@@ -4045,7 +4110,6 @@ Call submit_validation_result with:
     case 'recompute_flow_steps': {
       // Resolve the flow record
       let flow: any = null
-      let flowTasks: any[] = []
       if (args.flow_id) {
         const { data: f } = await sb.from('flows').select('id, name').or(`id.eq.${args.flow_id},name.ilike.%${args.flow_id}%`).eq('user_id', userId).maybeSingle()
         if (!f) return `Flow "${args.flow_id}" not found.`
@@ -4188,7 +4252,7 @@ Call submit_validation_result with:
     case 'save_flow_as_template': {
       // Resolve source flow tasks
       let sourceTasks: any[] = []
-      let flowName = args.name
+      const flowName = args.name
       if (args.flow_id || args.task_id) {
         let flowId: string | null = null
         if (args.task_id) {
@@ -4251,7 +4315,7 @@ Call submit_validation_result with:
     }
 
     case 'instantiate_flow_template': {
-      const project = await resolveProject(sb, userId, args.project_id)
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
 
       let templateId = args.template_id
@@ -4291,7 +4355,7 @@ Call submit_validation_result with:
       }
       if (!sectionId) return 'Failed to create section for flow tasks.'
 
-      const { data: { user } } = await sb.auth.getUser()
+      const { data: { user: _user } } = await sb.auth.getUser()
       const idMap: Record<string, string> = {}
 
       for (const step of steps) {
@@ -4402,10 +4466,17 @@ Deno.serve(async (req: Request) => {
 
       case 'tools/call': {
         const { name, arguments: toolArgs, input: toolInput } = params
+        const resolvedArgs = toolArgs ?? toolInput ?? {}
         try {
-          const text = await runTool(sb, userId, name, toolArgs ?? toolInput ?? {})
+          const text = await runTool(sb, userId, name, resolvedArgs, params)
           return toolOk(text, id)
         } catch (err: any) {
+          fireAndForget(sb.from('mcp_error_logs').insert({
+            user_id: userId,
+            tool_name: name,
+            raw_params: params,
+            error_msg: err.message,
+          }))
           return toolFail(err.message, id)
         }
       }
