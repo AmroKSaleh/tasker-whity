@@ -311,6 +311,9 @@ function isReviewEligible(task: any): boolean {
   return hasCheckableDeliverable(task)
 }
 
+// TDE-269: controlled vocabulary for the optional KB category (a SOFT retrieval hint, never a hard filter).
+const KB_CATEGORIES = ['architecture', 'database', 'deployment', 'mcp', 'flows', 'design', 'product', 'gtm', 'reference', 'other']
+
 // Normalize a single authored rule into the canonical shape (defaults + a stable id).
 function normalizeRule(r: any, i: number): any {
   return {
@@ -661,6 +664,7 @@ const TOOLS = [
         title:      { type: 'string', description: 'Short title for the entry' },
         content:    { type: 'string', description: 'The content to save (markdown supported)' },
         source:     { type: 'string', enum: ['user', 'agent'], description: 'Who is creating this entry. Pass "agent" when writing a learning on task completion per the Dynamic KB rule. Defaults to "agent" when called by an AI agent.' },
+        category:   { type: 'string', enum: ['architecture', 'database', 'deployment', 'mcp', 'flows', 'design', 'product', 'gtm', 'reference', 'other'], description: 'Optional category (controlled vocab). A SOFT hint that prioritises this entry in KB title-scan retrieval — never a hard filter.' },
       },
       required: ['project_id', 'title', 'content'],
     },
@@ -844,6 +848,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_kb_entries',
+    description: 'Fetch the FULL content of specific Knowledge Base entries by id (or title) — the selective-pull companion to the KB titles index shown in get_task. Use this to read only the few entries relevant to the current task, instead of get_knowledge_base (which dumps the whole KB). Pass ids (preferred — from the index) and/or titles (case-insensitive partial match).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        ids:        { type: 'array', items: { type: 'string' }, description: 'KB entry UUIDs (from the get_task index or list_kb_entries).' },
+        titles:     { type: 'array', items: { type: 'string' }, description: 'Optional: case-insensitive partial title matches, as an alternative/supplement to ids.' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
     name: 'kb_health',
     description: 'Report stale Knowledge Base entries (not touched in 60+ days), grouped by source. Also opportunistically auto-archives stale AGENT entries (a daily cron does this too; calling this just makes it immediate). Stale USER entries are returned for the human to confirm — never auto-archived. Use this to keep the KB lean.',
     inputSchema: {
@@ -873,6 +890,7 @@ const TOOLS = [
         entry_id: { type: 'string', description: 'UUID of the KB entry. Get it via list_kb_entries or get_knowledge_base.' },
         title:    { type: 'string', description: 'New title (optional)' },
         content:  { type: 'string', description: 'New content (optional, markdown supported)' },
+        category: { type: 'string', enum: ['architecture', 'database', 'deployment', 'mcp', 'flows', 'design', 'product', 'gtm', 'reference', 'other'], description: 'Set/change the category (controlled vocab); pass null to clear. Soft retrieval hint, not a filter.' },
       },
       required: ['entry_id'],
     },
@@ -2022,6 +2040,25 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
       }
 
+      // TDE-254: inject a lightweight KB TITLES INDEX (not full content) so every task
+      // surfaces what project knowledge exists. The agent pulls full content for only
+      // the relevant entries via get_kb_entries — cheap reads, no whole-KB dump.
+      if (full.project_id) {
+        const { data: kbTitles } = await sb.from('project_knowledge')
+          .select('id, title, source, category')
+          .eq('project_id', full.project_id)
+          .is('archived_at', null)
+          .order('created_at')
+        if (kbTitles?.length) {
+          const cap = 60
+          lines.push('\n---')
+          lines.push(`# Project Knowledge Base — index (${kbTitles.length} entr${kbTitles.length === 1 ? 'y' : 'ies'}, titles only)`)
+          lines.push('Pull full content for the few relevant to THIS task via get_kb_entries(project_id, ids:[...]). Do NOT pull them all.')
+          for (const e of kbTitles.slice(0, cap)) lines.push(`  • [${e.id}]${e.category ? ` {${e.category}}` : ''}${e.source === 'agent' ? ' (ai)' : ''} ${e.title}`)
+          if (kbTitles.length > cap) lines.push(`  … and ${kbTitles.length - cap} more — use list_kb_entries to see all.`)
+        }
+      }
+
       // Workflow directive
       lines.push('\n---')
       if (flowWarning) {
@@ -2056,8 +2093,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const source = args.source === 'user' ? 'user' : 'agent'
+      if (args.category && !KB_CATEGORIES.includes(args.category)) return `Invalid category "${args.category}". Allowed: ${KB_CATEGORIES.join(', ')} (or omit).`
       const { data, error } = await sb.from('project_knowledge')
-        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content, source })
+        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content, source, category: args.category ?? null })
         .select().single()
       if (error) throw new Error(error.message)
       return `Created KB entry "${data.title}" in "${project.name}".`
@@ -2086,6 +2124,34 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!entries?.length) return `No knowledge base entries for "${project.name}". Add entries via the KB button in the project header.`
       return [
         `# Knowledge Base — ${project.name}`,
+        '',
+        ...entries.map((e: any) => `## ${e.title}  (id: ${e.id}) [${e.source}]\n\n${e.content}`),
+      ].join('\n\n---\n\n')
+    }
+
+    case 'get_kb_entries': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const ids: string[] = Array.isArray(args.ids) ? args.ids : []
+      const titles: string[] = Array.isArray(args.titles) ? args.titles : []
+      if (!ids.length && !titles.length) return 'Provide ids and/or titles to fetch (use the KB index in get_task or list_kb_entries to find them).'
+      const collected = new Map<string, any>()
+      if (ids.length) {
+        const { data } = await sb.from('project_knowledge')
+          .select('id, title, content, source')
+          .eq('project_id', project.id).is('archived_at', null).in('id', ids)
+        for (const e of (data || [])) collected.set(e.id, e)
+      }
+      for (const t of titles) {
+        const { data } = await sb.from('project_knowledge')
+          .select('id, title, content, source')
+          .eq('project_id', project.id).is('archived_at', null).ilike('title', `%${t}%`)
+        for (const e of (data || [])) collected.set(e.id, e)
+      }
+      const entries = [...collected.values()]
+      if (!entries.length) return `No matching KB entries found in "${project.name}".`
+      return [
+        `# Knowledge Base — ${entries.length} selected entr${entries.length === 1 ? 'y' : 'ies'} (${project.name})`,
         '',
         ...entries.map((e: any) => `## ${e.title}  (id: ${e.id}) [${e.source}]\n\n${e.content}`),
       ].join('\n\n---\n\n')
@@ -2160,7 +2226,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const fields: any = {}
       if (args.title   !== undefined) fields.title   = args.title
       if (args.content !== undefined) fields.content = args.content
-      if (!Object.keys(fields).length) return 'No fields to update. Provide title or content.'
+      if (args.category !== undefined) {
+        if (args.category !== null && !KB_CATEGORIES.includes(args.category)) return `Invalid category "${args.category}". Allowed: ${KB_CATEGORIES.join(', ')} (or null to clear).`
+        fields.category = args.category
+      }
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, or category.'
       const { data, error } = await sb.from('project_knowledge')
         .update(fields)
         .eq('id', args.entry_id)
@@ -3628,7 +3698,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
         const rules = (args.bar.rules || []).map(normalizeRule)
         if (!rules.length) return `The bar must contain at least one rule.`
-        const review_bar = { rules, frozen_at: new Date().toISOString(), source: 'task_text+IS' }
+        const review_bar = { rules, frozen_at: new Date().toISOString(), source: 'task_text+IS+KB' }
         const { error } = await sb.from('tasks').update({ review_bar, review_enabled: true }).eq('id', task.id)
         if (error) throw new Error(error.message)
         const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
@@ -3643,9 +3713,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const { data: projIs } = await sb.from('project_instructions')
         .select('title, content, universal').eq('project_id', task.project_id).order('created_at')
       const isBlock = (projIs || []).map((e: any) => `## ${e.title}${e.universal ? ' (universal)' : ''}\n${e.content}`).join('\n\n')
+      // TDE-268 (Phase 2): include a KB TITLES INDEX so the bar can be enriched from
+      // relevant KB entries via title-scan → get_kb_entries (selective pull, soft cap + flag).
+      const { data: kbTitles } = await sb.from('project_knowledge')
+        .select('id, title, source, category').eq('project_id', task.project_id).is('archived_at', null).order('created_at')
+      const KB_CAP = 5
+      const kbIndex = (kbTitles || []).map((e: any) => `  • [${e.id}]${e.category ? ` {${e.category}}` : ''}${e.source === 'agent' ? ' (ai)' : ''} ${e.title}`).join('\n')
       return [
-        `BAR ASSEMBLY (Phase 1) for "${task.text}".`,
-        `Author the review bar from TASK TEXT + IS ONLY — no KB in Phase 1.`,
+        `BAR ASSEMBLY (Phase 2) for "${task.text}".`,
+        `Assemble the review bar from THREE sources: TASK TEXT + IS + the few RELEVANT KB entries.`,
         ``,
         `── TASK INTENT ──`,
         `# ${task.text}`,
@@ -3654,8 +3730,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `── GOVERNING INSTRUCTION SET (standards to enforce) ──`,
         isBlock || '(no project IS)',
         ``,
+        `── PROJECT KB — TITLES INDEX (${(kbTitles || []).length}) ──`,
+        kbIndex || '(no KB entries)',
+        `TITLE-SCAN: pick ONLY the entries whose titles are topically relevant to THIS task (aim ≤ ${KB_CAP}). The optional {category} tag is a SOFT hint to prioritise — NOT a filter: still pick a relevant entry even if its category differs from the task's. Then call get_kb_entries(project_id, ids:[...]) to pull the full content of ONLY those and derive rules from them. If MORE than ${KB_CAP} entries look genuinely relevant, do NOT silently drop the extras — FLAG it (list them) so the task can be scoped, then proceed with the top ${KB_CAP}.`,
+        ``,
         `── INSTRUCTION ──`,
-        `Derive a small set (aim 3–5) of CHECKABLE acceptance rules the output must satisfy, grounded ONLY in the intent + IS above. Each rule: { label, kind: "check"|"judgment", rule, severity: "blocker"|"warning" }. Prefer kind=check with concrete params; for judgment use an objective, verifiable criterion. Then call enable_task_review again with bar: { rules: [...] } to FREEZE the snapshot. Do NOT add KB-derived rules (that is Phase 2 / TDE-268).`,
+        `Derive a small set (aim 3–5) of CHECKABLE acceptance rules grounded in the intent + IS + the relevant KB you pulled. Each rule: { label, kind: "check"|"judgment", rule, severity: "blocker"|"warning" }. Prefer kind=check with concrete params; for judgment use an objective, verifiable criterion. Then call enable_task_review again with bar: { rules: [...] } to FREEZE the snapshot.`,
       ].join('\n')
     }
 
