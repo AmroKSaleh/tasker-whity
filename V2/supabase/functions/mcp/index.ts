@@ -616,7 +616,10 @@ const TOOLS = [
     description: 'Return all knowledge base entries for a project. Call this when the user signals they want stored project knowledge applied — e.g. "using the information in your knowledge base", "using what you know about X", "using our brand guidelines", "based on our preferences", or any similar intent to reference saved project context.',
     inputSchema: {
       type: 'object',
-      properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        source: { type: 'string', enum: ['user', 'agent', 'all'], description: 'Filter by who created the entry. Defaults to "all".' },
+      },
       required: ['project_id'],
     },
   },
@@ -638,6 +641,7 @@ const TOOLS = [
         project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
         title:      { type: 'string', description: 'Short title for the entry' },
         content:    { type: 'string', description: 'The content to save (markdown supported)' },
+        source:     { type: 'string', enum: ['user', 'agent'], description: 'Who is creating this entry. Pass "agent" when writing a learning on task completion per the Dynamic KB rule. Defaults to "agent" when called by an AI agent.' },
       },
       required: ['project_id', 'title', 'content'],
     },
@@ -810,11 +814,35 @@ const TOOLS = [
   },
   {
     name: 'list_kb_entries',
-    description: 'List Knowledge Base entries for a project — returns id + title + updated_at only (no content). Use this for cheap discovery before update/delete operations.',
+    description: 'List Knowledge Base entries for a project — returns id + title + source + updated_at only (no content). Use this for cheap discovery before update/delete operations.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        source: { type: 'string', enum: ['user', 'agent', 'all'], description: 'Filter by who created the entry. Defaults to "all".' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'kb_health',
+    description: 'Report stale Knowledge Base entries (not touched in 60+ days), grouped by source. Also opportunistically auto-archives stale AGENT entries (a daily cron does this too; calling this just makes it immediate). Stale USER entries are returned for the human to confirm — never auto-archived. Use this to keep the KB lean.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
       required: ['project_id'],
+    },
+  },
+  {
+    name: 'archive_kb_entry',
+    description: 'Archive a Knowledge Base entry (hides it from default reads but keeps it recoverable — never deletes). Pass restore:true to bring an archived entry back. Confirm with the user before archiving their own (source=user) entries.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id: { type: 'string', description: 'UUID of the KB entry (from list_kb_entries or kb_health).' },
+        restore:  { type: 'boolean', description: 'If true, un-archive (restore) the entry instead of archiving it.' },
+      },
+      required: ['entry_id'],
     },
   },
   {
@@ -1942,8 +1970,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'create_kb_entry': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
+      const source = args.source === 'user' ? 'user' : 'agent'
       const { data, error } = await sb.from('project_knowledge')
-        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content })
+        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content, source })
         .select().single()
       if (error) throw new Error(error.message)
       return `Created KB entry "${data.title}" in "${project.name}".`
@@ -1962,27 +1991,84 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'get_knowledge_base': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
-      const { data: entries } = await sb.from('project_knowledge')
-        .select('id, title, content, updated_at')
+      let q = sb.from('project_knowledge')
+        .select('id, title, content, source, updated_at')
         .eq('project_id', project.id)
+        .is('archived_at', null)
         .order('created_at')
+      if (args.source && args.source !== 'all') q = q.eq('source', args.source)
+      const { data: entries } = await q
       if (!entries?.length) return `No knowledge base entries for "${project.name}". Add entries via the KB button in the project header.`
       return [
         `# Knowledge Base — ${project.name}`,
         '',
-        ...entries.map((e: any) => `## ${e.title}  (id: ${e.id})\n\n${e.content}`),
+        ...entries.map((e: any) => `## ${e.title}  (id: ${e.id}) [${e.source}]\n\n${e.content}`),
       ].join('\n\n---\n\n')
     }
 
     case 'list_kb_entries': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
-      const { data } = await sb.from('project_knowledge')
-        .select('id, title, updated_at')
+      let q = sb.from('project_knowledge')
+        .select('id, title, source, updated_at')
         .eq('project_id', project.id)
+        .is('archived_at', null)
         .order('created_at')
+      if (args.source && args.source !== 'all') q = q.eq('source', args.source)
+      const { data } = await q
       if (!data?.length) return `No knowledge base entries for "${project.name}".`
-      return data.map((e: any) => `[id: ${e.id}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+      return data.map((e: any) => `[id: ${e.id}] [${e.source}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+    }
+
+    case 'kb_health': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const cutoff = new Date(Date.now() - 60 * 24 * 60 * 60 * 1000).toISOString()
+      const { data: stale } = await sb.from('project_knowledge')
+        .select('id, title, source, updated_at, reviewed_at')
+        .eq('project_id', project.id)
+        .is('archived_at', null)
+        .order('updated_at')
+      const isStale = (e: any) => (e.reviewed_at ?? e.updated_at) < cutoff
+      const staleEntries = (stale ?? []).filter(isStale)
+      const agentStale = staleEntries.filter((e: any) => e.source === 'agent')
+      const userStale  = staleEntries.filter((e: any) => e.source !== 'agent')
+
+      // Auto-archive stale agent entries immediately (mirrors the daily cron sweep).
+      let archivedCount = 0
+      if (agentStale.length) {
+        const { error } = await sb.from('project_knowledge')
+          .update({ archived_at: new Date().toISOString() })
+          .in('id', agentStale.map((e: any) => e.id))
+        if (!error) archivedCount = agentStale.length
+      }
+
+      const lines = [`# KB Health — ${project.name}`, '']
+      lines.push(archivedCount
+        ? `Auto-archived ${archivedCount} stale AI entr${archivedCount === 1 ? 'y' : 'ies'} (60+ days untouched):`
+        : `No stale AI entries to archive.`)
+      agentStale.forEach((e: any) => lines.push(`  • [archived] ${e.title} (id: ${e.id})`))
+      lines.push('')
+      if (userStale.length) {
+        lines.push(`${userStale.length} of YOUR entries look stale (60+ days untouched). These were NOT archived — confirm each with the user before calling archive_kb_entry:`)
+        userStale.forEach((e: any) => lines.push(`  • ${e.title} (id: ${e.id}, updated ${e.updated_at})`))
+      } else {
+        lines.push(`None of your own entries are stale.`)
+      }
+      return lines.join('\n')
+    }
+
+    case 'archive_kb_entry': {
+      const restore = args.restore === true
+      const { data, error } = await sb.from('project_knowledge')
+        .update({ archived_at: restore ? null : new Date().toISOString() })
+        .eq('id', args.entry_id)
+        .eq('user_id', userId)
+        .select()
+        .maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return `KB entry "${args.entry_id}" not found.`
+      return `${restore ? 'Restored' : 'Archived'} KB entry "${data.title}".`
     }
 
     case 'update_kb_entry': {
