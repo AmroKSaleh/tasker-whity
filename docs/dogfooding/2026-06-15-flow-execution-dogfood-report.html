@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dogfooding Report — Flow Execution (2026-06-15)</title>
+<style>
+  :root{
+    --paper:#faf9f7; --card:#ffffff; --ink:#1b1a18; --mute:#6b6760; --line:#e6e2db;
+    --accent:#d97757; --green:#3f9d6a; --amber:#c98a1e; --gray:#8a857c;
+    --green-bg:#eef7f1; --amber-bg:#fbf3e3; --gray-bg:#f1efeb; --accent-bg:#fbeee8;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0; background:var(--paper); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.62; font-size:17px; -webkit-font-smoothing:antialiased;}
+  .wrap{max-width:840px; margin:0 auto; padding:clamp(20px,5vw,56px) clamp(16px,5vw,40px) 80px;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+  header.top{border-bottom:3px solid var(--accent); padding-bottom:22px; margin-bottom:34px;}
+  h1{font-size:clamp(1.55rem,5.2vw,2.3rem); line-height:1.15; margin:0 0 14px; letter-spacing:-.02em;}
+  .meta{display:flex; flex-wrap:wrap; gap:6px 18px; font-size:.82rem; color:var(--mute);}
+  .meta b{color:var(--ink); font-weight:600;}
+  h2{font-size:clamp(1.15rem,3.6vw,1.45rem); margin:46px 0 8px; letter-spacing:-.01em; display:flex; align-items:center; gap:10px;}
+  h2 .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);flex:0 0 auto;}
+  .lead{color:var(--mute); margin:0 0 18px; font-size:.98rem;}
+  .callout{background:var(--accent-bg); border:1px solid #f0d8cd; border-left:4px solid var(--accent);
+    border-radius:10px; padding:16px 18px; margin:22px 0; font-size:.95rem;}
+  .callout strong{color:var(--accent);}
+  .card{background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 20px; margin:14px 0; box-shadow:0 1px 2px rgba(0,0,0,.03); border-left-width:5px;}
+  .card.pos{border-left-color:var(--green);}
+  .card.fri{border-left-color:var(--amber);}
+  .card.note{border-left-color:var(--gray);}
+  .card h3{margin:0 0 6px; font-size:1.02rem; line-height:1.35; display:flex; flex-wrap:wrap; gap:8px; align-items:baseline;}
+  .badge{font-size:.64rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    padding:3px 8px; border-radius:999px; white-space:nowrap; flex:0 0 auto;}
+  .badge.pos{background:var(--green-bg); color:var(--green);}
+  .badge.fri{background:var(--amber-bg); color:var(--amber);}
+  .badge.note{background:var(--gray-bg); color:var(--gray);}
+  .card p{margin:8px 0 0; font-size:.95rem;}
+  .kv .k{font-size:.68rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--mute); display:block; margin-top:10px;}
+  .kv .v{font-size:.95rem;}
+  ol.ranked{counter-reset:r; list-style:none; padding:0; margin:18px 0;}
+  ol.ranked li{position:relative; background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:14px 16px 14px 56px; margin:10px 0; font-size:.95rem;}
+  ol.ranked li::before{counter-increment:r; content:counter(r); position:absolute; left:14px; top:13px;
+    width:28px; height:28px; border-radius:50%; background:var(--accent); color:#fff; font-weight:700; font-size:.9rem;
+    display:flex; align-items:center; justify-content:center;}
+  pre{background:#1f1d1b; color:#ece7df; border-radius:12px; padding:16px; overflow-x:auto; font-size:.82rem;
+    line-height:1.5; margin:16px 0; font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; -webkit-overflow-scrolling:touch;}
+  code.inl{background:var(--gray-bg); padding:1px 6px; border-radius:6px; font-size:.86em; font-family:ui-monospace,Menlo,Consolas,monospace;}
+  .factbar{display:flex; flex-wrap:wrap; gap:10px; margin:18px 0;}
+  .fact{flex:1 1 130px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px;}
+  .fact .n{font-size:1.5rem; font-weight:700; color:var(--accent); line-height:1;}
+  .fact .l{font-size:.74rem; color:var(--mute); margin-top:5px;}
+  .steps{list-style:none; padding:0; margin:14px 0;}
+  .steps li{display:flex; gap:10px; align-items:baseline; padding:8px 0; border-bottom:1px solid var(--line); font-size:.93rem;}
+  .steps .ok{color:var(--green); font-weight:700; flex:0 0 auto;}
+  .steps .blocked{color:var(--gray); font-weight:700; flex:0 0 auto;}
+  footer{margin-top:50px; padding-top:18px; border-top:1px solid var(--line); font-size:.82rem; color:var(--mute);}
+  a{color:var(--accent);}
+  @media (max-width:600px){ body{font-size:16px;} .card{padding:15px 16px;} ol.ranked li{padding-left:52px;} }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <h1>Dogfooding Report — Flow <em>Execution</em> Experience</h1>
+    <div class="meta">
+      <span><b>Date</b> 2026-06-15</span>
+      <span><b>Flow</b> TDE-F1 (TDE-264–267 run; 268–269 blocked)</span>
+      <span><b>Exercise</b> Run the build-flow to actually ship TDE-261 Phase 1</span>
+      <span><b>Author</b> Claude (Opus 4.8), user-directed</span>
+    </div>
+  </header>
+
+  <div class="factbar">
+    <div class="fact"><div class="n">4 / 6</div><div class="l">steps shipped (2 blocked by design)</div></div>
+    <div class="fact"><div class="n">6</div><div class="l">independent validator runs</div></div>
+    <div class="fact"><div class="n">1</div><div class="l">regenerate cycle (real)</div></div>
+    <div class="fact"><div class="n">10</div><div class="l">findings logged</div></div>
+  </div>
+
+  <div class="callout">
+    <strong>Companion report.</strong> This covers <b>execution</b> (<span class="mono">run_flow</span> → per-step build → store_artifact → complete → validate → independent subagent → gate). It pairs with the earlier <em>authoring</em> report. The headline: <b>Phase 1 of TDE-261 is fully built, deployed, and independently validated</b> — schema, three MCP tools, the judge loop, get_task verdict block, and the web-app panel + badge. Phase 2 (KB-enriched) was correctly left blocked on TDE-254.
+  </div>
+
+  <h2><span class="dot"></span>What actually ran</h2>
+  <ul class="steps">
+    <li><span class="ok">✓ PASS</span> <span><b>TDE-264</b> schema + eligibility/flow-exclusivity guards — migration applied to remote; verified live. <em>(1 regenerate cycle — see F3.)</em></span></li>
+    <li><span class="ok">✓ PASS</span> <span><b>TDE-265</b> <span class="mono">enable_task_review</span> (bar assembly) — deployed; live-tested 4 ways (grounding, freeze, frozen-guard, flow-refusal).</span></li>
+    <li><span class="ok">✓ PASS</span> <span><b>TDE-266</b> <span class="mono">review_task</span> + <span class="mono">submit_task_review</span> + complete_task nudge — live-demoed fail→reopen→pass + flow-skip.</span></li>
+    <li><span class="ok">✓ PASS</span> <span><b>TDE-267</b> get_task verdict block + <span class="mono">ReviewVerdictPanel</span> + card badge — built clean, deployed to Netlify, verified live.</span></li>
+    <li><span class="blocked">○ HELD</span> <span><b>TDE-268 / 269</b> (Phase 2) — left blocked on TDE-254, per the flow's phase-discipline IS.</span></li>
+  </ul>
+
+  <h2><span class="dot"></span>What worked well</h2>
+
+  <div class="card pos">
+    <h3><span class="badge pos">Positive · P1</span>The adversarial validators earned their keep</h3>
+    <p>Every step's validator verified against the <b>live system</b> — querying the remote DB, reading the deployed source, and calling the deployed tools over HTTP — not just trusting the artifact's self-report. On TDE-264 a validator <b>caught a real problem</b> (F3) and reopened the task. This is the core value: independent re-checking that doesn't take the builder's word.</p>
+  </div>
+  <div class="card pos">
+    <h3><span class="badge pos">Positive · P2</span>The regenerate/reopen loop works exactly as designed</h3>
+    <p>The live demo drove a blocker fail → task reopened with critique (action=regenerate) → fix → pass. And the flow's hard dependency enforcement kept steps in order. The machinery this feature reuses is sound — proven end-to-end.</p>
+  </div>
+  <div class="card pos">
+    <h3><span class="badge pos">Positive · P3</span>"Verification over assertion" was enforced, not optional</h3>
+    <p>Because each gate demanded evidence, every step was actually run before it could pass — migration applied + queried, tools called against the live endpoint, frontend built. The flow made me prove it, which is exactly the discipline that catches "looks correct but isn't."</p>
+  </div>
+
+  <h2><span class="dot"></span>Frictions &amp; gaps</h2>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F3 (headline)</span>A pre-authored gate rule over-reached into the consumer's territory</h3>
+    <p>The 265←264 gate "helpers callable <em>from the enable code path</em>" was authored before implementation. But the enable path is what the <em>consumer</em> (265) builds — it can't exist at the 264→265 handoff. The adversarial validator correctly failed it (the helpers were complete), forcing a regenerate cycle to re-scope the rule. The rule was also ambiguous (capability vs. existing-caller).</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">A false-blocker cost a full regenerate cycle. The validator was right; the <em>contract</em> was wrong.</span>
+      <span class="k">Recommendation</span><span class="v">Author gate rules for what the producer <em>hands over</em>, not how the consumer will <em>wire</em> it. A contract-authoring linter could flag rules that reference the consumer's own deliverable.</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F4</span>The check-only "shortcut" ignores output self-check judgment rules</h3>
+    <p><span class="mono">validate_output</span> decides "all rules are check, use the one-call shortcut" based on the <b>gate</b> contract only. When the producer's <b>output self-check</b> contains judgment rules (it did, twice), they're invisible to that decision and would silently fall to self-grading. I hand-spawned validators to keep independence.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">Independence can be silently lost for output-side judgment rules.</span>
+      <span class="k">Recommendation</span><span class="v">The shortcut decision must consider gate AND output self-check rule kinds together.</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F2</span>Duplicate rule IDs across gate + self-check corrupt the ledger label</h3>
+    <p>Gate and output contracts both start their rule IDs at <span class="mono">r1</span>. On submit, the gate "collapsed them by ID" and surfaced a failure under the <em>wrong</em> rule's label (a "helpers" failure showed as "migration applied"). The validator had to explain the mismatch.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">Verdict attribution is wrong when IDs collide — misleading critiques.</span>
+      <span class="k">Recommendation</span><span class="v">Namespace rule IDs (e.g. gate:r1 vs out:r1) or auto-assign globally unique IDs.</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F1</span><span class="mono">run_flow</span> won't accept the flow's own short ID</h3>
+    <p><span class="mono">get_flow_order</span> shows the flow as <span class="mono">TDE-F1</span>, but <span class="mono">run_flow(flow_id:"TDE-F1")</span> returned "not found" — it only takes a UUID or name. I had to start it via a member task_id.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">The identifier the UI shows you is the one identifier the run command rejects.</span>
+      <span class="k">Recommendation</span><span class="v">Resolve flow short IDs in <span class="mono">run_flow</span> (and everywhere a flow is addressed).</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F6</span>Rigorous execution is very token-heavy</h3>
+    <p>Each step = deploy + live-test + store_artifact + complete + validate + a validator subagent (~30–44k tokens each); plus the regenerate cycle = 6 validator runs for 4 steps. The assurance is real but the cost is large and grows with flow size.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">Cost scales with steps × validators; a cheaper-model validator tier or batching matters.</span>
+      <span class="k">Recommendation</span><span class="v">Allow a cheaper model for validators; reuse one validator across a step's rules; cache live-checks.</span>
+    </div>
+  </div>
+
+  <h2><span class="dot"></span>Honest finding: "reuse" collided with the data model</h2>
+  <div class="card note">
+    <h3><span class="badge note">Note · F9</span>The judge <em>mirrors</em> the flow loop but doesn't literally reuse it</h3>
+    <p>The flow IS said "reuse, don't rebuild." In practice the verdict needed its own store (<span class="mono">review_bar</span> / <span class="mono">review_verdict</span>) and its own submit (<span class="mono">submit_task_review</span>), because <span class="mono">submit_validation_result</span> writes to the flow/edge ledger, not a standalone task. So Phase 1 <b>mirrors</b> the loop (same shape: store → grade → gate → regenerate/escalate) rather than reusing the exact calls. A purer reuse would treat <span class="mono">review_bar</span> as the task's output contract and run the real <span class="mono">validate_output</span>/<span class="mono">submit_validation_result</span> — worth revisiting if duplication becomes a maintenance cost.</p>
+  </div>
+
+  <h2><span class="dot"></span>Did running it as a flow improve the output?</h2>
+  <div class="card note">
+    <h3><span class="badge note">Verdict</span>Yes for confidence; the code itself was correct without it</h3>
+    <p>The gates forced live verification at every step and the independent validators re-checked against the real system — that's genuine, and it's discipline I might have shortcut on a plain build. But the one thing the gates <em>caught</em> was a mis-scoped <b>contract</b> (F3), not a code defect; the code passed everywhere it was checked. So for this kind of work the assurance came mostly from <b>"actually run it"</b> (verification), which the flow <em>enforced</em> but doesn't uniquely provide. Net: high-confidence delivery, real cost, and the flow's contribution was forcing rigor + independent re-checks rather than finding bugs. This squares with the pre-build call: for code, verification is the real gate; flows add value by making it non-optional.</p>
+  </div>
+
+  <h2><span class="dot"></span>Top recommendations</h2>
+  <ol class="ranked">
+    <li><b>Contract-scope linter</b> (F3) — flag gate rules that reference the consumer's own deliverable; the single highest-value fix (it cost a whole cycle).</li>
+    <li><b>Shortcut must see output self-check rules</b> (F4) — or independence silently lapses.</li>
+    <li><b>Globally-unique / namespaced rule IDs</b> (F2) — wrong-label verdicts are a correctness bug.</li>
+    <li><b>Resolve flow short IDs in run_flow</b> (F1) — small, obvious papercut.</li>
+    <li><b>Cheaper validator tier + reuse</b> (F6) — make rigorous runs affordable at scale.</li>
+    <li><b>Revisit literal reuse of the validation ledger</b> (F9) — reduce the parallel-path maintenance cost.</li>
+  </ol>
+
+  <h2><span class="dot"></span>Appendix — what shipped</h2>
+<pre>DB:   tasks.review_enabled (bool), review_bar (jsonb, frozen), review_verdict (jsonb)
+MCP:  enable_task_review (dispenser + freeze)   review_task (protocol + server-side artifact)
+      submit_task_review (verdict + reopen/escalate)   complete_task nudge   get_task verdict block
+      helpers: isFlowTask / hasCheckableDeliverable / isReviewEligible
+WEB:  ReviewVerdictPanel.jsx (panel)   TaskItem.jsx (card badge)   wired into TaskDetailPanel
+RULE: task-level review applies ONLY to non-flow tasks (mutual exclusivity) — enforced everywhere
+PH-2: TDE-268/269 (KB-enriched bar + category) BLOCKED on TDE-254 — not built
+DEPLOY: MCP → Supabase (--no-verify-jwt) · frontend → Netlify (live)
+VALIDATION: every shipped step independently validated (6 validator runs, all PASS after F3 fix)</pre>
+
+  <footer>
+    Companion to <span class="mono">2026-06-15-flow-authoring-dogfood-report.html</span> and the spec at
+    <span class="mono">docs/superpowers/specs/2026-06-15-task-level-output-judge-design.md</span>.
+    All contracts remain AI-QA'd (not human-blessed via confirm_contract).
+  </footer>
+
+</div>
+</body>
+</html>

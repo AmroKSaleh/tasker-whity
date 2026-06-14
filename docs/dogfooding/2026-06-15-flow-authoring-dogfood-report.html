@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dogfooding Report — Flow Authoring (2026-06-15)</title>
+<style>
+  :root{
+    --paper:#faf9f7; --card:#ffffff; --ink:#1b1a18; --mute:#6b6760; --line:#e6e2db;
+    --accent:#d97757; --green:#3f9d6a; --amber:#c98a1e; --gray:#8a857c;
+    --green-bg:#eef7f1; --amber-bg:#fbf3e3; --gray-bg:#f1efeb; --accent-bg:#fbeee8;
+    --radius:14px;
+  }
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    line-height:1.62; font-size:17px; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:840px; margin:0 auto; padding:clamp(20px,5vw,56px) clamp(16px,5vw,40px) 80px;}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;}
+
+  header.top{border-bottom:3px solid var(--accent); padding-bottom:22px; margin-bottom:34px;}
+  h1{font-size:clamp(1.55rem,5.2vw,2.3rem); line-height:1.15; margin:0 0 14px; letter-spacing:-.02em;}
+  .meta{display:flex; flex-wrap:wrap; gap:6px 18px; font-size:.82rem; color:var(--mute);}
+  .meta b{color:var(--ink); font-weight:600;}
+
+  h2{font-size:clamp(1.15rem,3.6vw,1.45rem); margin:46px 0 8px; letter-spacing:-.01em; display:flex; align-items:center; gap:10px;}
+  h2 .dot{width:10px;height:10px;border-radius:50%;background:var(--accent);flex:0 0 auto;}
+  .lead{color:var(--mute); margin:0 0 18px; font-size:.98rem;}
+
+  .callout{
+    background:var(--accent-bg); border:1px solid #f0d8cd; border-left:4px solid var(--accent);
+    border-radius:10px; padding:16px 18px; margin:22px 0; font-size:.95rem;
+  }
+  .callout strong{color:var(--accent);}
+
+  .card{
+    background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    padding:18px 20px; margin:14px 0; box-shadow:0 1px 2px rgba(0,0,0,.03);
+    border-left-width:5px;
+  }
+  .card.pos{border-left-color:var(--green);}
+  .card.fri{border-left-color:var(--amber);}
+  .card.note{border-left-color:var(--gray);}
+  .card h3{margin:0 0 6px; font-size:1.02rem; line-height:1.35; display:flex; flex-wrap:wrap; gap:8px; align-items:baseline;}
+  .badge{
+    font-size:.64rem; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    padding:3px 8px; border-radius:999px; white-space:nowrap; flex:0 0 auto;
+  }
+  .badge.pos{background:var(--green-bg); color:var(--green);}
+  .badge.fri{background:var(--amber-bg); color:var(--amber);}
+  .badge.note{background:var(--gray-bg); color:var(--gray);}
+  .card p{margin:8px 0 0; font-size:.95rem;}
+  .kv{margin-top:10px;}
+  .kv .k{font-size:.68rem; font-weight:700; letter-spacing:.07em; text-transform:uppercase; color:var(--mute); display:block; margin-top:10px;}
+  .kv .v{font-size:.95rem;}
+
+  ol.ranked{counter-reset:r; list-style:none; padding:0; margin:18px 0;}
+  ol.ranked li{
+    position:relative; background:var(--card); border:1px solid var(--line); border-radius:12px;
+    padding:14px 16px 14px 56px; margin:10px 0; font-size:.95rem;
+  }
+  ol.ranked li::before{
+    counter-increment:r; content:counter(r);
+    position:absolute; left:14px; top:13px; width:28px; height:28px; border-radius:50%;
+    background:var(--accent); color:#fff; font-weight:700; font-size:.9rem;
+    display:flex; align-items:center; justify-content:center;
+  }
+  ol.ranked li b{color:var(--ink);}
+
+  pre{
+    background:#1f1d1b; color:#ece7df; border-radius:12px; padding:16px;
+    overflow-x:auto; font-size:.82rem; line-height:1.5; margin:16px 0;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+    -webkit-overflow-scrolling:touch;
+  }
+  code.inl{background:var(--gray-bg); padding:1px 6px; border-radius:6px; font-size:.86em; font-family:ui-monospace,Menlo,Consolas,monospace;}
+
+  .factbar{display:flex; flex-wrap:wrap; gap:10px; margin:18px 0;}
+  .fact{flex:1 1 130px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:12px 14px;}
+  .fact .n{font-size:1.5rem; font-weight:700; color:var(--accent); line-height:1;}
+  .fact .l{font-size:.74rem; color:var(--mute); margin-top:5px;}
+
+  footer{margin-top:50px; padding-top:18px; border-top:1px solid var(--line); font-size:.82rem; color:var(--mute);}
+  a{color:var(--accent);}
+  @media (max-width:600px){
+    body{font-size:16px;}
+    .card{padding:15px 16px;}
+    ol.ranked li{padding-left:52px;}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="top">
+    <h1>Dogfooding Report — Flow <em>Authoring</em> Experience</h1>
+    <div class="meta">
+      <span><b>Date</b> 2026-06-15</span>
+      <span><b>Flow</b> TDE-F1 (TDE-264–269)</span>
+      <span><b>Exercise</b> Author TDE-261's build-flow using Tasker Flows</span>
+      <span><b>Author</b> Claude (Opus 4.8), user-directed</span>
+    </div>
+  </header>
+
+  <div class="factbar">
+    <div class="fact"><div class="n">6</div><div class="l">tasks authored</div></div>
+    <div class="fact"><div class="n">12</div><div class="l">contracts (6 in / 6 out)</div></div>
+    <div class="fact"><div class="n">~27</div><div class="l">tool calls to author</div></div>
+    <div class="fact"><div class="n">8</div><div class="l">findings logged</div></div>
+  </div>
+
+  <div class="callout">
+    <strong>Scope — read first.</strong> This covers <b>flow authoring only</b>
+    (<span class="mono">build_new_flow → create_task → set_task_output/input → flow IS/KB → name_flow → get_flow_order</span>).
+    It does <b>not</b> cover <b>execution</b> (<span class="mono">run_flow</span>, the judge loop, regenerate/escalation) — the flow was authored but not yet run.
+    The most important questions (does the validation loop actually catch bad output? how do contracts behave under regeneration?) need a second report after execution.
+  </div>
+
+  <h2><span class="dot"></span>What worked well</h2>
+  <p class="lead">Keep these.</p>
+
+  <div class="card pos">
+    <h3><span class="badge pos">Positive · P1</span>Contract rule-quality linter is the standout</h3>
+    <p>On <span class="inl mono">set_task_output</span>/<span class="inl mono">set_task_input</span>, vague judgment language ("relevant", "readable") was flagged <em>at authoring time</em> with a concrete rewrite example. It caught two soft rules I'd have let slide. This is the single best part of the authoring UX — it enforces the discipline that makes contracts worth having.</p>
+  </div>
+  <div class="card pos">
+    <h3><span class="badge pos">Positive · P2</span>Output/input split + fan-in is clean</h3>
+    <p>Def-of-done (<span class="inl mono">set_task_output</span>) modeled separately from acceptance criteria (<span class="inl mono">set_task_input</span>, one call per source) made the fan-in on TDE-266 (consumes 264 <em>and</em> 265) straightforward. Upsert-per-source semantics are intuitive.</p>
+  </div>
+  <div class="card pos">
+    <h3><span class="badge pos">Positive · P3</span>Flow KB auto-loads on every task</h3>
+    <p>Unlike project KB (on-demand), flow KB rides along on every <span class="inl mono">get_task</span> in the flow — ideal for carrying the design to each build step. It's also a live preview of why the judge feature needs reliable KB reads (TDE-254).</p>
+  </div>
+  <div class="card pos">
+    <h3><span class="badge pos">Positive · P4</span><span class="mono">get_flow_order</span> is a good final artifact</h3>
+    <p>The numbered, dependency-aware view with the context bag inline is a clear "here's what you built" confirmation.</p>
+  </div>
+
+  <h2><span class="dot"></span>Frictions &amp; gaps</h2>
+  <p class="lead">Each: what happened → impact → recommendation.</p>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F1</span>No fast-path for arriving with a finished design</h3>
+    <p><span class="inl mono">build_new_flow</span> assumes a cold start and prescribes a grill-me interview. We had an approved spec, so the interview was redundant — and skipping it means the tool's own protocol wasn't actually followed.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">Redundant interaction, or a silently-skipped protocol.</span>
+      <span class="k">Recommendation</span><span class="v">A mode that accepts a structured flow spec and persists it directly, or detects an attached design doc and switches to "review &amp; persist".</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F2</span>Grounding dumps all project tasks</h3>
+    <p>The <span class="inl mono">project_context</span> payload included <b>all ~80 tasks</b> regardless of relevance.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">Noisy, token-expensive, scales badly.</span>
+      <span class="k">Recommendation</span><span class="v">Relevance-filter or cap the grounding (target section + goal-keyword match), or summarize by section with counts.</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F5</span>Step ordering interleaves phases</h3>
+    <p>Phase-2's TDE-268 landed at <b>step 4</b>, ahead of Phase-1's TDE-267 at <b>step 5</b>, because 268 sits shallower in the graph — but 268 is blocked on TDE-254. The recommended order sequences a <em>blocked</em> later task ahead of an <em>unblocked</em> earlier one.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">Misleading execution order; "phase" isn't expressible in the I/O graph alone.</span>
+      <span class="k">Recommendation</span><span class="v">A phase/group concept or soft-ordering tiebreaker; warn when a task with an unmet external blocker is ordered early.</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F6</span>Flow IS silently suppresses project IS</h3>
+    <p>Creating the first flow IS flips the flow into "flow IS governs" mode, which <b>replaces the project's non-universal IS</b> (Code Style, Deploy Rules) for these tasks. I had to restate those rules to avoid the build tasks losing them.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">A real footgun — critical operational rules silently vanish unless restated or universalized.</span>
+      <span class="k">Recommendation</span><span class="v">Warn which project IS entries will be suppressed and offer to copy them in; treat deploy/code-style as universal by default.</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F7</span>External / cross-flow dependencies aren't expressible</h3>
+    <p>TDE-268/269 genuinely depend on <b>TDE-254</b> (outside this flow). A real edge would pull 254 into this flow's connected component, so the dependency could only be <em>documented</em>, not <em>enforced</em>.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">A hard prerequisite goes unenforced; the graph under-models reality.</span>
+      <span class="k">Recommendation</span><span class="v">A "soft"/external dependency edge that blocks without merging components — cross-flow dependencies as a first-class concept.</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F8</span>Authoring is protocol-dispenser only; nothing verifies it</h3>
+    <p>Nothing checks that an interview happened, that every edge got a contract, or that contracts are non-trivial before <span class="inl mono">name_flow</span>.</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">Flow quality depends entirely on agent diligence.</span>
+      <span class="k">Recommendation</span><span class="v">A lightweight pre-<span class="mono">name_flow</span> check ("N edges have no contract; M rules are warning-flagged — proceed?").</span>
+    </div>
+  </div>
+
+  <div class="card fri">
+    <h3><span class="badge fri">Friction · F12</span>Authoring overhead — ~27 calls for a 6-task flow</h3>
+    <p>1 <span class="inl mono">build_new_flow</span> + 6 <span class="inl mono">create_task</span> + 7 <span class="inl mono">set_task_output</span> + 7 <span class="inl mono">set_task_input</span> + 1 <span class="inl mono">name_flow</span> + 3 IS + 1 KB + 1 <span class="inl mono">get_flow_order</span> ≈ <b>27 calls</b> (plus 2 re-sets to fix linter-flagged rules).</p>
+    <div class="kv">
+      <span class="k">Impact</span><span class="v">High authoring cost; scales linearly with flow size.</span>
+      <span class="k">Recommendation</span><span class="v">A batch/transactional <span class="mono">create_flow(spec)</span> that accepts the whole structure in one validated call.</span>
+    </div>
+  </div>
+
+  <h2><span class="dot"></span>Smaller notes</h2>
+  <div class="card note">
+    <h3><span class="badge note">Note · N1</span>confirm_contract not exercised</h3>
+    <p>All 12 contracts are "AI-QA'd" until human-blessed via <span class="inl mono">confirm_contract</span>. The flow was confirmed verbally, but no contract was blessed. Worth clarifying the UX difference between "flow confirmed" and "contracts blessed" (the latter is the moat per TDE-203).</p>
+  </div>
+  <div class="card note">
+    <h3><span class="badge note">Note · N2</span>Duplicate sections in grounding</h3>
+    <p>Two identically-named "Define docs structure… - Flow Tasks" sections appeared — pre-existing cruft from an earlier flow's task-filing. Suggests flow-task sectioning can create duplicates; worth a cleanup + guard.</p>
+  </div>
+  <div class="card note">
+    <h3><span class="badge note">Note · N3</span>Re-set ergonomics</h3>
+    <p>Fixing a linter-flagged rule meant re-sending the whole contract (<span class="inl mono">set_task_output</span> replaces). A per-rule patch would be lighter.</p>
+  </div>
+
+  <h2><span class="dot"></span>Top recommendations</h2>
+  <p class="lead">Ranked for the Flows-optimization discussion.</p>
+  <ol class="ranked">
+    <li><b>Batch <span class="mono">create_flow(spec)</span></b> (F1, F12) — biggest authoring-cost win; also gives a "persist a pre-designed flow" path.</li>
+    <li><b>Warn on flow-IS suppression</b> (F6) — prevents silent loss of deploy/code-style rules; low effort, high safety.</li>
+    <li><b>External / soft dependencies</b> (F7) — needed for any flow with real out-of-flow prerequisites; also unblocks honest phase-ordering.</li>
+    <li><b>Relevance-scoped grounding</b> (F2) — cost + scale.</li>
+    <li><b>Phase/group-aware ordering</b> (F5) — correctness of the recommended order.</li>
+    <li><b>Keep &amp; extend the contract linter</b> (P1) — consider auto-suggesting the rewrite.</li>
+  </ol>
+
+  <h2><span class="dot"></span>Appendix — the flow as built</h2>
+<pre>TDE-F1  "TDE-261 Task-Level Output Judge — Build"
+
+Step 1 · TDE-264  Schema + enable flag, eligibility &amp; flow-exclusivity guards   [high]
+Step 2 · TDE-265  Bar assembly from task text + IS (Phase 1)                     [high]   ← 264
+Step 3 · TDE-266  Trigger + single-task judging protocol (reuse flow loop)       [high]   ← 264, 265 (fan-in)
+Step 4 · TDE-268  KB-enriched bar via title-scan (Phase 2, needs TDE-254)        [low]    ← 265
+Step 5 · TDE-267  Verdict visibility (get_task + web app)                        [medium] ← 266
+Step 6 · TDE-269  KB category soft-hint for retrieval (Phase 2)                  [low]    ← 268
+
+12 contracts (6 def-of-done + 6 acceptance), all AI-QA'd (none human-blessed yet).
+3 flow IS entries · 1 flow KB entry.
+Phase 1 = 264 → 265 → 266 → 267.   Phase 2 = 265 → 268 → 269 (blocked on TDE-254).</pre>
+
+  <footer>
+    Companion to the Markdown source at <span class="mono">docs/dogfooding/2026-06-15-flow-authoring-dogfood-report.md</span>.
+    Covers authoring only — an execution report should follow once TDE-F1 is run.
+  </footer>
+
+</div>
+</body>
+</html>
