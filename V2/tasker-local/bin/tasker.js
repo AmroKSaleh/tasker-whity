@@ -2,18 +2,22 @@
 /**
  * npx tasker
  *
- * 1. Walks up from CWD to find a .tasker/project.json
+ * 1. Walks up from CWD to find a task source:
+ *      a) .tasker/project.json        (Tasker's own rich format — editable)
+ *      b) specs/**\/tasks.md, tasks.md (Spec Kit / markdown checklist — read-only mirror)
  * 2. Starts the local server (API + SSE + React board)
  * 3. Opens the browser
  */
 
 import { start }       from '../src/server.js'
+import { makeTaskerSource, makeSpecKitSource } from '../src/sources.js'
+import { findSpecKitUpwards } from '../src/specKit.js'
 import { existsSync }  from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { exec }        from 'child_process'
 
-// ── Find .tasker/ ─────────────────────────────────────────────────────────────
+// ── Find a source ─────────────────────────────────────────────────────────────
 
 function findTaskerDir(from) {
   let dir = from
@@ -27,9 +31,20 @@ function findTaskerDir(from) {
 }
 
 const taskerDir = findTaskerDir(process.cwd())
-if (!taskerDir) {
-  console.error('\n  ✦ Tasker: no .tasker/ found in this directory or any parent.\n')
-  console.error('  Run  npx tasker init  to initialize a new project here.\n')
+let source = null
+
+if (taskerDir) {
+  source = makeTaskerSource(taskerDir)
+} else {
+  // No .tasker/ — meet the repo where it is: detect an existing task format.
+  const specFile = await findSpecKitUpwards(process.cwd())
+  if (specFile) source = makeSpecKitSource(specFile)
+}
+
+if (!source) {
+  console.error('\n  ✦ Tasker: no recognized task source found here or in any parent.\n')
+  console.error('  Looked for:  .tasker/project.json,  specs/**/tasks.md,  tasks.md\n')
+  console.error('  Run  npx tasker init  to initialize a new .tasker/ project here.\n')
   process.exit(1)
 }
 
@@ -56,11 +71,13 @@ if (!distDir) {
 const PORT = parseInt(process.env.TASKER_PORT ?? '2821', 10)
 
 console.log(`\n  ✦ Tasker`)
-console.log(`  Project: ${taskerDir}`)
+console.log(`  Source:  ${source.label}`)
+console.log(`  Path:    ${source.watchDir}`)
+if (source.readOnly) console.log(`  Mode:    read-only (import)`)
 if (distDir) console.log(`  Board:   ${distDir}`)
 console.log(`  Port:    ${PORT}`)
 
-const { port } = await start({ taskerDir, distDir, port: PORT })
+const { port } = await start({ source, distDir, port: PORT })
 const url = `http://localhost:${port}`
 console.log(`\n  → ${url}\n`)
 

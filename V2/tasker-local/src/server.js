@@ -1,22 +1,27 @@
 /**
  * Local Tasker server.
  *
- *   GET /api/project         → parsed board data (project, sections, groups, tasks)
- *   GET /api/events          → SSE stream — fires whenever .tasker/ files change
- *   GET *                    → serves the built React app (dist/) with
- *                              window.__TASKER_LOCAL__ injected into index.html
+ *   GET   /api/project       → parsed board data (project, sections, groups, tasks)
+ *   PATCH /api/tasks/:id      → write back task fields (editable sources only)
+ *   GET   /api/events         → SSE stream — fires whenever the source changes
+ *   GET   *                   → serves the built React app (dist/) with
+ *                               window.__TASKER_LOCAL__ injected into index.html
  *
  * Usage:
  *   import { start } from './server.js'
- *   const { port } = await start({ taskerDir: '/path/to/repo/.tasker', distDir, port })
+ *   const { port } = await start({ source, distDir, port })       // preferred
+ *   const { port } = await start({ taskerDir, distDir, port })    // back-compat
+ *
+ * A "source" abstracts where the data comes from (.tasker/ dir, Spec Kit
+ * tasks.md, …). See sources.js. A bare taskerDir is wrapped into a .tasker
+ * source for backward compatibility.
  */
 
-import express        from 'express'
+import express          from 'express'
 import { createServer } from 'http'
 import { readFileSync, watch } from 'fs'
-import { join }       from 'path'
-import { parseTaskerDir } from './parser.js'
-import { writeTaskFields }  from './writer.js'
+import { join }         from 'path'
+import { makeTaskerSource } from './sources.js'
 
 const INJECT = '<script>window.__TASKER_LOCAL__=true;</script>'
 
@@ -44,9 +49,12 @@ function serveInjected(distDir, res) {
 
 // ── Main export ───────────────────────────────────────────────────────────────
 
-export async function start({ taskerDir, distDir = null, port = 2821 }) {
+export async function start({ source, taskerDir, distDir = null, port = 2821 }) {
+  // Back-compat: a bare taskerDir → a .tasker source.
+  if (!source) source = makeTaskerSource(taskerDir)
+
   // Initial parse
-  let cached = await parseTaskerDir(taskerDir)
+  let cached = await source.load()
 
   const app     = express()
   const clients = new Set()   // SSE response objects
@@ -58,13 +66,13 @@ export async function start({ taskerDir, distDir = null, port = 2821 }) {
     }
   }
 
-  // Re-parse on any .tasker/ change and broadcast
+  // Re-parse on any change in the watched dir and broadcast
   let debounce = null
-  watch(taskerDir, { recursive: true }, () => {
+  watch(source.watchDir, { recursive: true }, () => {
     clearTimeout(debounce)
     debounce = setTimeout(async () => {
       try {
-        cached = await parseTaskerDir(taskerDir)
+        cached = await source.load()
         broadcast(cached)
       } catch (err) {
         console.error('[tasker] parse error:', err.message)
@@ -83,8 +91,16 @@ export async function start({ taskerDir, distDir = null, port = 2821 }) {
   app.patch('/api/tasks/:taskId', async (req, res) => {
     const { taskId } = req.params
     const updates = req.body ?? {}
+
+    if (source.readOnly || !source.write) {
+      return res.status(405).json({
+        error: `This project is read-only (source: ${source.label}). ` +
+               `Run "npx tasker init" to create an editable .tasker/ project.`,
+      })
+    }
+
     try {
-      await writeTaskFields(taskerDir, taskId, updates)
+      await source.write(taskId, updates)
       // The fs.watch handler will re-parse and broadcast via SSE automatically
       res.status(204).end()
     } catch (err) {

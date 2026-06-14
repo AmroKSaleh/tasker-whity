@@ -12,7 +12,7 @@
     "tasker": "bin/tasker.js"
   },
   "scripts": {
-    "test": "node src/parser.test.js",
+    "test": "node src/parser.test.js && node src/specKit.test.js",
     "start": "node bin/tasker.js"
   },
   "dependencies": {
