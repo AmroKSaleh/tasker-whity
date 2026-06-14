@@ -7,6 +7,7 @@ import { CSS } from '@dnd-kit/utilities'
 import { useTaskStore } from '../../store/useTaskStore'
 import { updateTaskFields } from '../../hooks/useTasks'
 import FlowBlockedDialog from './DependencyWarningDialog'
+import ReviewVerdictPanel from './ReviewVerdictPanel'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
 import { chatAboutTask, generateFocusSteps, synthesizeTaskToContext } from '../../lib/gemini'
 
@@ -396,6 +397,12 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
               className="w-full min-h-[80px] rounded-md border border-line-2 bg-surf-2 p-3 font-sans text-[13px] leading-[1.55] text-ink-2 resize-y focus:outline-none focus:border-accent focus:bg-paper"
             />
           </Field>
+
+          {task.review_verdict && (
+            <Field label="Review verdict">
+              <ReviewVerdictPanel verdict={task.review_verdict} bar={task.review_bar} />
+            </Field>
+          )}
 
           {/* ── Milestones ── */}
           <Field label={milestoneTotal > 0 ? `Milestones · ${milestonePct}%` : 'Milestones'}>

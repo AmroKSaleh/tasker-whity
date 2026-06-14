@@ -167,6 +167,18 @@ export default function TaskItem({
                     {prefix}-{task.short_id}
                   </span>
                 )}
+                {task.review_verdict && (
+                  <span
+                    className="font-mono text-[9px] rounded px-1 py-px shrink-0 border"
+                    title={`Task-level review ${(task.review_verdict.overall || '').toUpperCase()}`}
+                    style={{
+                      color: task.review_verdict.overall === 'pass' ? '#16a34a' : '#dc2626',
+                      borderColor: task.review_verdict.overall === 'pass' ? '#86efac' : '#fca5a5',
+                    }}
+                  >
+                    {task.review_verdict.overall === 'pass' ? '✓ review' : '✗ review'}
+                  </span>
+                )}
                 {task.priority && <Chip priority={task.priority} />}
                 {task.due_date && !isDone && (
                   <span

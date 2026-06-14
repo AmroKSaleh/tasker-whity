@@ -242,7 +242,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
     const project = await resolveProject(sb, userId, prefix)
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, input, output, status, short_id, flow_id, flow_step')
+        .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, review_enabled, review_bar, review_verdict')
         .eq('project_id', project.id).eq('short_id', shortId).eq('user_id', userId)
         .maybeSingle()
       if (task) return task
@@ -250,7 +250,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
   }
   // Fall back to UUID
   const { data } = await sb.from('tasks')
-    .select('id, text, input, output, status, short_id, flow_id, flow_step').eq('id', taskRef).eq('user_id', userId).maybeSingle()
+    .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, review_enabled, review_bar, review_verdict').eq('id', taskRef).eq('user_id', userId).maybeSingle()
   return data ?? null
 }
 
@@ -290,6 +290,25 @@ function inputSourceIds(input: any): string[] {
 function outputContract(output: any): { rules: any[], confirmed: boolean } {
   if (output?.contract?.rules) return { ...output.contract, confirmed: output.contract.confirmed === true }
   return { rules: [], confirmed: false }
+}
+
+// ── TDE-261 task-level output judge: eligibility & flow-exclusivity ──────────
+// HARD RULE: task-level review applies ONLY to non-flow tasks (flow tasks are
+// governed by their flow gates — mutual exclusivity). A reviewable task must
+// also have a checkable deliverable; discussion/decision/milestone-only tasks
+// have nothing to judge.
+function isFlowTask(task: any): boolean {
+  return !!task?.flow_id
+}
+function hasCheckableDeliverable(task: any): boolean {
+  if (outputContract(task?.output).rules.length > 0) return true
+  if (Array.isArray(task?.review_bar?.rules) && task.review_bar.rules.length > 0) return true
+  if (task?.output?.artifact) return true
+  return false
+}
+function isReviewEligible(task: any): boolean {
+  if (isFlowTask(task)) return false        // flow-exclusivity guard
+  return hasCheckableDeliverable(task)
 }
 
 // Normalize a single authored rule into the canonical shape (defaults + a stable id).
@@ -1171,6 +1190,54 @@ const TOOLS = [
     },
   },
   {
+    name: 'enable_task_review',
+    description: 'Enable the task-level output judge (TDE-261) on a STANDALONE task. Two modes: (1) call WITHOUT `bar` to get grounding (the task\'s text + the governing IS) and the instruction to author a checkable acceptance bar from text+IS only (Phase 1 — no KB); (2) call WITH `bar: { rules: [...] }` to FREEZE that bar as the task\'s review snapshot and turn review on. Refuses flow tasks (mutual exclusivity — flow gates govern those). Refuses to overwrite an existing frozen bar unless force:true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID — the task to enable review on (must NOT be in a flow).' },
+        bar:     { ...CONTRACT_SCHEMA, description: 'The authored bar to freeze: { rules: [ { label, kind: check|judgment, rule, severity } ] }. Omit to get grounding + authoring instructions instead.' },
+        force:   { type: 'boolean', description: 'Re-derive/overwrite an existing frozen bar. Default false (frozen snapshots are not mutated).' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'review_task',
+    description: 'Run the task-level output judge (TDE-261) on a review-enabled STANDALONE task. Returns the single-task judging protocol with the frozen bar and the stored artifact (read SERVER-SIDE, not from your claims — independence). Mirrors the flow loop store_artifact → validate_output → submit_validation_result: you run check rules inline and spawn a fresh independent subagent for judgment rules, then call submit_task_review with the per-rule results. Refuses flow tasks (mutual exclusivity).',
+    inputSchema: {
+      type: 'object',
+      properties: { task_id: { type: 'string', description: 'The review-enabled task to judge.' } },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'submit_task_review',
+    description: 'Record the task-level judge verdict (TDE-261). Computes overall pass/fail from per-rule results against the frozen bar, writes review_verdict, and applies the gate: a blocker failure REOPENS the task (status→in_progress) with the critique; after 3 failed attempts it escalates to the human (action=ask_human). On pass the task stays done. Returns the action: pass | regenerate | ask_human.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id:   { type: 'string', description: 'The reviewed task (same as review_task).' },
+        validator: { type: 'string', description: 'Who graded — use "independent-subagent" when judgment rules were graded by a fresh subagent.' },
+        results: {
+          type: 'array',
+          description: 'Per-rule results.',
+          items: {
+            type: 'object',
+            properties: {
+              rule_id:        { type: 'string', description: 'id of the bar rule' },
+              status:         { type: 'string', enum: ['pass', 'fail'] },
+              observed_value: { type: 'string', description: 'Required for check rules — the raw datum.' },
+              note:           { type: 'string', description: 'Required for any fail — the specific deficiency.' },
+            },
+            required: ['rule_id', 'status'],
+          },
+        },
+      },
+      required: ['task_id', 'results'],
+    },
+  },
+  {
     name: 'remove_task_input',
     description: 'Remove an input edge (dependency) from a task. Pass source_task_id to drop just that edge, or omit it to remove ALL input edges. The source task is untouched. Use to dismantle I/O dependencies (the delete counterpart of set_task_input).',
     inputSchema: {
@@ -1799,7 +1866,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
 
       await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString() }).eq('id', task.id)
-      return `✓ Marked "${task.text}" as done.`
+      // TDE-261 trigger: a review-enabled non-flow task gets judged on completion.
+      let reviewNudge = ''
+      if (task.review_enabled && !isFlowTask(task) && task.review_bar?.rules?.length) {
+        reviewNudge = `\n\n⟳ Task-level review is ON for this task. Run review_task("${args.task_id}") to judge the output against the frozen bar (${task.review_bar.rules.length} rule(s)). store_artifact first if you have not.`
+      }
+      return `✓ Marked "${task.text}" as done.` + reviewNudge
     }
 
     case 'uncomplete_task': {
@@ -1891,6 +1963,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           const label = typeof s === 'string' ? s : s.summary
           lines.push(`  ${checked[i] ? '✓' : '○'} ${label}`)
         })
+      }
+
+      // TDE-261/267: surface the task-level review verdict (per-rule + critique) when present.
+      if (full.review_verdict) {
+        const v: any = full.review_verdict
+        lines.push(`\nReview verdict: ${String(v.overall || '').toUpperCase()}${v.escalated ? ' (escalated to human)' : ''}${v.attempt ? ` · attempt ${v.attempt}/3` : ''}`)
+        for (const r of (v.results || [])) {
+          const barRule = (full.review_bar?.rules || []).find((x: any) => x.id === r.rule_id)
+          const label = barRule?.label || r.rule_id
+          const extra = r.observed_value ? ` — ${r.observed_value}` : (r.status === 'fail' && r.note ? ` — ${r.note}` : '')
+          lines.push(`  ${r.status === 'pass' ? '✓' : '✗'} ${label}${extra}`)
+        }
+        if (v.critique) lines.push(`  Critique:\n${String(v.critique).split('\n').map((l: string) => '    ' + l).join('\n')}`)
       }
 
       // Inject the governing Instruction Set (TDE-233 flow-level IS).
@@ -3527,6 +3612,104 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is AI-QA'd (QA is performed by AI, not a meat sack) until a human confirms it via confirm_contract. Consumers are derived from tasks that list this as a source.`
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
+    }
+
+    case 'enable_task_review': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      // HARD RULE (TDE-261): task-level review applies ONLY to non-flow tasks.
+      if (isFlowTask(task)) return `"${task.text}" is part of a flow — task-level review does not apply (the flow's gates govern its quality). Mutual exclusivity (TDE-261).`
+
+      const existing = task.review_bar
+      // Mode 2: a bar was supplied → freeze it as the review snapshot.
+      if (args.bar?.rules) {
+        if (existing?.rules?.length && !args.force) {
+          return `"${task.text}" already has a frozen review bar (${existing.rules.length} rule(s), frozen ${existing.frozen_at}). Pass force:true to re-derive and overwrite.`
+        }
+        const rules = (args.bar.rules || []).map(normalizeRule)
+        if (!rules.length) return `The bar must contain at least one rule.`
+        const review_bar = { rules, frozen_at: new Date().toISOString(), source: 'task_text+IS' }
+        const { error } = await sb.from('tasks').update({ review_bar, review_enabled: true }).eq('id', task.id)
+        if (error) throw new Error(error.message)
+        const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
+        return `Review enabled on "${task.text}" — bar frozen with ${rules.length} rule(s).`
+          + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}` : '')
+      }
+
+      // Mode 1: no bar → dispenser. Return grounding (task text + IS) for the agent to author the bar.
+      if (existing?.rules?.length && !args.force) {
+        return `Review already enabled on "${task.text}" — frozen bar has ${existing.rules.length} rule(s) (frozen ${existing.frozen_at}). Pass force:true to re-derive.`
+      }
+      const { data: projIs } = await sb.from('project_instructions')
+        .select('title, content, universal').eq('project_id', task.project_id).order('created_at')
+      const isBlock = (projIs || []).map((e: any) => `## ${e.title}${e.universal ? ' (universal)' : ''}\n${e.content}`).join('\n\n')
+      return [
+        `BAR ASSEMBLY (Phase 1) for "${task.text}".`,
+        `Author the review bar from TASK TEXT + IS ONLY — no KB in Phase 1.`,
+        ``,
+        `── TASK INTENT ──`,
+        `# ${task.text}`,
+        task.detail || '(no additional context)',
+        ``,
+        `── GOVERNING INSTRUCTION SET (standards to enforce) ──`,
+        isBlock || '(no project IS)',
+        ``,
+        `── INSTRUCTION ──`,
+        `Derive a small set (aim 3–5) of CHECKABLE acceptance rules the output must satisfy, grounded ONLY in the intent + IS above. Each rule: { label, kind: "check"|"judgment", rule, severity: "blocker"|"warning" }. Prefer kind=check with concrete params; for judgment use an objective, verifiable criterion. Then call enable_task_review again with bar: { rules: [...] } to FREEZE the snapshot. Do NOT add KB-derived rules (that is Phase 2 / TDE-268).`,
+      ].join('\n')
+    }
+
+    case 'review_task': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      if (isFlowTask(task)) return `"${task.text}" is in a flow — use the flow gate (run_flow), not task-level review. Mutual exclusivity (TDE-261).`
+      if (!task.review_enabled || !task.review_bar?.rules?.length) return `Review is not enabled on "${task.text}". Call enable_task_review first to assemble + freeze a bar.`
+      const artifact = task.output?.artifact
+      if (!artifact) return `No artifact stored for "${task.text}". Call store_artifact("${args.task_id}", <verbatim output>) first — the judge grades the stored artifact server-side, not your claims.`
+      const rules = task.review_bar.rules
+      const checks = rules.filter((r: any) => r.kind === 'check')
+      const judgments = rules.filter((r: any) => r.kind === 'judgment')
+      const attempt = task.review_verdict?.attempt ?? 0
+      return [
+        `TASK-LEVEL JUDGE — "${task.text}"  (attempt ${attempt + 1} of 3)`,
+        `Grade the STORED ARTIFACT below against the frozen bar. The artifact comes from the server (independence — not your claims).`,
+        ``,
+        `── FROZEN BAR (${rules.length} rule(s)) ──`,
+        ...rules.map((r: any) => `[${r.id}] (${r.kind}, ${r.severity}) ${r.label}: ${r.rule}`),
+        ``,
+        `── STORED ARTIFACT (${task.output?.artifact_format || 'text'}) ──`,
+        String(artifact),
+        ``,
+        `── PROTOCOL (mirrors store_artifact → validate_output → submit_validation_result) ──`,
+        `1. CHECK rules (${checks.length}): run each for real; record observed_value.`,
+        `2. JUDGMENT rules (${judgments.length}): spawn a FRESH independent subagent (Agent tool, FAIL prior) with the artifact + each judgment rule. Do NOT grade judgment rules yourself.`,
+        `3. Call submit_task_review("${args.task_id}", results, validator:"independent-subagent") — one result per rule (rule_id, status, observed_value for checks, note for fails).`,
+        `On a blocker fail submit_task_review reopens this task with the critique; after 3 attempts it escalates to the human.`,
+      ].join('\n')
+    }
+
+    case 'submit_task_review': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const bar = task.review_bar?.rules || []
+      if (!bar.length) return `"${task.text}" has no frozen review bar. Call enable_task_review first.`
+      const byId = new Map(bar.map((r: any) => [r.id, r]))
+      const results = args.results || []
+      const fails = results.filter((x: any) => x.status === 'fail')
+      const blockerFail = fails.some((x: any) => { const r: any = byId.get(x.rule_id); return !r || r.severity !== 'warning' })
+      const prior = task.review_verdict?.attempt ?? 0
+      const overall = blockerFail ? 'fail' : 'pass'
+      const attempt = overall === 'fail' ? prior + 1 : prior
+      const critique = fails.map((x: any) => { const r: any = byId.get(x.rule_id); return `• ${(r?.label) || x.rule_id}: ${x.note || 'failed'}` }).join('\n')
+      const escalate = overall === 'fail' && attempt >= 3
+      const review_verdict = { overall, results, critique, validated_at: new Date().toISOString(), attempt, escalated: escalate, validator: args.validator || 'self' }
+      const update: any = { review_verdict }
+      if (overall === 'fail') update.status = 'in_progress'   // reopen the producer
+      const { error } = await sb.from('tasks').update(update).eq('id', task.id)
+      if (error) throw new Error(error.message)
+      if (overall === 'pass') return `✓ REVIEW PASSED — "${task.text}". ${results.length} rule(s) graded, all blockers satisfied. (action=pass)`
+      if (escalate) return `⛔ REVIEW FAILED (attempt ${attempt}/3) — retry limit reached. ESCALATE TO HUMAN (action=ask_human).\nCritique:\n${critique}`
+      return `↩ REVIEW FAILED (attempt ${attempt}/3) — task reopened (action=regenerate). Apply this critique and re-run:\n${critique}`
     }
 
     case 'remove_task_input': {
