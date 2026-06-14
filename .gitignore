@@ -35,3 +35,7 @@ Thumbs.db
 *.swp
 .idea/
 .vscode/
+
+# ── Supabase CLI local state (machine-specific; not source) ──
+V2/supabase/.temp/
+V2/supabase/supabase/
