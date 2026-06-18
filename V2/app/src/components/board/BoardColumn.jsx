@@ -135,13 +135,6 @@ export default function BoardColumn({
                   progress={milestoneProgress[t.id] ?? 0}
                 />
               ))}
-              {filteredUngrouped.length > 0 && (
-                <AddTaskInline
-                  sectionId={section.id}
-                  groupId={null}
-                  onAdd={onAddTask}
-                />
-              )}
 
               {filteredGroups.map(group => (
                 <Swimlane key={group.id} group={group}>

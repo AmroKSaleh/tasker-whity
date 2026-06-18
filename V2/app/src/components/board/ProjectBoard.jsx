@@ -202,7 +202,6 @@ function SectionColumn({ section, filter, prefix, onAddTask, onAddDetailed, onAd
               onOpen={onOpen} onToggle={onToggle} onToggleIP={onToggleIP} onFocus={onFocus} onPin={onPin} onDelete={onDelete} />
           ))}
         </DroppableList>
-        <AddTaskInline sectionId={section.id} groupId={null} onAdd={onAddTask} onAddDetailed={onAddDetailed} />
 
         {groups.map(g => (
           <div key={g.id} className="mt-2">
@@ -221,6 +220,9 @@ function SectionColumn({ section, filter, prefix, onAddTask, onAddDetailed, onAd
             </div>
           </div>
         ))}
+      </div>
+      <div className="border-t border-line-2 px-2.5 py-1.5 shrink-0">
+        <AddTaskInline sectionId={section.id} groupId={null} onAdd={onAddTask} onAddDetailed={onAddDetailed} />
       </div>
     </div>
   )
@@ -640,6 +642,8 @@ export default function ProjectBoard({ project }) {
                                 onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning} onFocus={openFocusForTask} onPin={pinTask} onDelete={handleDeleteTask} />
                             ))}
                           </DroppableList>
+                        </div>
+                      <div className="border-t border-line-2 px-2.5 py-1.5 shrink-0">
                           <AddTaskInline sectionId={focusedSectionId} groupId={null} onAdd={createTask} onAddDetailed={createAndOpen} />
                         </div>
                       </div>
@@ -659,6 +663,8 @@ export default function ProjectBoard({ project }) {
                                   onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning} onFocus={openFocusForTask} onPin={pinTask} onDelete={handleDeleteTask} />
                               ))}
                             </DroppableList>
+                          </div>
+                          <div className="border-t border-line-2 px-2.5 py-1.5 shrink-0">
                             <AddTaskInline label={`Add to ${group.name.toLowerCase()}`} sectionId={focusedSectionId} groupId={group.id} onAdd={createTask} onAddDetailed={createAndOpen} />
                           </div>
                         </div>

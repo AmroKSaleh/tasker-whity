@@ -45,12 +45,22 @@ export const PROVIDERS = {
     keyHint: 'console.groq.com/keys',
     hasBuiltinKey: false,
   },
+  custom: {
+    label: 'Custom',
+    baseUrl: '',
+    models: [],
+    defaultModel: '',
+    keyPlaceholder: 'sk-… (optional)',
+    keyHint: 'your provider dashboard',
+    hasBuiltinKey: false,
+    customEndpoint: true,
+  },
 }
 
 import { supabase } from './supabase'
 
 const STORAGE_KEY = 'tasker_ai_settings'
-const DEFAULTS = { provider: 'gemini', apiKey: '', model: 'gemini-2.5-flash', apiKeys: {} }
+const DEFAULTS = { provider: 'gemini', apiKey: '', model: 'gemini-2.5-flash', apiKeys: {}, customBaseUrl: '' }
 
 export function getAISettings() {
   try {

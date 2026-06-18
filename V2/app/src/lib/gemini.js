@@ -3,13 +3,14 @@ import { getAISettings, PROVIDERS } from './aiSettings'
 const BUILTIN_KEY = import.meta.env.VITE_GEMINI_API_KEY
 
 function getCallConfig() {
-  const { provider, apiKey, model } = getAISettings()
+  const { provider, apiKey, model, customBaseUrl } = getAISettings()
   const p = PROVIDERS[provider] ?? PROVIDERS.gemini
   const customKey = apiKey?.trim()
   const key = customKey || (provider === 'gemini' ? BUILTIN_KEY : '')
   const fallbackKey = (customKey && provider === 'gemini' && customKey !== BUILTIN_KEY)
     ? BUILTIN_KEY : null
-  return { baseUrl: p.baseUrl, key, model: model || p.defaultModel, fallbackKey, format: p.format ?? 'openai' }
+  const baseUrl = p.customEndpoint ? (customBaseUrl?.trim() || '') : p.baseUrl
+  return { baseUrl, key, model: model || p.defaultModel, fallbackKey, format: p.format ?? 'openai' }
 }
 
 async function post(baseUrl, key, body, format = 'openai') {
@@ -102,12 +103,14 @@ async function callGeminiChat(messages, systemPrompt = null, json = false) {
   }
 }
 
-export async function testAIConnection({ provider, apiKey, model }) {
+export async function testAIConnection({ provider, apiKey, model, customBaseUrl }) {
   const p = PROVIDERS[provider] ?? PROVIDERS.gemini
+  const baseUrl = p.customEndpoint ? (customBaseUrl?.trim() || '') : p.baseUrl
+  if (p.customEndpoint && !baseUrl) throw new Error('Enter a custom endpoint URL first.')
   const key = apiKey?.trim() || (provider === 'gemini' ? BUILTIN_KEY : '')
-  if (!key) throw new Error('No API key — enter one above or switch to Gemini.')
-  await post(p.baseUrl, key, {
-    model: model || p.defaultModel,
+  if (!key && !p.customEndpoint) throw new Error('No API key — enter one above or switch to Gemini.')
+  await post(baseUrl, key, {
+    model: model || p.defaultModel || 'gpt-4o',
     messages: [{ role: 'user', content: 'Reply with just the word: ok' }],
     max_tokens: 5,
     temperature: 0,

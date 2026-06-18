@@ -26,6 +26,7 @@ const PLATFORMS = [
   { id: 'claude-ai',       label: 'Claude.ai' },
   { id: 'chatgpt',         label: 'ChatGPT' },
   { id: 'github-copilot',  label: 'Copilot' },
+  { id: 'codex',           label: 'Codex' },
   { id: 'zed',             label: 'Zed',    soon: true },
   { id: 'gemini',          label: 'Gemini', soon: true },
 ]
@@ -474,6 +475,32 @@ function CopilotTab({ apiKey, onSwitchToKey }) {
   )
 }
 
+function CodexTab({ apiKey, onSwitchToKey }) {
+  const key = apiKey || 'YOUR_API_KEY'
+  return (
+    <div>
+      <p className="text-[12px] text-mute-2 mb-3 leading-relaxed">
+        Use Tasker tools in OpenAI Codex CLI via MCP.
+      </p>
+      <PlatformLink href="https://github.com/openai/codex" label="github.com/openai/codex" />
+      <KeyBanner apiKey={apiKey} onSwitchToKey={onSwitchToKey} />
+
+      <p className="font-mono text-[9px] font-bold uppercase tracking-widest text-mute-2 mb-2">Setup</p>
+      <Step n="1">Set your Tasker key as an environment variable:</Step>
+      <CodeSnip>{`TASKER_API_KEY=${key}`}</CodeSnip>
+      <Hint>Add this to your shell profile (.bashrc, .zshrc, or Windows Environment Variables) so it persists across sessions.</Hint>
+
+      <Step n="2">Add Tasker to Codex via the CLI:</Step>
+      <CodeSnip>{`codex mcp add tasker --url ${MCP_URL}`}</CodeSnip>
+      <p className="text-[11px] text-mute-2 mb-3 -mt-1 leading-relaxed">Or add it manually to <span className="font-mono">~/.codex/config.toml</span>:</p>
+      <CodeSnip>{`[mcp_servers.tasker]\nurl = "${MCP_URL}"\nbearer_token_env_var = "TASKER_API_KEY"`}</CodeSnip>
+
+      <Step n="3">Restart Codex or open a new thread so the server loads.</Step>
+      <Step n="4">Type <span className="font-mono text-[11px]">/mcp</span> to confirm Tasker appears in active servers.</Step>
+    </div>
+  )
+}
+
 function ComingSoon({ label }) {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
@@ -530,6 +557,12 @@ export default function SettingsPage() {
     setSaved(false)
   }
 
+  function handleCustomUrlChange(e) {
+    setSettings(s => ({ ...s, customBaseUrl: e.target.value }))
+    setTestStatus(null)
+    setSaved(false)
+  }
+
   async function handleSave() {
     await saveAISettings(settings)
     setSaved(true)
@@ -539,7 +572,7 @@ export default function SettingsPage() {
   async function handleTest() {
     setTestStatus('testing')
     try {
-      await testAIConnection(settings)
+      await testAIConnection({ ...settings, customBaseUrl: settings.customBaseUrl })
       setTestStatus('ok')
     } catch (err) {
       setTestStatus({ error: err.message })
@@ -582,7 +615,7 @@ export default function SettingsPage() {
     }
   }
 
-  const canSave = settings.provider === 'gemini' || !!settings.apiKey?.trim()
+  const canSave = settings.provider === 'gemini' || provider.customEndpoint || !!settings.apiKey?.trim()
 
   const tabProps = { apiKey: taskerKey, onSwitchToKey: setActiveTab }
   const TAB_CONTENT = {
@@ -593,6 +626,7 @@ export default function SettingsPage() {
     'claude-ai':      <ClaudeAiTab {...tabProps} />,
     'chatgpt':        <ChatGPTTab {...tabProps} />,
     'github-copilot': <CopilotTab {...tabProps} />,
+    'codex':          <CodexTab {...tabProps} />,
     'zed':            <ComingSoon label="Zed" />,
     'gemini':         <ComingSoon label="Gemini" />,
   }
@@ -663,21 +697,50 @@ export default function SettingsPage() {
               </div>
             </section>
 
+            {/* Endpoint URL (custom provider only) */}
+            {provider.customEndpoint && (
+              <section className="mb-7">
+                <label className="block font-mono text-[9px] font-bold tracking-widest text-mute-2 uppercase mb-2">
+                  Endpoint URL
+                </label>
+                <input
+                  type="text"
+                  value={settings.customBaseUrl || ''}
+                  onChange={handleCustomUrlChange}
+                  placeholder="http://localhost:11434/v1"
+                  className="w-full bg-surf-2 border border-line rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none focus:border-ink transition-colors placeholder:text-mute-2 font-mono"
+                />
+                <p className="text-[11px] text-mute-2 mt-1.5 leading-relaxed">
+                  Any OpenAI-compatible base URL — Ollama, LM Studio, Azure OpenAI, OpenRouter, etc.
+                </p>
+              </section>
+            )}
+
             {/* Model */}
             <section className="mb-7">
               <label className="block font-mono text-[9px] font-bold tracking-widest text-mute-2 uppercase mb-2">
                 Model
               </label>
-              <select
-                value={settings.model}
-                onChange={handleModelChange}
-                className="w-full bg-surf-2 border border-line rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none focus:border-ink transition-colors appearance-none cursor-pointer"
-                style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23999' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
-              >
-                {provider.models.map(m => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
+              {provider.customEndpoint ? (
+                <input
+                  type="text"
+                  value={settings.model || ''}
+                  onChange={handleModelChange}
+                  placeholder="e.g. llama3, mistral, gpt-4o"
+                  className="w-full bg-surf-2 border border-line rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none focus:border-ink transition-colors placeholder:text-mute-2 font-mono"
+                />
+              ) : (
+                <select
+                  value={settings.model}
+                  onChange={handleModelChange}
+                  className="w-full bg-surf-2 border border-line rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none focus:border-ink transition-colors appearance-none cursor-pointer"
+                  style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23999' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 12px center' }}
+                >
+                  {provider.models.map(m => (
+                    <option key={m} value={m}>{m}</option>
+                  ))}
+                </select>
+              )}
             </section>
 
             {/* API Key */}
