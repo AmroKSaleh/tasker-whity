@@ -250,7 +250,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
           <button
             onClick={onToggleList}
             title="Show flow list"
-            className="hidden md:inline-flex items-center gap-1.5 text-[11px] text-mute hover:text-ink mb-2 transition-colors"
+            className="inline-flex items-center gap-1.5 text-[11px] text-mute hover:text-ink mb-2 transition-colors"
           >
             <PanelLeftOpen size={14} />
             <span>Show list</span>

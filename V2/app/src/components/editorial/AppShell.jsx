@@ -41,7 +41,7 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
               expanded ? 'w-[200px]' : 'w-14',
             )}
           >
-            <div className="flex flex-col gap-0.5 px-1.5">
+            <div className="flex flex-col gap-0.5">
             <RailButton icon={Home}     label="Today"    active={active === 'today'}    expanded={expanded} onClick={() => navigate('/home')} />
             <RailButton icon={Folder}   label="Projects" active={active === 'projects'} expanded={expanded} onClick={() => navigate('/projects')} />
             <RailButton icon={Workflow} label="Flows"    active={active === 'flows'}    expanded={expanded} onClick={() => navigate('/flows')} />
@@ -50,7 +50,7 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
             <RailButton icon={Inbox}    label="Inbox"    active={active === 'inbox'}     expanded={expanded} />
           </div>
           <div className="flex-1" />
-          <div className="px-1.5 flex flex-col gap-0.5">
+          <div className="flex flex-col gap-0.5">
             <RailButton icon={BookOpen} label="Docs"     active={active === 'docs'}     expanded={expanded} onClick={() => navigate('/docs')} />
             <RailButton icon={Settings} label="Settings" active={active === 'settings'} expanded={expanded} onClick={() => navigate('/settings')} />
           </div>

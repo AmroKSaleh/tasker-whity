@@ -77,12 +77,28 @@ function buildLayout(steps, prefix, onTaskClick) {
 
   dagre.layout(g)
 
+  // Dagre doesn't guarantee insertion-order vertical placement within a rank.
+  // Group siblings by x position and re-sort by step number so lower step = higher on screen.
+  const rawPos = new Map(steps.map(s => [s.task.id, g.node(s.task.id)]))
+  const byRank = new Map()
+  steps.forEach(s => {
+    const key = Math.round(rawPos.get(s.task.id).x)
+    if (!byRank.has(key)) byRank.set(key, [])
+    byRank.get(key).push(s)
+  })
+  const adjustedY = new Map()
+  byRank.forEach(rankSteps => {
+    const sorted = [...rankSteps].sort((a, b) => a.step - b.step)
+    const ys = sorted.map(s => rawPos.get(s.task.id).y).sort((a, b) => a - b)
+    sorted.forEach((s, i) => adjustedY.set(s.task.id, ys[i] ?? rawPos.get(s.task.id).y))
+  })
+
   const nodes = steps.map(s => {
-    const pos = g.node(s.task.id)
+    const raw = rawPos.get(s.task.id)
     return {
       id: s.task.id,
       type: 'flowTask',
-      position: { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 },
+      position: { x: raw.x - NODE_W / 2, y: (adjustedY.get(s.task.id) ?? raw.y) - NODE_H / 2 },
       data: { task: s.task, step: s.step, prefix, onTaskClick },
       draggable: false,
     }
@@ -103,7 +119,6 @@ export default function FlowGraph({ steps, prefix, onTaskClick }) {
         fitViewOptions={{ padding: 0.2 }}
         nodesDraggable={false}
         nodesConnectable={false}
-        elementsSelectable={false}
         panOnScroll
         zoomOnScroll
         zoomOnDoubleClick={false}

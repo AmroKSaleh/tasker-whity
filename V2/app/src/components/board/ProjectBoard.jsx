@@ -31,11 +31,12 @@ import ProjectContextPanel from './ProjectContextPanel'
 import SectionContextSidebar from './SectionContextSidebar'
 import BlueprintView from './BlueprintView'
 
-function matchFilter(t, filter) {
-  if (filter === 'all') return true
-  if (filter === 'pending') return t.status !== 'done'
-  if (filter === 'done') return t.status === 'done'
-  return t.priority === filter && t.status !== 'done'
+function matchFilter(t, statusFilter, priorityFilter) {
+  const statusOk = statusFilter === 'all' ||
+    (statusFilter === 'pending' && t.status !== 'done') ||
+    (statusFilter === 'done' && t.status === 'done')
+  const priorityOk = !priorityFilter || t.priority === priorityFilter
+  return statusOk && priorityOk
 }
 
 function dueLabel(due_date) {
@@ -151,10 +152,10 @@ function DroppableList({ sectionId, groupId, items, children }) {
   )
 }
 
-function SectionColumn({ section, filter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection }) {
+function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection }) {
   const dim = /done|complete/i.test(section.name)
-  const ungrouped = section.ungroupedTasks.filter(t => matchFilter(t, filter))
-  const groups = section.groups.map(g => ({ ...g, tasks: g.tasks.filter(t => matchFilter(t, filter)) }))
+  const ungrouped = section.ungroupedTasks.filter(t => matchFilter(t, statusFilter, priorityFilter))
+  const groups = section.groups.map(g => ({ ...g, tasks: g.tasks.filter(t => matchFilter(t, statusFilter, priorityFilter)) }))
   const [menuOpen, setMenuOpen] = useState(false)
   const [addingGroup, setAddingGroup] = useState(false)
   const [groupName, setGroupName] = useState('')
@@ -272,7 +273,8 @@ export default function ProjectBoard({ project }) {
   const { isConnected: ghConnected, syncIssues } = useGitHub()
   const [ghSyncing, setGhSyncing] = useState(false)
 
-  const [filter, setFilter] = useState('pending')
+  const [statusFilter, setStatusFilter] = useState('pending')
+  const [priorityFilter, setPriorityFilter] = useState(null)
   const [showKB, setShowKB] = useState(false)
   const [showIS, setShowIS] = useState(false)
   const [showContext, setShowContext] = useState(false)
@@ -591,13 +593,13 @@ export default function ProjectBoard({ project }) {
             <div className="flex items-center gap-3 mt-4">
               <Kicker>FILTER</Kicker>
               <div className="flex gap-1.5">
-                <Pill active={filter === 'pending'} count={filterCounts.pending} onClick={() => setFilter('pending')}>Pending</Pill>
-                <Pill active={filter === 'all'} count={filterCounts.all} onClick={() => setFilter('all')}>All</Pill>
-                <Pill active={filter === 'done'} count={filterCounts.done} onClick={() => setFilter('done')}>Done</Pill>
+                <Pill active={statusFilter === 'pending'} count={filterCounts.pending} onClick={() => setStatusFilter('pending')}>Pending</Pill>
+                <Pill active={statusFilter === 'all'} count={filterCounts.all} onClick={() => setStatusFilter('all')}>All</Pill>
+                <Pill active={statusFilter === 'done'} count={filterCounts.done} onClick={() => setStatusFilter('done')}>Done</Pill>
                 <span className="w-px h-[18px] bg-line-2 mx-1 self-center" />
-                <Pill active={filter === 'rush'} count={filterCounts.rush} onClick={() => setFilter('rush')}>Rush</Pill>
-                <Pill active={filter === 'high'} count={filterCounts.high} onClick={() => setFilter('high')}>High</Pill>
-                <Pill active={filter === 'medium'} count={filterCounts.medium} onClick={() => setFilter('medium')}>Med</Pill>
+                <Pill active={priorityFilter === 'rush'} count={filterCounts.rush} onClick={() => setPriorityFilter(f => f === 'rush' ? null : 'rush')}>Rush</Pill>
+                <Pill active={priorityFilter === 'high'} count={filterCounts.high} onClick={() => setPriorityFilter(f => f === 'high' ? null : 'high')}>High</Pill>
+                <Pill active={priorityFilter === 'medium'} count={filterCounts.medium} onClick={() => setPriorityFilter(f => f === 'medium' ? null : 'medium')}>Med</Pill>
               </div>
             </div>
           </header>}
@@ -684,7 +686,7 @@ export default function ProjectBoard({ project }) {
                   // Section columns in normal mode
                   enrichedSections.map(s => (
                     <SectionColumn
-                      key={s.id} section={s} filter={filter} prefix={project.prefix}
+                      key={s.id} section={s} statusFilter={statusFilter} priorityFilter={priorityFilter} prefix={project.prefix}
                       onAddTask={createTask} onAddDetailed={createAndOpen} onAddGroup={createGroup} onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning}
                       onFocus={openFocusForTask} onPin={pinTask} onDelete={handleDeleteTask} onFocusSection={setFocusedSectionId}
                     />

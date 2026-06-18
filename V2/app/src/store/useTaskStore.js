@@ -15,9 +15,15 @@ export const useTaskStore = create(set => ({
     tasks: state.tasks.map(t => t.id === id ? { ...t, ...updates } : t),
   })),
 
-  addTask: task => set(state => ({ tasks: [...state.tasks, task] })),
-  addSection: section => set(state => ({ sections: [...state.sections, section] })),
-  addGroup: group => set(state => ({ groups: [...state.groups, group] })),
+  addTask: task => set(state =>
+    state.tasks.some(t => t.id === task.id) ? state : { tasks: [...state.tasks, task] }
+  ),
+  addSection: section => set(state =>
+    state.sections.some(s => s.id === section.id) ? state : { sections: [...state.sections, section] }
+  ),
+  addGroup: group => set(state =>
+    state.groups.some(g => g.id === group.id) ? state : { groups: [...state.groups, group] }
+  ),
   updateGroup: (id, updates) => set(state => ({
     groups: state.groups.map(g => g.id === id ? { ...g, ...updates } : g),
   })),
