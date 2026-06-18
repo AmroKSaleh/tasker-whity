@@ -60,6 +60,15 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
       <span className="absolute -left-1 top-1/2 -translate-y-1/2 text-mute-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
         <GripVertical size={12} />
       </span>
+      {task.task_statuses?.length > 0 && (
+        <div className="flex flex-wrap gap-1 mb-2">
+          {task.task_statuses.map(ts => ts.status).filter(Boolean).map(s => (
+            <span key={s.id} style={{ backgroundColor: s.color, color: '#fff', fontSize: 10, fontWeight: 700, letterSpacing: '0.04em', padding: '2px 7px', borderRadius: 3 }}>
+              {s.name}
+            </span>
+          ))}
+        </div>
+      )}
       <div className="flex items-start gap-2">
         <input type="checkbox" className="tcheck mt-0.5" checked={done} onClick={e => e.stopPropagation()} onChange={() => onToggle(task)} />
         <div className={clsx('flex-1 min-w-0 text-[12.5px] leading-[17px] font-medium', done ? 'text-mute-2 line-through' : 'text-ink')}>

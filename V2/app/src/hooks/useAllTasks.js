@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { useTaskStore } from '../store/useTaskStore'
 
-const TASK_FIELDS = 'id, project_id, section_id, text, status, priority, due_date, sort_order, pinned, skip_count, completed_at, created_at, focus_date, short_id'
+const TASK_FIELDS = 'id, project_id, section_id, text, status, priority, due_date, sort_order, pinned, skip_count, completed_at, created_at, focus_date, short_id, task_statuses(status_id, status:project_statuses(id, name, color, base_status))'
 const PROJECT_FIELDS = 'id, name, slug, prefix, context'
 
 function readLocal(key) {

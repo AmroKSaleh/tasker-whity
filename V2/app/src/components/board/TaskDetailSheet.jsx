@@ -6,6 +6,7 @@ import { updateTaskFields } from '../../hooks/useTasks'
 import { useSheetDrag } from './hooks/useSheetDrag'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
 import { StatusSegmented, PrioritySegmented } from './TaskDetailPanel'
+import CustomStatusField from './CustomStatusField'
 import FlowBlockedDialog from './DependencyWarningDialog'
 
 function Field({ label, children }) {
@@ -191,6 +192,8 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
           <Field label="Status">
             <StatusSegmented value={task.status} onChange={(v) => patch({ status: v })} />
           </Field>
+
+          <CustomStatusField task={task} />
 
           <Field label="Priority">
             <PrioritySegmented value={task.priority} onChange={(v) => patch({ priority: v })} />

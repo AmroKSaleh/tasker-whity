@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { updateTaskFields } from '../../hooks/useTasks'
+import { supabase } from '../../lib/supabase'
 
 const PRIORITIES = [
   { value: null,     label: 'None' },
@@ -15,16 +16,31 @@ export default function EditTaskModal({ task, onClose }) {
   const [priority, setPriority] = useState(task.priority ?? null)
   const [dueDate, setDueDate] = useState(task.due_date ?? '')
   const [saving, setSaving] = useState(false)
+  const [statuses, setStatuses] = useState([])
+  const [customStatusId, setCustomStatusId] = useState(task.custom_status_id ?? null)
+
+  useEffect(() => {
+    if (!task.project_id) return
+    supabase
+      .from('project_statuses')
+      .select('id, name, color, base_status')
+      .eq('project_id', task.project_id)
+      .order('sort_order')
+      .then(({ data }) => setStatuses(data || []))
+  }, [task.project_id])
 
   async function handleSave(e) {
     e.preventDefault()
     if (!text.trim()) return
     setSaving(true)
+    const selectedStatus = statuses.find(s => s.id === customStatusId)
     await updateTaskFields(task.id, {
       text: text.trim(),
       detail: detail.trim() || null,
       priority: priority || null,
       due_date: dueDate || null,
+      custom_status_id: customStatusId || null,
+      ...(selectedStatus && { status: selectedStatus.base_status }),
     })
     onClose()
   }
@@ -92,6 +108,47 @@ export default function EditTaskModal({ task, onClose }) {
                 className="w-full bg-surf-2 rounded-lg px-3 py-2 text-[13px] text-ink outline-none border border-line focus:border-ink transition-colors"
               />
             </div>
+          </div>
+
+          {/* Custom status */}
+          <div>
+            <label className="text-[11px] font-semibold text-mute uppercase tracking-wide mb-1 block">Status</label>
+            {statuses.length === 0 ? (
+              <p className="text-[12px] text-mute-2">
+                No custom statuses yet.{' '}
+                <a href="/settings" className="text-accent underline underline-offset-2 hover:opacity-75 transition-opacity">
+                  Add them in Settings →
+                </a>
+              </p>
+            ) : (
+              <div className="flex gap-1 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => setCustomStatusId(null)}
+                  className={`px-3 py-1 rounded-pill text-[12px] border transition-all ${
+                    customStatusId === null
+                      ? 'bg-ink text-paper border-transparent'
+                      : 'border-line text-mute hover:bg-surf-2'
+                  }`}
+                >
+                  Default
+                </button>
+                {statuses.map(s => (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => setCustomStatusId(s.id)}
+                    className="px-3 py-1 rounded-pill text-[12px] border transition-all"
+                    style={customStatusId === s.id
+                      ? { backgroundColor: s.color, borderColor: s.color, color: '#fff' }
+                      : { borderColor: s.color + '66', color: s.color }
+                    }
+                  >
+                    {s.name}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
 
           <div className="flex gap-2 justify-end pt-1">

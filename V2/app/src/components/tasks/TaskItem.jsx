@@ -64,6 +64,7 @@ export default function TaskItem({
         }}
         className="group border-b border-line-2"
       >
+
         {/* Full-height progress background fill */}
         <div
           aria-hidden
@@ -141,6 +142,15 @@ export default function TaskItem({
 
           {/* Text + bottom row */}
           <div className="flex-1 min-w-0 flex flex-col gap-1">
+            {task.task_statuses?.length > 0 && (
+              <div className="flex flex-wrap gap-1">
+                {task.task_statuses.map(ts => ts.status).filter(Boolean).map(s => (
+                  <span key={s.id} style={{ backgroundColor: s.color, color: '#fff', fontSize: 10, fontWeight: 700, letterSpacing: '0.04em', padding: '2px 7px', borderRadius: 3 }}>
+                    {s.name}
+                  </span>
+                ))}
+              </div>
+            )}
             {/* Task text — full width */}
             <span
               onClick={() => {

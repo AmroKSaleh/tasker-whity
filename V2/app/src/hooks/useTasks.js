@@ -93,7 +93,7 @@ export function useTasks(projectId) {
     async function fetchAll() {
       const [{ data: secs }, { data: tsks }] = await Promise.all([
         supabase.from('sections').select('*').eq('project_id', projectId).order('sort_order'),
-        supabase.from('tasks').select('*').eq('project_id', projectId).order('sort_order'),
+        supabase.from('tasks').select('*, task_statuses(status_id, status:project_statuses(id, name, color, base_status))').eq('project_id', projectId).order('sort_order'),
       ])
       if (secs) setSections(secs)
       if (tsks) setTasks(tsks)

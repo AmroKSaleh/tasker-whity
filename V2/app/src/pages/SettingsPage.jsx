@@ -8,6 +8,7 @@ import { testAIConnection } from '../lib/gemini'
 import { useGoogleCalendar } from '../hooks/useGoogleCalendar'
 import { useGitHub } from '../hooks/useGitHub'
 import { useTheme } from '../hooks/useTheme'
+import TaskStatusSettings from '../components/settings/TaskStatusSettings'
 
 const THEME_OPTIONS = [
   { id: 'light',  label: 'Light' },
@@ -914,6 +915,19 @@ export default function SettingsPage() {
                   </a>
                 </p>
               )}
+            </section>
+
+            <div className="border-t border-line-2 my-8" />
+
+            {/* Task Statuses */}
+            <section className="mb-7">
+              <label className="block font-mono text-[9px] font-bold tracking-widest text-mute-2 uppercase mb-3">
+                Task Statuses
+              </label>
+              <p className="text-[11px] text-mute-2 mb-4 leading-relaxed">
+                Define custom statuses per project — like Blocked, In Review, or Waiting. Each maps to a base state so flows and AI still work correctly.
+              </p>
+              <TaskStatusSettings />
             </section>
 
             <div className="border-t border-line-2 my-8" />
