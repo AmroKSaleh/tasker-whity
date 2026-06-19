@@ -5,10 +5,9 @@ import AppShell from '../components/editorial/AppShell'
 import { Kicker } from '../components/editorial/atoms'
 import { getAISettings, saveAISettings, PROVIDERS } from '../lib/aiSettings'
 import { testAIConnection } from '../lib/gemini'
-import { useGoogleCalendar } from '../hooks/useGoogleCalendar'
-import { useGitHub } from '../hooks/useGitHub'
 import { useTheme } from '../hooks/useTheme'
 import TaskStatusSettings from '../components/settings/TaskStatusSettings'
+import ConnectorsSection from '../components/settings/ConnectorsSection'
 
 const THEME_OPTIONS = [
   { id: 'light',  label: 'Light' },
@@ -580,42 +579,6 @@ export default function SettingsPage() {
     }
   }
 
-  const { isConnected, isExpired, loading: calLoading, connect: connectCal, disconnect: disconnectCal } = useGoogleCalendar()
-  const [calConnecting, setCalConnecting] = useState(false)
-  const [calError, setCalError] = useState(null)
-
-  const { isConnected: ghConnected, isOAuthUser: ghIsOAuth, loading: ghLoading, connect: connectGH, disconnect: disconnectGH } = useGitHub()
-  const [ghPat, setGhPat] = useState('')
-  const [ghShowKey, setGhShowKey] = useState(false)
-  const [ghConnecting, setGhConnecting] = useState(false)
-  const [ghError, setGhError] = useState(null)
-
-  async function handleConnectGH() {
-    if (!ghPat.trim()) return
-    setGhConnecting(true)
-    setGhError(null)
-    try {
-      await connectGH(ghPat.trim())
-      setGhPat('')
-    } catch (err) {
-      setGhError(err.message ?? 'Invalid token. Check your PAT and try again.')
-    } finally {
-      setGhConnecting(false)
-    }
-  }
-
-  async function handleConnectCal() {
-    setCalConnecting(true)
-    setCalError(null)
-    try {
-      await connectCal()
-    } catch (err) {
-      setCalError(err.message ?? 'Could not connect. Try again.')
-    } finally {
-      setCalConnecting(false)
-    }
-  }
-
   const canSave = settings.provider === 'gemini' || provider.customEndpoint || !!settings.apiKey?.trim()
 
   const tabProps = { apiKey: taskerKey, onSwitchToKey: setActiveTab }
@@ -803,119 +766,7 @@ export default function SettingsPage() {
 
             <div className="border-t border-line-2 my-8" />
 
-            {/* Google Calendar */}
-            <section className="mb-7">
-              <label className="block font-mono text-[9px] font-bold tracking-widest text-mute-2 uppercase mb-3">
-                Google Calendar
-              </label>
-              {calLoading ? (
-                <p className="text-[13px] text-mute">Checking connection…</p>
-              ) : isConnected ? (
-                <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-line bg-surf-2">
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-[10px] text-green-600">●</span>
-                    <span className="text-[13px] text-ink font-medium">Google Calendar connected</span>
-                  </div>
-                  <button onClick={disconnectCal} className="text-[12px] text-mute hover:text-ink transition-colors shrink-0">
-                    Disconnect
-                  </button>
-                </div>
-              ) : isExpired ? (
-                <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-line bg-surf-2">
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-[10px] text-amber-500">●</span>
-                    <span className="text-[13px] text-ink-2">Session expired</span>
-                  </div>
-                  <button onClick={handleConnectCal} disabled={calConnecting} className="text-[12px] text-accent font-medium hover:opacity-70 transition-opacity disabled:opacity-40 shrink-0">
-                    {calConnecting ? 'Connecting…' : 'Reconnect'}
-                  </button>
-                </div>
-              ) : (
-                <button
-                  onClick={handleConnectCal}
-                  disabled={calConnecting}
-                  className="w-full flex items-center justify-center gap-2.5 px-4 py-3 rounded-xl border border-line bg-surf-2 text-[13px] text-ink hover:bg-paper transition-colors disabled:opacity-40"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none">
-                    <rect x="3" y="4" width="18" height="18" rx="2" stroke="currentColor" strokeWidth="1.5"/>
-                    <path d="M3 9h18M8 2v4M16 2v4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
-                  </svg>
-                  {calConnecting ? 'Connecting…' : 'Connect Google Calendar'}
-                </button>
-              )}
-              {calError && <p className="mt-2 text-[11px] text-red-500">{calError}</p>}
-              <p className="text-[11px] text-mute-2 mt-2 leading-relaxed">
-                Tasks with due dates sync to your Google Calendar. Calendar events appear in Today view.
-              </p>
-            </section>
-
-            <div className="border-t border-line-2 my-8" />
-
-            {/* GitHub */}
-            <section className="mb-7">
-              <label className="block font-mono text-[9px] font-bold tracking-widest text-mute-2 uppercase mb-3">
-                GitHub
-              </label>
-              {ghLoading ? (
-                <p className="text-[13px] text-mute">Checking connection…</p>
-              ) : ghConnected ? (
-                <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-line bg-surf-2">
-                  <div className="flex items-center gap-2.5">
-                    <span className="text-[10px] text-green-600">●</span>
-                    <span className="text-[13px] text-ink font-medium">
-                      {ghIsOAuth ? 'Connected via GitHub login' : 'GitHub connected'}
-                    </span>
-                  </div>
-                  <button onClick={disconnectGH} className="text-[12px] text-mute hover:text-ink transition-colors shrink-0">
-                    Disconnect
-                  </button>
-                </div>
-              ) : (
-                <div className="flex flex-col gap-2">
-                  {!ghIsOAuth && (
-                    <>
-                      <div className="flex gap-2">
-                        <input
-                          type={ghShowKey ? 'text' : 'password'}
-                          value={ghPat}
-                          onChange={e => { setGhPat(e.target.value); setGhError(null) }}
-                          placeholder="github_pat_..."
-                          className="flex-1 bg-surf-2 border border-line rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none focus:border-ink transition-colors placeholder:text-mute-2 font-mono"
-                        />
-                        <button
-                          onClick={() => setGhShowKey(v => !v)}
-                          className="px-3 py-2 rounded-lg border border-line bg-surf-2 text-[11px] text-mute hover:text-ink transition-colors shrink-0"
-                        >
-                          {ghShowKey ? 'Hide' : 'Show'}
-                        </button>
-                      </div>
-                      <button
-                        onClick={handleConnectGH}
-                        disabled={ghConnecting || !ghPat.trim()}
-                        className="w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl border border-line bg-surf-2 text-[13px] text-ink hover:bg-paper transition-colors disabled:opacity-40"
-                      >
-                        <svg width="15" height="15" viewBox="0 0 24 24" fill="currentColor">
-                          <path d="M12 2C6.477 2 2 6.477 2 12c0 4.418 2.865 8.167 6.839 9.49.5.092.682-.217.682-.482 0-.237-.009-.868-.013-1.703-2.782.604-3.369-1.34-3.369-1.34-.454-1.156-1.11-1.463-1.11-1.463-.908-.62.069-.608.069-.608 1.003.07 1.531 1.03 1.531 1.03.892 1.529 2.341 1.087 2.91.832.092-.647.35-1.088.636-1.338-2.22-.253-4.555-1.11-4.555-4.943 0-1.091.39-1.984 1.029-2.683-.103-.253-.446-1.27.098-2.647 0 0 .84-.268 2.75 1.026A9.578 9.578 0 0112 6.836c.85.004 1.705.114 2.504.337 1.909-1.294 2.747-1.026 2.747-1.026.546 1.377.202 2.394.1 2.647.64.699 1.028 1.592 1.028 2.683 0 3.842-2.339 4.687-4.566 4.935.359.309.678.919.678 1.852 0 1.336-.012 2.415-.012 2.743 0 .267.18.578.688.48C19.138 20.163 22 16.418 22 12c0-5.523-4.477-10-10-10z"/>
-                        </svg>
-                        {ghConnecting ? 'Connecting…' : 'Connect GitHub'}
-                      </button>
-                    </>
-                  )}
-                  {ghIsOAuth && (
-                    <p className="text-[13px] text-mute">Sign out and sign back in with GitHub to connect automatically.</p>
-                  )}
-                </div>
-              )}
-              {ghError && <p className="mt-2 text-[11px] text-red-500">{ghError}</p>}
-              {!ghIsOAuth && (
-                <p className="text-[11px] text-mute-2 mt-2 leading-relaxed">
-                  Connect with a Personal Access Token (PAT) with <span className="font-mono">repo</span> scope.{' '}
-                  <a href="https://github.com/settings/tokens" target="_blank" rel="noopener noreferrer" className="text-accent hover:opacity-70 transition-opacity underline underline-offset-2">
-                    Get your PAT here
-                  </a>
-                </p>
-              )}
-            </section>
+            <ConnectorsSection />
 
             <div className="border-t border-line-2 my-8" />
 
