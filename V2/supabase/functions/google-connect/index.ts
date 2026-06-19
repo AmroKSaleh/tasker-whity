@@ -53,9 +53,11 @@ Deno.serve(async (req) => {
     const stateKey = Deno.env.get('GOOGLE_OAUTH_STATE_SECRET') ?? Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
     if (!clientId || !redirectUri) return json({ error: 'Google OAuth not configured (GOOGLE_CLIENT_ID / GOOGLE_REDIRECT_URI missing)' }, 500)
 
-    // Signed, single-use-ish state: userId | expiry(epoch s) | returnPath
+    // Signed, single-use-ish state: userId | expiry(epoch s) | returnPath | requested-scopes
+    // (the requested scopes are echoed back so the callback knows which services the
+    // user explicitly connected — for per-service connection tracking).
     const exp = Math.floor(Date.now() / 1000) + 600 // 10 minutes
-    const payload = `${user.id}|${exp}|${returnPath}`
+    const payload = `${user.id}|${exp}|${returnPath}|${scopes.join(' ')}`
     const state = `${b64url(enc.encode(payload))}.${b64url(await hmac(stateKey, payload))}`
 
     const url = new URL('https://accounts.google.com/o/oauth2/v2/auth')

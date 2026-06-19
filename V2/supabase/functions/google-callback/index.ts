@@ -60,7 +60,7 @@ Deno.serve(async (req) => {
     const payload = new TextDecoder().decode(b64urlToBytes(payloadB64))
     const expectedSig = await hmac(stateKey, payload)
     if (!timingSafeEqual(expectedSig, b64urlToBytes(sigB64))) return back('error')
-    const [userId, expStr] = payload.split('|')
+    const [userId, expStr, , reqScopesStr] = payload.split('|')
     if (!userId || Number(expStr) < Math.floor(Date.now() / 1000)) return back('expired')
 
     // Exchange the authorization code for tokens.
@@ -83,12 +83,18 @@ Deno.serve(async (req) => {
 
     const sb = createClient(Deno.env.get('SUPABASE_URL')!, Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!)
 
-    // Accumulate newly-granted scopes with any previously granted (incremental auth).
+    // google_scopes = raw grant (accumulates via incremental auth). google_connected_scopes
+    // = only what the user EXPLICITLY connected this/previous times (from the signed state) —
+    // this drives the per-service UI so connecting Gmail doesn't light up Drive/Tasks.
     const { data: existing } = await sb.from('user_settings')
-      .select('google_scopes').eq('user_id', userId).maybeSingle()
+      .select('google_scopes, google_connected_scopes').eq('user_id', userId).maybeSingle()
     const prev = (existing?.google_scopes ?? '').split(' ').filter(Boolean)
     const fresh = String(tok.scope ?? '').split(' ').filter(Boolean)
     const scopes = Array.from(new Set([...prev, ...fresh])).join(' ')
+
+    const reqScopes = (reqScopesStr ?? '').split(' ').filter(Boolean)
+    const prevConnected = (existing?.google_connected_scopes ?? '').split(' ').filter(Boolean)
+    const connectedScopes = Array.from(new Set([...prevConnected, ...(reqScopes.length ? reqScopes : fresh)])).join(' ')
     const expiry = new Date(Date.now() + Number(tok.expires_in ?? 3600) * 1000).toISOString()
 
     const patch: Record<string, unknown> = {
@@ -96,6 +102,7 @@ Deno.serve(async (req) => {
       google_access_token: tok.access_token,
       google_token_expiry: expiry,
       google_scopes: scopes,
+      google_connected_scopes: connectedScopes,
     }
     // Google returns refresh_token only on first consent (or with prompt=consent).
     // Never overwrite a stored refresh token with null.

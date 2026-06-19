@@ -58,13 +58,16 @@ export async function connectGoogle(scopes, returnPath = '/settings') {
 export async function loadGoogleConnection(userId) {
   const { data } = await supabase
     .from('user_settings')
-    .select('google_access_token, google_scopes, google_token_expiry')
+    .select('google_access_token, google_connected_scopes, google_token_expiry')
     .eq('user_id', userId)
     .maybeSingle()
   if (!data?.google_access_token) return null
   return {
     connected: true,
-    scopes: (data.google_scopes ?? '').split(' ').filter(Boolean),
+    // The UI reflects only the services the user explicitly connected, so each
+    // Google service connects/disconnects independently (google_connected_scopes),
+    // not the raw accumulated grant.
+    scopes: (data.google_connected_scopes ?? '').split(' ').filter(Boolean),
     expiry: data.google_token_expiry,
   }
 }
@@ -73,6 +76,7 @@ export function hasGoogleScope(connection, scope) {
   return !!connection && connection.scopes.includes(scope)
 }
 
+// Fully disconnect Google (clears the shared grant + all per-service tracking).
 export async function disconnectGoogle(userId) {
   await supabase
     .from('user_settings')
@@ -81,6 +85,24 @@ export async function disconnectGoogle(userId) {
       google_refresh_token: null,
       google_token_expiry: null,
       google_scopes: null,
+      google_connected_scopes: null,
     })
+    .eq('user_id', userId)
+}
+
+// Disconnect ONE service: drop its scope from the explicitly-connected set. If it
+// was the last connected service, fully clear the shared grant; otherwise keep the
+// token (the remaining services still need it).
+export async function disconnectGoogleScope(userId, scope) {
+  const { data } = await supabase
+    .from('user_settings')
+    .select('google_connected_scopes')
+    .eq('user_id', userId)
+    .maybeSingle()
+  const remaining = (data?.google_connected_scopes ?? '').split(' ').filter(Boolean).filter(s => s !== scope)
+  if (remaining.length === 0) return disconnectGoogle(userId)
+  await supabase
+    .from('user_settings')
+    .update({ google_connected_scopes: remaining.join(' ') })
     .eq('user_id', userId)
 }

@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react'
 import { supabase } from '../../lib/supabase'
 import { useGitHub } from '../../hooks/useGitHub'
 import { useGoogleCalendar } from '../../hooks/useGoogleCalendar'
-import { connectGoogle, loadGoogleConnection, disconnectGoogle, hasGoogleScope } from '../../lib/google'
+import { connectGoogle, loadGoogleConnection, disconnectGoogleScope, hasGoogleScope } from '../../lib/google'
 import { CONNECTORS } from '../../lib/connectors'
 
 const BTN = 'w-full px-4 py-2 rounded-lg border border-line bg-paper text-[12px] text-ink hover:bg-surf-2 transition-colors disabled:opacity-40'
@@ -83,10 +83,10 @@ export default function ConnectorsSection() {
       setGScope(null)
     }
   }
-  async function disconnectAllGoogle() {
+  async function disconnectGoogleService(scope) {
     if (!userId) return
-    await disconnectGoogle(userId)
-    setGoogleConn(null)
+    await disconnectGoogleScope(userId, scope)
+    setGoogleConn(await loadGoogleConnection(userId))
   }
 
   function renderCard(c) {
@@ -143,7 +143,7 @@ export default function ConnectorsSection() {
       const connected = !!googleConn && hasGoogleScope(googleConn, c.scope)
       return (
         <Row {...common} connected={connected}
-          action={connected && <DisconnectBtn onClick={disconnectAllGoogle} title="Disconnects all Google services — they share one connection" />}>
+          action={connected && <DisconnectBtn onClick={() => disconnectGoogleService(c.scope)} />}>
           {googleLoading && <p className="mt-2 text-[12px] text-mute">Checking connection…</p>}
           {!googleLoading && !connected && (
             <button onClick={() => connectGoogleScope(c.scope)} disabled={gScope === c.scope} className={`mt-2.5 ${BTN}`}>
@@ -169,7 +169,7 @@ export default function ConnectorsSection() {
         Connectors
       </label>
       <p className="text-[11px] text-mute-2 mb-4 leading-relaxed">
-        Connect 3rd-party apps. Tasker surfaces only the slice relevant to your work — never a full client. Google services share one connection (scopes add as you connect each). Connected apps also become available to your AI agents over MCP.
+        Connect 3rd-party apps. Tasker surfaces only the slice relevant to your work — never a full client. Each service connects independently, and connected apps also become available to your AI agents over MCP.
       </p>
       <div className="flex flex-col gap-2.5">
         {CONNECTORS.map(c => <div key={c.id}>{renderCard(c)}</div>)}
