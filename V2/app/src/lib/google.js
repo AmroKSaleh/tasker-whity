@@ -12,14 +12,17 @@ export const GOOGLE_SCOPES = {
   tasks: 'https://www.googleapis.com/auth/tasks.readonly',
 }
 
-// Start the connect flow for the given scope(s): ask the google-connect function
-// (authenticated) for a consent URL, then redirect the browser to Google. After
-// consent, google-callback stores the tokens and redirects back to
-// `${returnPath}?google=connected` (or =denied / =expired / =error).
+// Start the connect flow for the given scope(s) in a POPUP (keeps the user on the
+// Tasker page, like the Calendar connect). The popup is opened synchronously (within
+// the click gesture) so it isn't blocked, then pointed at the consent URL. Resolves
+// when google-callback posts back { source:'tasker-google', status }. Falls back to a
+// full-page redirect if the popup is blocked.
 export async function connectGoogle(scopes, returnPath = '/settings') {
   const list = Array.isArray(scopes) ? scopes : [scopes]
+  const popup = window.open('about:blank', 'tasker-google', 'width=520,height=640,menubar=no,toolbar=no')
+
   const { data: { session } } = await supabase.auth.getSession()
-  if (!session) throw new Error('Not signed in')
+  if (!session) { popup?.close(); throw new Error('Not signed in') }
 
   const res = await fetch(`${import.meta.env.VITE_SUPABASE_URL}/functions/v1/google-connect`, {
     method: 'POST',
@@ -27,8 +30,27 @@ export async function connectGoogle(scopes, returnPath = '/settings') {
     body: JSON.stringify({ scopes: list, returnPath }),
   })
   const json = await res.json()
-  if (!res.ok || !json.url) throw new Error(json.error || 'Could not start Google connect')
-  window.location.href = json.url
+  if (!res.ok || !json.url) { popup?.close(); throw new Error(json.error || 'Could not start Google connect') }
+
+  // Popup blocked → fall back to a full-page redirect (the callback handles both).
+  if (!popup) { window.location.href = json.url; return new Promise(() => {}) }
+  popup.location.href = json.url
+
+  const supaOrigin = new URL(import.meta.env.VITE_SUPABASE_URL).origin
+  return new Promise((resolve, reject) => {
+    let done = false
+    function cleanup() { window.removeEventListener('message', onMsg); clearInterval(poll) }
+    function onMsg(e) {
+      if (e.origin !== supaOrigin || !e.data || e.data.source !== 'tasker-google') return
+      done = true; cleanup(); try { popup.close() } catch (_) { /* ignore */ }
+      if (e.data.status === 'connected') resolve()
+      else reject(new Error(e.data.status === 'denied' ? 'You declined the permission.' : `Connection failed (${e.data.status}).`))
+    }
+    const poll = setInterval(() => {
+      if (popup.closed && !done) { cleanup(); reject(new Error('Connection cancelled.')) }
+    }, 500)
+    window.addEventListener('message', onMsg)
+  })
 }
 
 // Read the current Google connection (null if not connected). `scopes` is the

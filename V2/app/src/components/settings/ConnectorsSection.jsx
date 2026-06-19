@@ -74,8 +74,14 @@ export default function ConnectorsSection() {
   }
   async function connectGoogleScope(scope) {
     setGScope(scope); setGErr(null)
-    try { await connectGoogle([scope]) }   // full-page redirect to Google's consent screen
-    catch (e) { setGErr(e.message ?? 'Could not start Google connect.'); setGScope(null) }
+    try {
+      await connectGoogle([scope])                          // popup; resolves when the callback posts back
+      if (userId) setGoogleConn(await loadGoogleConnection(userId))
+    } catch (e) {
+      setGErr(e.message ?? 'Could not connect.')
+    } finally {
+      setGScope(null)
+    }
   }
   async function disconnectAllGoogle() {
     if (!userId) return

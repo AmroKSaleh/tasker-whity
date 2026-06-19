@@ -38,11 +38,18 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 Deno.serve(async (req) => {
   const url = new URL(req.url)
-  const appUrl = Deno.env.get('APP_URL') ?? ''
-  const back = (status: string) =>
-    appUrl
-      ? Response.redirect(`${appUrl.replace(/\/$/, '')}/settings?google=${status}`, 302)
-      : new Response(`Google connection: ${status}. You can close this tab.`, { status: 200 })
+  const target = (Deno.env.get('APP_URL') ?? '').replace(/\/$/, '')
+  // Popup-aware return: if opened as a popup (window.opener present), signal the
+  // opener and close; otherwise fall back to a full-page redirect to the app.
+  const back = (status: string) => {
+    const html = '<!doctype html><meta charset="utf-8"><title>Google</title>'
+      + '<body style="font:14px system-ui;padding:24px">Finishing…</body><script>'
+      + '(function(){var s=' + JSON.stringify(status) + ',t=' + JSON.stringify(target) + ';'
+      + 'try{if(window.opener&&!window.opener.closed){window.opener.postMessage({source:"tasker-google",status:s},t||"*");window.close();return;}}catch(e){}'
+      + 'if(t){window.location.replace(t+"/settings?google="+s);}else{document.body.textContent="Google connection: "+s+". You can close this tab.";}'
+      + '})();</script>'
+    return new Response(html, { status: 200, headers: { 'Content-Type': 'text/html; charset=utf-8' } })
+  }
 
   try {
     const code = url.searchParams.get('code')
