@@ -1520,6 +1520,39 @@ const TOOLS = [
       required: ['task_id'],
     },
   },
+  {
+    name: 'pull_intake_job',
+    description: 'INTAKE QUEUE: claim the oldest PENDING intake job for the user — content they captured from the web app (e.g. a Gmail email via the "+Task" button) for you to structure into tasks. Call this when the user says "process intake" / "process my emails" / similar. Marks the job processing and returns its payload. After structuring, call submit_intake_result. Returns {job_id, source, payload, instructions} or {empty:true} if nothing is pending.',
+    inputSchema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'submit_intake_result',
+    description: 'INTAKE QUEUE: post the structured result for a job claimed via pull_intake_job. Give a short analysis of the source + the PROPOSED tasks. The human reviews, edits, and imports them in the web app (rendered live) — you are NOT creating the tasks here, only proposing. On failure, pass `error` instead of tasks.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        job_id: { type: 'string', description: 'The job id returned by pull_intake_job.' },
+        analysis: { type: 'string', description: 'Short plain-language analysis of the source: what it is and what it asks for.' },
+        tasks: {
+          type: 'array',
+          description: 'Proposed tasks for the human to review/edit/import.',
+          items: {
+            type: 'object',
+            properties: {
+              title: { type: 'string', description: 'Task title.' },
+              context: { type: 'string', description: 'Task detail/context.' },
+              section: { type: 'string', description: 'Suggested section name (optional).' },
+              priority: { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
+              milestones: { type: 'array', items: { type: 'string' }, description: 'Optional ordered milestone texts.' },
+            },
+            required: ['title'],
+          },
+        },
+        error: { type: 'string', description: 'If the job could not be processed, the reason (instead of tasks).' },
+      },
+      required: ['job_id'],
+    },
+  },
 ]
 
 // ── Group resolver helper ────────────────────────────────────
@@ -3702,6 +3735,39 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           ? 'Draft persisted as the output contract (AI-QA\'d). SURFACE the assumptions to the human, let them edit the rules, then confirm_contract to bless it — the name_flow gate blocks until it is blessed.'
           : 'Review the draft + assumptions WITH the human, then persist via set_task_output (or re-call with apply:true) and confirm_contract.',
       })
+    }
+
+    case 'pull_intake_job': {
+      const { data: job } = await sb.from('intake_jobs')
+        .select('id, source, payload, instructions')
+        .eq('user_id', userId).eq('status', 'pending')
+        .order('created_at', { ascending: true }).limit(1).maybeSingle()
+      if (!job) return JSON.stringify({ empty: true, message: 'No pending intake jobs.' })
+      await sb.from('intake_jobs').update({ status: 'processing', updated_at: new Date().toISOString() }).eq('id', job.id)
+      return JSON.stringify({
+        job_id: job.id,
+        source: job.source,
+        payload: job.payload,
+        instructions: job.instructions || null,
+        next: 'Structure this into proposed task(s), then call submit_intake_result(job_id, analysis, tasks). The human reviews + imports them in the web app — do NOT create the tasks yourself.',
+      })
+    }
+
+    case 'submit_intake_result': {
+      if (!args.job_id) return 'job_id is required.'
+      const { data: job } = await sb.from('intake_jobs').select('id').eq('id', args.job_id).eq('user_id', userId).maybeSingle()
+      if (!job) return `Intake job "${args.job_id}" not found.`
+      const tasks = Array.isArray(args.tasks) ? args.tasks : []
+      const result = args.error ? null : { analysis: args.analysis || '', tasks }
+      await sb.from('intake_jobs').update({
+        status: args.error ? 'error' : 'done',
+        result,
+        error: args.error || null,
+        updated_at: new Date().toISOString(),
+      }).eq('id', job.id)
+      return args.error
+        ? `Marked intake job ${String(args.job_id).slice(0, 8)} as error.`
+        : `Submitted ${tasks.length} proposed task${tasks.length !== 1 ? 's' : ''} for job ${String(args.job_id).slice(0, 8)} — now rendering in the web app for the human to review + import.`
     }
 
     case 'enable_task_review': {
