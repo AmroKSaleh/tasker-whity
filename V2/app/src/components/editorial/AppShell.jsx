@@ -2,6 +2,8 @@ import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { Home, Folder, Workflow, Calendar, Search, Inbox, BookOpen, Settings } from 'lucide-react'
 import { useSidebarStore } from '../../store/useSidebarStore'
+import { useConnectedProviders } from '../../hooks/useConnectedProviders'
+import { CONNECTORS } from '../../lib/connectors'
 
 function RailButton({ icon: Icon, label, active, expanded, onClick }) {
   return (
@@ -28,6 +30,8 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
   const navigate = useNavigate()
   const expanded = useSidebarStore(s => s.expanded)
   const setExpanded = useSidebarStore(s => s.setExpanded)
+  const connectedIds = useConnectedProviders()
+  const panelConnectors = CONNECTORS.filter(c => c.panelRoute && connectedIds.includes(c.id))
   return (
     <div className="w-full h-screen flex overflow-hidden bg-paper text-ink">
       {/* LEFT RAIL — 56px footprint, hover-expands as an overlay */}
@@ -49,6 +53,13 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
             <RailButton icon={Search}   label="Search"   active={active === 'search'}   expanded={expanded} />
             <RailButton icon={Inbox}    label="Inbox"    active={active === 'inbox'}     expanded={expanded} />
           </div>
+          {panelConnectors.length > 0 && (
+            <div className="flex flex-col gap-0.5 mt-1 pt-1 border-t border-line-2">
+              {panelConnectors.map(c => (
+                <RailButton key={c.id} icon={c.icon} label={c.label} active={active === c.id} expanded={expanded} onClick={() => navigate(c.panelRoute)} />
+              ))}
+            </div>
+          )}
           <div className="flex-1" />
           <div className="flex flex-col gap-0.5">
             <RailButton icon={BookOpen} label="Docs"     active={active === 'docs'}     expanded={expanded} onClick={() => navigate('/docs')} />

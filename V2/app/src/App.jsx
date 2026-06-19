@@ -8,6 +8,7 @@ import FlowsPage from './pages/FlowsPage'
 import DocsPage from './pages/DocsPage'
 import DocsV2Page from './pages/DocsV2Page'
 import SettingsPage from './pages/SettingsPage'
+import GmailPanelPage from './pages/GmailPanelPage'
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
 
 export default function App() {
@@ -39,6 +40,7 @@ export default function App() {
             </AuthGuard>
           }
         />
+        <Route path="/connectors/gmail" element={<AuthGuard><GmailPanelPage /></AuthGuard>} />
       </Routes>
     </BrowserRouter>
   )
