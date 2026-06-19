@@ -41,6 +41,8 @@ export default function IntakePanel({ jobId, projects, defaultProjectId, onClose
     } else if (row.status === 'error') {
       setErrorMsg(row.error || 'Your agent reported an error.')
       setPhase('error')
+    } else if (row.status === 'processing') {
+      setPhase('processing')
     } else {
       setPhase('waiting')
     }
@@ -104,6 +106,14 @@ export default function IntakePanel({ jobId, projects, defaultProjectId, onClose
             <div className="rounded-xl border border-line bg-surf-2 px-4 py-4">
               <p className="text-[13px] text-ink font-medium mb-1">Waiting for your agent…</p>
               <p className="text-[12px] text-mute-2 leading-relaxed">In Claude Code (or Cursor), say <span className="font-mono text-ink">process intake</span>. Your agent reads this email, structures tasks, and they appear here to review and import.</p>
+            </div>
+          )}
+          {phase === 'processing' && (
+            <div className="rounded-xl border border-accent/40 bg-surf-2 px-4 py-4">
+              <p className="text-[13px] text-ink font-medium mb-1 flex items-center gap-2">
+                <span className="w-1.5 h-1.5 rounded-full bg-accent animate-pulse" /> Your agent is working on it…
+              </p>
+              <p className="text-[12px] text-mute-2 leading-relaxed">Reading the email and structuring tasks. This takes a few moments (the agent is generating) — the result appears here automatically, no refresh needed.</p>
             </div>
           )}
           {phase === 'error' && <div className="rounded-xl border border-[#C0432D]/40 bg-[#C0432D]/5 px-4 py-3 text-[13px] text-ink">{errorMsg}</div>}
