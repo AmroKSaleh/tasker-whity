@@ -36,12 +36,12 @@ export async function connectGoogle(scopes, returnPath = '/settings') {
   if (!popup) { window.location.href = json.url; return new Promise(() => {}) }
   popup.location.href = json.url
 
-  const supaOrigin = new URL(import.meta.env.VITE_SUPABASE_URL).origin
+  // The popup ends on /google-connected.html (this app's origin), which posts back.
   return new Promise((resolve, reject) => {
     let done = false
     function cleanup() { window.removeEventListener('message', onMsg); clearInterval(poll) }
     function onMsg(e) {
-      if (e.origin !== supaOrigin || !e.data || e.data.source !== 'tasker-google') return
+      if (e.origin !== window.location.origin || !e.data || e.data.source !== 'tasker-google') return
       done = true; cleanup(); try { popup.close() } catch (_) { /* ignore */ }
       if (e.data.status === 'connected') resolve()
       else reject(new Error(e.data.status === 'denied' ? 'You declined the permission.' : `Connection failed (${e.data.status}).`))
