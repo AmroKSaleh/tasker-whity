@@ -4,8 +4,8 @@ import clsx from 'clsx'
 import { supabase } from '../lib/supabase'
 import AppShell from '../components/editorial/AppShell'
 import { Kicker } from '../components/editorial/atoms'
+import IntakePanel from '../components/connectors/IntakePanel'
 
-// Strip the bare address out of a "Name <email>" From header for compact display.
 function fromName(from) {
   const m = from?.match(/^\s*"?([^"<]+?)"?\s*</)
   return (m ? m[1] : from || '').trim() || from || 'Unknown'
@@ -13,13 +13,14 @@ function fromName(from) {
 
 export default function GmailPanelPage() {
   const navigate = useNavigate()
-  const [messages, setMessages] = useState(null)   // null = loading
+  const [messages, setMessages] = useState(null)
   const [error, setError] = useState(null)
   const [openId, setOpenId] = useState(null)
   const [body, setBody] = useState({})             // id -> text | 'loading'
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState('')
-  const [created, setCreated] = useState({})       // id -> 'creating' | true | 'error'
+  const [sending, setSending] = useState({})       // id -> bool (creating intake job)
+  const [activeJobId, setActiveJobId] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -50,22 +51,22 @@ export default function GmailPanelPage() {
     if (body[id] === undefined) fetchBody(id)
   }
 
-  async function createFromEmail(m) {
-    if (!projectId) return
-    setCreated(c => ({ ...c, [m.id]: 'creating' }))
+  // +Task → capture the email as an intake job and open the panel. The agent
+  // structures it (nudge: "process intake" in CC); the panel renders the result.
+  async function createIntakeJob(m) {
+    setSending(s => ({ ...s, [m.id]: true }))
     try {
       const { data: { user } } = await supabase.auth.getUser()
       const text = body[m.id] && body[m.id] !== 'loading' ? body[m.id] : await fetchBody(m.id)
-      // File into the project's Backlog if it has one; otherwise ungrouped.
-      const { data: sec } = await supabase.from('sections').select('id').eq('project_id', projectId).eq('name', 'Backlog').maybeSingle()
-      const detail = `From: ${m.from}\nDate: ${m.date}\n\n${text || m.snippet || ''}`.slice(0, 5000)
-      const { error } = await supabase.from('tasks').insert({
-        user_id: user.id, project_id: projectId, section_id: sec?.id ?? null,
-        text: m.subject || '(no subject)', detail, status: 'pending',
-      })
-      setCreated(c => ({ ...c, [m.id]: error ? 'error' : true }))
-    } catch {
-      setCreated(c => ({ ...c, [m.id]: 'error' }))
+      const { data: job } = await supabase.from('intake_jobs').insert({
+        user_id: user.id,
+        source: 'gmail',
+        payload: { from: m.from, subject: m.subject, date: m.date, body: text || m.snippet || '' },
+        status: 'pending',
+      }).select('id').single()
+      if (job) setActiveJobId(job.id)
+    } finally {
+      setSending(s => ({ ...s, [m.id]: false }))
     }
   }
 
@@ -74,20 +75,7 @@ export default function GmailPanelPage() {
       <div className="px-7 py-8 md:px-10" style={{ maxWidth: 820 }}>
         <Kicker className="mb-2">CONNECTORS · GMAIL</Kicker>
         <h1 className="text-h1 m-0">Gmail.</h1>
-        <p className="text-[12px] text-mute-2 mt-1.5 mb-5">Recent inbox. Turn an email into a task — it lands in the project below (your agent can structure it from there).</p>
-
-        {projects.length > 0 && (
-          <div className="flex items-center gap-2 mb-5">
-            <span className="text-[11px] text-mute-2">Create tasks in</span>
-            <select
-              value={projectId}
-              onChange={e => setProjectId(e.target.value)}
-              className="bg-surf-2 border border-line rounded-lg px-2.5 py-1.5 text-[12px] text-ink outline-none focus:border-ink"
-            >
-              {projects.map(p => <option key={p.id} value={p.id}>{p.prefix ? `${p.prefix} · ` : ''}{p.name}</option>)}
-            </select>
-          </div>
-        )}
+        <p className="text-[12px] text-mute-2 mt-1.5 mb-6">Recent inbox. <span className="font-medium text-ink-2">+ Task</span> hands the email to your agent (say <span className="font-mono">process intake</span> in CC) — it structures tasks you review &amp; import.</p>
 
         {messages === null ? (
           <p className="text-[13px] text-mute">Loading inbox…</p>
@@ -102,7 +90,6 @@ export default function GmailPanelPage() {
           <div className="flex flex-col rounded-xl border border-line-2 overflow-hidden">
             {messages.map(m => {
               const isOpen = openId === m.id
-              const c = created[m.id]
               return (
                 <div key={m.id} className="border-b border-line-2 last:border-b-0">
                   <div className={clsx('flex items-start gap-2 px-4 py-3 hover:bg-surf-2 transition-colors', m.unread && 'bg-surf-2/40')}>
@@ -115,12 +102,12 @@ export default function GmailPanelPage() {
                       <p className="text-[11.5px] text-mute-2 truncate mt-0.5">{m.snippet}</p>
                     </button>
                     <button
-                      onClick={() => createFromEmail(m)}
-                      disabled={!projectId || c === 'creating' || c === true}
-                      title="Create a task from this email"
+                      onClick={() => createIntakeJob(m)}
+                      disabled={sending[m.id]}
+                      title="Send this email to your agent to structure into tasks"
                       className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] font-semibold text-mute hover:text-ink disabled:opacity-50"
                     >
-                      {c === true ? '✓ Task' : c === 'creating' ? '…' : c === 'error' ? 'Retry' : '+ Task'}
+                      {sending[m.id] ? '…' : '+ Task'}
                     </button>
                   </div>
                   {isOpen && (
@@ -137,6 +124,16 @@ export default function GmailPanelPage() {
           </div>
         )}
       </div>
+
+      {activeJobId && (
+        <IntakePanel
+          jobId={activeJobId}
+          projects={projects}
+          defaultProjectId={projectId}
+          onClose={() => setActiveJobId(null)}
+          onImported={() => {}}
+        />
+      )}
     </AppShell>
   )
 }
