@@ -1,22 +1,17 @@
 import { GitBranch, Calendar, HardDrive, Mail, ListChecks, MessageSquare } from 'lucide-react'
+import { GOOGLE_SCOPES } from './google'
 
-// 3rd-party connector registry. Metadata only — connect/disconnect need React hooks,
-// so they live in ConnectorsSection. See KB "Connectors: scoped Tasker-relevant panels,
-// never full app clients".
-//   status: 'live'  — wired now (hook-backed in ConnectorsSection)
-//           'setup' — built but needs Google Cloud setup + TDE-245 deploy before it works
-//           'soon'  — not built yet
-//   slice:  the Tasker-relevant view we surface — NEVER a full app client.
+// 3rd-party connector registry. `kind` drives how ConnectorsSection renders/wires it:
+//   'github' | 'gcal' — hook-backed live providers (existing flows)
+//   'google'          — shared Google connection (google.js refresh-token flow); needs `scope`
+//   'soon'            — not built yet
+// `slice` = the Tasker-relevant view we surface — never a full app client
+// (see KB "Connectors: scoped Tasker-relevant panels, never full app clients").
 export const CONNECTORS = [
-  { id: 'github',          label: 'GitHub',          icon: GitBranch,  status: 'live',  slice: 'Import issues & repos as tasks.' },
-  { id: 'google_calendar', label: 'Google Calendar', icon: Calendar,   status: 'live',  slice: 'Due dates sync to your calendar; events show in Today.' },
-  { id: 'google_drive',    label: 'Google Drive',    icon: HardDrive,  status: 'setup', slice: 'Attach Drive files as task artifacts.' },
-  { id: 'gmail',           label: 'Gmail',           icon: Mail,       status: 'setup', slice: 'Turn relevant emails into structured tasks.' },
-  { id: 'google_tasks',    label: 'Google Tasks',    icon: ListChecks, status: 'setup', slice: 'Two-way sync with Google Tasks.' },
-  { id: 'slack',           label: 'Slack',           icon: MessageSquare, status: 'soon',  slice: 'Import messages as tasks; post verifiable progress back.' },
+  { id: 'github',          label: 'GitHub',          icon: GitBranch,     kind: 'github', slice: 'Import issues & repos as tasks.' },
+  { id: 'google_calendar', label: 'Google Calendar', icon: Calendar,      kind: 'gcal',   slice: 'Due dates sync to your calendar; events show in Today.' },
+  { id: 'google_drive',    label: 'Google Drive',    icon: HardDrive,     kind: 'google', scope: GOOGLE_SCOPES.drive, slice: 'Attach Drive files as task artifacts.' },
+  { id: 'gmail',           label: 'Gmail',           icon: Mail,          kind: 'google', scope: GOOGLE_SCOPES.gmail, slice: 'Turn relevant emails into structured tasks.' },
+  { id: 'google_tasks',    label: 'Google Tasks',    icon: ListChecks,    kind: 'google', scope: GOOGLE_SCOPES.tasks, slice: 'Two-way sync with Google Tasks.' },
+  { id: 'slack',           label: 'Slack',           icon: MessageSquare, kind: 'soon',   slice: 'Import messages as tasks; post verifiable progress back.' },
 ]
-
-export const STATUS_NOTE = {
-  setup: 'Needs Google connected (admin setup pending).',
-  soon: 'Coming soon.',
-}
