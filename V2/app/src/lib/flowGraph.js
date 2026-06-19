@@ -23,6 +23,49 @@ export function outputRules(output) {
   return output?.contract?.rules ?? []
 }
 
+export function isConfirmed(contract) {
+  return contract?.confirmed === true
+}
+
+// Client-side mirror of the server lintRule (contract_gate.ts / TDE-287): flags vague
+// or too-short rules that the contract gate would reject. Returns a message or null.
+const VAGUE_RULE_WORDS = /\b(readable|clarity|clear|good|nice|appropriate|reasonable|relevant|professional|adequate|sufficient|proper|well.written|high.quality|comprehensive|thorough|engaging|interesting|helpful|useful)\b/i
+export function lintRule(rule) {
+  const text = (rule?.rule || '').trim()
+  if (text.length < 15) return 'too short to be checkable — add a specific, measurable criterion'
+  const m = text.match(VAGUE_RULE_WORDS)
+  if (m) return `vague language "${m[0]}" — replace with a concrete, verifiable criterion`
+  return null
+}
+
+// Client-side mirror of contractGateViolations (TDE-287): a flow passes the gate when
+// every INTERNAL handoff carries a non-trivial, human-blessed contract on both sides
+// (producer output def-of-done + consumer input acceptance). `steps` = [{ task }].
+// Returns { ok, unblessed, weak, total }: weak = empty/vague rules, unblessed = needs blessing.
+export function flowGateStatus(steps) {
+  const tasks = steps.map(s => s.task)
+  const inFlow = new Set(tasks.map(t => t.id))
+  const ruleIssue = rules => {
+    if (!rules || !rules.length) return true
+    return rules.some(r => lintRule(r))
+  }
+  let weak = 0, unblessed = 0
+  for (const t of tasks) {
+    const edges = inputEdges(t.input).filter(e => inFlow.has(e.source_task_id))
+    for (const e of edges) {
+      if (ruleIssue(e.contract?.rules)) weak++
+      else if (!isConfirmed(e.contract)) unblessed++
+    }
+    const feedsInFlow = tasks.some(o => inputEdges(o.input).some(e => e.source_task_id === t.id))
+    if (feedsInFlow) {
+      if (ruleIssue(outputRules(t.output))) weak++
+      else if (!isConfirmed(t.output?.contract)) unblessed++
+    }
+  }
+  const total = weak + unblessed
+  return { ok: total === 0, weak, unblessed, total }
+}
+
 // Connected components (undirected over I/O edges) within one set of tasks
 // (caller passes a single project's tasks). Only components with >= 1 edge.
 export function detectFlows(tasks) {

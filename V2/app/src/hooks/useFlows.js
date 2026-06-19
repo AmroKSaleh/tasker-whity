@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
-import { detectFlows, flowSteps } from '../lib/flowGraph'
+import { detectFlows, flowSteps, flowGateStatus } from '../lib/flowGraph'
 
 // Dedicated fetch for the Flows page: needs input/output (the contract data),
 // which the shared useAllTasks hook deliberately omits to keep the Today query lean.
@@ -20,7 +20,7 @@ export function useFlows() {
     const [{ data: projs }, { data: tsks }, { data: frecs }] = await Promise.all([
       supabase.from('projects').select(PROJECT_FIELDS).order('created_at'),
       supabase.from('tasks').select(TASK_FIELDS).order('sort_order'),
-      supabase.from('flows').select('id, short_id'),
+      supabase.from('flows').select('id, short_id, gate_bypassed, gate_bypass_reason'),
     ])
     if (projs) setProjects(projs)
     if (tsks) setTasks(tsks)
@@ -49,13 +49,19 @@ export function useFlows() {
           : (anyInProgress || doneCount > 0) ? 'in_progress'
           : 'pending'
         const flowRecordId = steps.map(s => s.task.flow_id).find(Boolean) || null
+        const flowRec = flowRecordId ? flowRecMap.get(flowRecordId) : null
         result.push({
           id: `${projectId}:${f.id}`,
           name: f.autoName,
           // The named-flow record id (flows table), if this detected flow has been
           // named via name_flow. null when the flow was never named → no flow IS/KB.
           flowRecordId,
-          shortId: flowRecordId ? (flowRecMap.get(flowRecordId)?.short_id ?? null) : null,
+          shortId: flowRec?.short_id ?? null,
+          // Contract gate (TDE-287): client-side mirror of the server gate, plus the
+          // recorded bypass state. Lets the cockpit show trust at a glance.
+          gate: flowGateStatus(steps),
+          gateBypassed: flowRec?.gate_bypassed === true,
+          gateBypassReason: flowRec?.gate_bypass_reason ?? null,
           projectId,
           projectName: project?.name ?? '—',
           projectPrefix: project?.prefix ?? null,

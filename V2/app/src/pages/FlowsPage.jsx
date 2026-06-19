@@ -12,6 +12,39 @@ import FlowTaskPanel from '../components/flows/FlowTaskPanel'
 const STATUS_LABEL = { done: 'DONE', in_progress: 'IN PROGRESS', pending: 'PENDING' }
 const STATUS_DOT = { done: 'bg-[#4ade80]', in_progress: 'bg-accent', pending: 'bg-line' }
 
+// Contract-gate trust badge (TDE-287). Three states: bypassed (recorded weak),
+// blessed (gate would pass), or N contract issues (gate would block).
+function GateBadge({ flow, size = 'sm' }) {
+  const { gate, gateBypassed, gateBypassReason } = flow
+  if (!gate) return null
+  const pad = size === 'lg' ? 'px-2 py-0.5 text-[11px]' : 'px-1.5 py-px text-[10px]'
+  if (gateBypassed) {
+    return (
+      <span title={gateBypassReason || 'Contract gate bypassed'}
+        className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-[#C0432D]/40 text-[#C0432D] bg-[#C0432D]/5', pad)}>
+        ⛔ Gate bypassed
+      </span>
+    )
+  }
+  if (gate.ok) {
+    return (
+      <span title="Every handoff has a non-trivial, human-blessed contract"
+        className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-[#4ade80]/40 text-[#3a9d57] bg-[#4ade80]/5', pad)}>
+        ✓ Contracts blessed
+      </span>
+    )
+  }
+  const label = gate.weak > 0
+    ? `${gate.total} contract issue${gate.total !== 1 ? 's' : ''}`
+    : `${gate.unblessed} to bless`
+  return (
+    <span title={`${gate.unblessed} unblessed, ${gate.weak} vague/empty — the gate would block this flow`}
+      className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-accent/40 text-accent bg-surf-2', pad)}>
+      ⊘ {label}
+    </span>
+  )
+}
+
 function FlowCard({ flow, active, onClick }) {
   return (
     <button
@@ -33,6 +66,8 @@ function FlowCard({ flow, active, onClick }) {
         <span>{flow.stepCount} STEPS</span>
         <span>·</span>
         <span>{flow.doneCount}/{flow.stepCount} DONE</span>
+        <span className="flex-1" />
+        <GateBadge flow={flow} />
       </div>
     </button>
   )
@@ -269,9 +304,17 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
         ) : (
           <h2 className="text-h2 mt-1">{flow.name}</h2>
         )}
-        <div className="font-mono text-[10px] text-mute-2 tracking-[0.06em] mt-1">
-          {flow.stepCount} STEPS · {flow.doneCount}/{flow.stepCount} DONE · {STATUS_LABEL[flow.status]}
+        <div className="flex items-center gap-2.5 mt-1">
+          <span className="font-mono text-[10px] text-mute-2 tracking-[0.06em]">
+            {flow.stepCount} STEPS · {flow.doneCount}/{flow.stepCount} DONE · {STATUS_LABEL[flow.status]}
+          </span>
+          <GateBadge flow={flow} size="lg" />
         </div>
+        {flow.gateBypassed && flow.gateBypassReason && (
+          <p className="text-[11px] text-[#C0432D] mt-1.5 leading-snug">
+            Gate bypassed — <span className="italic">{flow.gateBypassReason}</span>
+          </p>
+        )}
         {/* Short ID row */}
         <div className="flex items-center gap-2 mt-1.5">
           {editingShortId ? (

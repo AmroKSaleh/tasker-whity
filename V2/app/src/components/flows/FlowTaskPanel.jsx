@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
-import { X, CheckSquare, Square, Pencil } from 'lucide-react'
+import { X, CheckSquare, Square, Pencil, ShieldCheck, AlertTriangle } from 'lucide-react'
 import clsx from 'clsx'
 import { supabase } from '../../lib/supabase'
 import { Kicker } from '../editorial/atoms'
-import { inputEdges, outputRules } from '../../lib/flowGraph'
+import { inputEdges, outputRules, isConfirmed, lintRule } from '../../lib/flowGraph'
 import EditTaskModal from '../tasks/EditTaskModal'
 import ContractEditor from './ContractEditor'
 
@@ -13,6 +13,7 @@ const PRIORITY_COLOR = { rush: 'text-[#C0432D]', high: 'text-accent', medium: 't
 
 function RuleRow({ rule }) {
   const warn = rule.severity === 'warning'
+  const issue = lintRule(rule)
   return (
     <div className="flex items-start gap-2 py-0.5">
       <span className={clsx(
@@ -24,7 +25,36 @@ function RuleRow({ rule }) {
       <span className="text-[11.5px] text-ink-2 leading-snug">
         {rule.rule}
         <span className="text-mute-2 font-mono text-[9px] ml-1.5">{rule.kind === 'check' ? 'check' : 'judgment'}</span>
+        {issue && (
+          <span title={issue} className="inline-flex items-center gap-0.5 text-[#C0432D] ml-1.5 align-middle">
+            <AlertTriangle size={10} />
+          </span>
+        )}
       </span>
+    </div>
+  )
+}
+
+// The blessing state of one contract + the action to bless it (TDE-287 cockpit).
+function BlessRow({ confirmed, confirmedBy, hasRules, busy, onBless }) {
+  if (!hasRules) return null
+  if (confirmed) {
+    return (
+      <div className="flex items-center gap-1.5 mt-2 pt-2 border-t border-line-2 text-[10.5px] font-semibold text-[#3a9d57]">
+        <ShieldCheck size={12} /> Human-blessed{confirmedBy ? ` · ${confirmedBy}` : ''}
+      </div>
+    )
+  }
+  return (
+    <div className="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-line-2">
+      <span className="text-[10.5px] font-semibold text-accent">⊘ AI-QA'd — needs review</span>
+      <button
+        disabled={busy}
+        onClick={onBless}
+        className="rounded border border-[#4ade80]/50 px-2 py-0.5 text-[10.5px] font-semibold text-[#3a9d57] hover:bg-[#4ade80]/10 transition-colors disabled:opacity-50"
+      >
+        {busy ? 'Blessing…' : 'Bless'}
+      </button>
     </div>
   )
 }
@@ -38,6 +68,9 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
 
   const [inputEdgesState, setInputEdgesState] = useState([])
   const [outputRulesState, setOutputRulesState] = useState([])
+  const [outputConfirmed, setOutputConfirmed] = useState(false)
+  const [outputConfirmedBy, setOutputConfirmedBy] = useState(null)
+  const [blessing, setBlessing] = useState(null)
 
   useEffect(() => {
     if (!task?.id) return
@@ -58,6 +91,8 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
   useEffect(() => {
     setInputEdgesState(inputEdges(task?.input))
     setOutputRulesState(outputRules(task?.output))
+    setOutputConfirmed(isConfirmed(task?.output?.contract))
+    setOutputConfirmedBy(task?.output?.contract?.confirmed_by ?? null)
     setEditingContracts(false)
   }, [task?.id])
 
@@ -67,16 +102,39 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
 
   async function saveContracts() {
     setSaving(true)
-    const updates = []
-    const newInput = { edges: inputEdgesState }
+    // Re-authoring a contract resets it to AI-QA'd (must be re-blessed) — mirrors the
+    // server (set_task_input/output reset confirmed). Keeps the blessing honest.
+    const newInput = { edges: inputEdgesState.map(e => ({ ...e, contract: { ...e.contract, confirmed: false } })) }
     const prevOutput = (task.output && typeof task.output === 'object') ? task.output : {}
     const newOutput = { ...prevOutput, contract: { rules: outputRulesState, confirmed: false } }
-    updates.push(
-      supabase.from('tasks').update({ input: newInput, output: newOutput }).eq('id', task.id)
-    )
-    await Promise.all(updates)
+    await supabase.from('tasks').update({ input: newInput, output: newOutput }).eq('id', task.id)
     setSaving(false)
     setEditingContracts(false)
+    onTaskUpdated?.()
+  }
+
+  async function blessOutput() {
+    setBlessing('output')
+    const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+    const prevC = prev.contract || {}
+    await supabase.from('tasks').update({
+      output: { ...prev, contract: { ...prevC, confirmed: true, confirmed_at: new Date().toISOString(), confirmed_by: 'human' } },
+    }).eq('id', task.id)
+    setOutputConfirmed(true)
+    setOutputConfirmedBy('human')
+    setBlessing(null)
+    onTaskUpdated?.()
+  }
+
+  async function blessInput(sourceTaskId) {
+    setBlessing('in:' + sourceTaskId)
+    const edges = inputEdges(task.input)
+    const updated = edges.map(e => e.source_task_id === sourceTaskId
+      ? { ...e, contract: { ...e.contract, confirmed: true, confirmed_at: new Date().toISOString(), confirmed_by: 'human' } }
+      : e)
+    await supabase.from('tasks').update({ input: { edges: updated } }).eq('id', task.id)
+    setInputEdgesState(updated)
+    setBlessing(null)
     onTaskUpdated?.()
   }
 
@@ -174,6 +232,13 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
                       {rules.length
                         ? rules.map((r, j) => <RuleRow key={j} rule={r} />)
                         : <p className="text-[11px] text-mute-2">No acceptance rules set.</p>}
+                      <BlessRow
+                        confirmed={isConfirmed(e.contract)}
+                        confirmedBy={e.contract?.confirmed_by}
+                        hasRules={rules.length > 0}
+                        busy={blessing === 'in:' + e.source_task_id}
+                        onBless={() => blessInput(e.source_task_id)}
+                      />
                     </div>
                   )
                 })}
@@ -194,6 +259,13 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
               {outputRulesState.length ? (
                 <div className="rounded-lg border border-line-2 px-3 py-2.5">
                   {outputRulesState.map((r, i) => <RuleRow key={i} rule={r} />)}
+                  <BlessRow
+                    confirmed={outputConfirmed}
+                    confirmedBy={outputConfirmedBy}
+                    hasRules={outputRulesState.length > 0}
+                    busy={blessing === 'output'}
+                    onBless={blessOutput}
+                  />
                 </div>
               ) : (
                 <p className="text-[12px] text-mute-2">No output contract set.</p>
