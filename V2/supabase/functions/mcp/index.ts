@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import { inputEdges, inputSourceIds, outputContract, lintRule, deriveOutputFromConsumers, contractGateViolations } from './contract_gate.ts'
 
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL')!
 const SUPABASE_SERVICE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')!
@@ -263,34 +264,10 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
 //   legacy:     { source_task_id, expected_type, validation_rules }
 //   Rule:       { id, label, rule, description?, kind: 'check'|'judgment', severity: 'blocker'|'warning' }
 //
-// Each input edge carries the CONSUMER's acceptance criteria for that one
-// incoming artifact (fan-in = multiple edges). `output` holds the producer's
-// single definition-of-done contract plus the validation ledger.
-function inputEdges(input: any): Array<{ source_task_id: string, expected_type?: string, contract: { rules: any[] } }> {
-  if (!input) return []
-  if (Array.isArray(input.edges)) {
-    return input.edges.filter((e: any) => e && e.source_task_id)
-  }
-  if (input.source_task_id) {
-    // Legacy single-source shape → one edge; fold validation_rules into a judgment rule.
-    const rules = input.validation_rules
-      ? [{ id: 'legacy', label: 'Validation rules', rule: input.validation_rules, kind: 'judgment', severity: 'blocker' }]
-      : []
-    return [{ source_task_id: input.source_task_id, expected_type: input.expected_type, contract: { rules } }]
-  }
-  return []
-}
-
-// All upstream source task IDs this task consumes from (the tasks that block it).
-function inputSourceIds(input: any): string[] {
-  return inputEdges(input).map(e => e.source_task_id)
-}
-
-// The producer's output contract ({ rules: [], confirmed: false } if none set).
-function outputContract(output: any): { rules: any[], confirmed: boolean } {
-  if (output?.contract?.rules) return { ...output.contract, confirmed: output.contract.confirmed === true }
-  return { rules: [], confirmed: false }
-}
+// The I/O-edge model (inputEdges/inputSourceIds/outputContract), the rule-quality
+// linter (lintRule), the derive-from-input governance (deriveOutputFromConsumers),
+// and the verifiable contract gate (contractGateViolations) live in contract_gate.ts
+// — extracted for unit testing (TDE-287). Imported at the top of this file.
 
 // ── TDE-261 task-level output judge: eligibility & flow-exclusivity ──────────
 // HARD RULE: task-level review applies ONLY to non-flow tasks (flow tasks are
@@ -326,15 +303,6 @@ function normalizeRule(r: any, i: number): any {
   }
 }
 
-// Detect vague rules that are hard to enforce or trivially self-pass.
-const VAGUE_RULE_WORDS = /\b(readable|clarity|clear|good|nice|appropriate|reasonable|relevant|professional|adequate|sufficient|proper|well.written|high.quality|comprehensive|thorough|engaging|interesting|helpful|useful)\b/i
-function lintRule(r: any): string | null {
-  const text = (r.rule || '').trim()
-  if (text.length < 15) return 'rule is too short to be checkable — add a specific, measurable criterion'
-  const match = text.match(VAGUE_RULE_WORDS)
-  if (match) return `vague language "${match[0]}" — replace with a concrete, verifiable criterion (e.g. instead of "readable" → "each sentence under 25 words, no unexplained jargon"; instead of "comprehensive" → "covers all N sections listed in the outline")`
-  return null
-}
 
 // All upstream tasks NOT yet done, walking the WHOLE chain (transitive), not just direct parents.
 // Dedupes via `seen` and is cycle-safe. Only recurses past tasks that are themselves unmet —
@@ -1429,7 +1397,7 @@ const TOOLS = [
   },
   {
     name: 'name_flow',
-    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided.',
+    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). CONTRACT GATE (TDE-287): finalizing is BLOCKED unless every internal handoff has a non-trivial, human-blessed contract on both sides (producer output def-of-done + consumer input criteria). If it blocks, it returns the specific violations — sharpen the flagged rules and run confirm_contract, then retry. Override only with bypass:true (records the flow as visibly gate-bypassed). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1438,6 +1406,8 @@ const TOOLS = [
         task_ids: { type: 'array', items: { type: 'string' }, description: 'All task IDs in the flow (UUIDs or short IDs).' },
         context: { type: 'string', description: 'Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow.' },
         short_id: { type: 'string', description: 'Optional custom short ID (e.g. "BKT-F3"). Must be unique across all your flows. Auto-generated if omitted.' },
+        bypass: { type: 'boolean', description: 'TDE-287: finalize the flow even if the contract gate fails. Use ONLY on explicit human command — the flow is permanently recorded as gate-bypassed.' },
+        bypass_reason: { type: 'string', description: 'Why the gate was bypassed (recorded on the flow). Provide when bypass:true.' },
       },
       required: ['project_id', 'name', 'task_ids'],
     },
@@ -1536,6 +1506,18 @@ const TOOLS = [
         goal: { type: 'string', description: 'The end goal of the flow in the user\'s words (the final deliverable). Optional — if omitted, the playbook tells you to elicit it first.' },
       },
       required: ['project_id'],
+    },
+  },
+  {
+    name: 'derive_output_contract',
+    description: 'TDE-287: derive a producing task\'s output contract (its definition-of-done) FROM what its downstream consumers demand — the consumer\'s input-edge rules ARE the acceptance criteria the output must meet, so the def-of-done should cover them. Wire the consumer edges first (set_task_input), then call this on the PRODUCER. Returns a DRAFT rule set plus an "assumptions" list (vague rules inherited from consumers, multi-consumer merges, missing criteria) to SURFACE to the human before confirming — the derive-from-input + assumption-surfacing half of the authoring loop. Pass apply:true to persist the draft as the producer\'s output contract (still AI-QA\'d until confirm_contract; the name_flow gate enforces the blessing).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'The PRODUCER task whose output contract to derive (UUID or short ID).' },
+        apply: { type: 'boolean', description: 'If true, persist the derived draft as this task\'s output contract. Default false — return the draft + assumptions only, for human review.' },
+      },
+      required: ['task_id'],
     },
   },
 ]
@@ -3585,17 +3567,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           '1. GROUND THE START: use project_context below and read the repo if relevant, then ask the user what they already have / where they are starting from. Do not ask about things you can already see.',
           '2. PIN THE GOAL' + (args.goal ? ` (stated: "${args.goal}")` : '') + ': confirm the end goal and treat it as the FINAL task\'s output contract.',
           '3. FORWARD-DECOMPOSE one step at a time toward the goal, recommending a path each time, building the ordered chain of tasks.',
-          '4. AUTHOR A CONTRACT PER HANDOFF: for each task propose an output contract (its definition-of-done) and the next task\'s input contract (its acceptance criteria) as structured, CONTEXT-FREE rules — describe the shape of acceptable output, never this run\'s subject. Only make a step its own task if it produces a distinct, checkable output a later step depends on (a contract-worthy handoff); otherwise it is a sub-detail of a task, not its own task. RULE QUALITY: push toward sharp, checkable rules. Prefer kind=check with concrete params (word count, test command, file existence). For kind=judgment, require an objective criterion ("each sentence under 25 words" not "readable") and a stated way to verify it. Actively push back on vague rules like "good quality", "clear", "comprehensive" — ask the user what SPECIFICALLY makes it pass.',
-          '5. PRESENT THE WHOLE PROPOSED FLOW (tasks + dependency edges + contracts) and ask for ONE confirmation.',
-          '6. ON CONFIRM, PERSIST (see persistence).',
+          '4. AUTHOR INPUTS FIRST, THEN DERIVE OUTPUTS (TDE-287): the consumer\'s input requirement is the BASE of the producer\'s contract. For each handoff, first pin the next task\'s input contract (its acceptance criteria) as structured, CONTEXT-FREE rules — the shape of acceptable output, never this run\'s subject. The producer\'s output def-of-done is then DERIVED from what its consumers demand (call derive_output_contract on the producer once edges are wired). RULE QUALITY: push toward sharp, checkable rules. Prefer kind=check with concrete params (word count, test command, file existence). For kind=judgment, require an objective criterion ("each sentence under 25 words" not "readable") and a stated way to verify it. Actively push back on vague rules like "good quality", "clear", "comprehensive" — ask the user what SPECIFICALLY makes it pass. Only make a step its own task if it produces a distinct, checkable output a later step depends on (a contract-worthy handoff).',
+          '5. SURFACE ASSUMPTIONS, DON\'T INTERROGATE (TDE-287): present the WHOLE proposed flow (tasks + edges + derived contracts) AND the explicit list of assumptions/uncertainties you made deriving them (vague inherited rules, multi-consumer merges, handoffs with no criteria to derive from). Ask the human to confirm or correct — ONE pass. Assumption-surfacing on a concrete draft beats a cold questionnaire.',
+          '6. ON CONFIRM, PERSIST then BLESS (see persistence). The name_flow gate will BLOCK finalize until every handoff has a non-trivial, human-blessed contract — so confirm_contract is a required step, not optional.',
         ],
         persistence: {
           when: 'ONLY after the user confirms the whole flow.',
           steps: [
             'create_task for each step (pass section_id from project_context if it belongs in an existing section).',
-            'set_task_output(task_id, contract) on each producing task — its definition-of-done.',
-            'set_task_input(task_id, source_task_id, contract) on each consuming task — call once per upstream source (fan-in supported). The input contract is the consumer\'s acceptance criteria for that incoming artifact.',
-            'name_flow(project_id, name, task_ids, context?) — give the flow a human name and optional shared context bag (goals, constraints, background). Pass ALL task IDs in the flow.',
+            'set_task_input(task_id, source_task_id, contract) on each consuming task — call once per upstream source (fan-in supported). The input contract is the consumer\'s acceptance criteria. Author these FIRST — they are the base of the producer\'s contract.',
+            'derive_output_contract(task_id, apply:true) on each producing task to derive its def-of-done from its consumers\' input criteria (or set_task_output directly if you must). Surface the returned assumptions to the human.',
+            'confirm_contract(task_id, contract_type) on each side the human has blessed — REQUIRED: name_flow blocks on unblessed contracts (TDE-287 gate).',
+            'name_flow(project_id, name, task_ids, context?) — names + finalizes the flow. If the gate blocks, fix the listed violations and retry; bypass:true only on explicit human command.',
             'Finally call get_flow_order to show the user the ordered flow you built.',
           ],
         },
@@ -3682,6 +3665,43 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is AI-QA'd (QA is performed by AI, not a meat sack) until a human confirms it via confirm_contract. Consumers are derived from tasks that list this as a source.`
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
+    }
+
+    case 'derive_output_contract': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      // Every task that lists this producer as an input source is a consumer whose
+      // input criteria govern this producer's output def-of-done.
+      const { data: candidates } = await sb.from('tasks')
+        .select('id, text, short_id, input')
+        .eq('user_id', userId)
+      const consumers = (candidates || []).filter((c: any) =>
+        inputEdges(c.input).some((e: any) => e.source_task_id === task.id))
+      const derived = deriveOutputFromConsumers(task.id, consumers)
+
+      let applied = false
+      if (args.apply && derived.rules.length) {
+        const rules = derived.rules.map(normalizeRule)
+        const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+        const { error } = await sb.from('tasks').update({
+          output: { ...prev, contract: { rules, confirmed: false }, validation_status: prev.validation_status || 'pending' },
+        }).eq('id', task.id)
+        if (error) throw new Error(error.message)
+        applied = true
+      }
+
+      return JSON.stringify({
+        status: 'derived',
+        producer: { id: task.short_id != null ? `#${task.short_id}` : task.id.slice(0, 8), text: task.text },
+        derived_from: derived.sources.map((s: any) => s.text),
+        rule_count: derived.rules.length,
+        rules: derived.rules,
+        assumptions: derived.assumptions,
+        applied,
+        next: applied
+          ? 'Draft persisted as the output contract (AI-QA\'d). SURFACE the assumptions to the human, let them edit the rules, then confirm_contract to bless it — the name_flow gate blocks until it is blessed.'
+          : 'Review the draft + assumptions WITH the human, then persist via set_task_output (or re-call with apply:true) and confirm_contract.',
+      })
     }
 
     case 'enable_task_review': {
@@ -4388,6 +4408,23 @@ Call submit_validation_result with:
       const skipped = taskIds.length - valid.length
       if (!valid.length) return 'No valid tasks found in task_ids.'
 
+      // TDE-287 / finishes TDE-203: the verifiable contract gate. A flow cannot be
+      // finalized unless every internal handoff carries a non-trivial, human-blessed
+      // contract. Override only by explicit bypass:true — recorded so it is visibly weak.
+      const violations = contractGateViolations(valid)
+      if (violations.length && args.bypass !== true) {
+        return JSON.stringify({
+          status: 'contract_gate_failed',
+          blocked: true,
+          message: `Cannot finalize flow "${args.name}": ${violations.length} contract issue${violations.length !== 1 ? 's' : ''}. Each internal handoff needs a non-trivial, human-blessed contract on both sides. Sharpen the flagged rules, then run confirm_contract on each side, and retry. To finalize anyway against your own judgment, re-call with bypass: true (and bypass_reason) — the flow will be permanently recorded as gate-bypassed.`,
+          violations,
+        })
+      }
+      const gateBypassed = violations.length > 0 && args.bypass === true
+      const gateFields = gateBypassed
+        ? { gate_bypassed: true, gate_bypass_reason: args.bypass_reason || 'No reason given.', gate_bypassed_at: new Date().toISOString() }
+        : { gate_bypassed: false, gate_bypass_reason: null, gate_bypassed_at: null }
+
       // Compute short_id: use provided, or auto-generate
       let shortId: string | null = args.short_id || null
       if (!shortId) {
@@ -4416,10 +4453,10 @@ Call submit_validation_result with:
       const existingFlowId = valid.find((t: any) => t.flow_id)?.flow_id || null
       let flowId: string
       if (existingFlowId) {
-        await sb.from('flows').update({ name: args.name, context: args.context || null, short_id: shortId, updated_at: new Date().toISOString() }).eq('id', existingFlowId).eq('user_id', userId)
+        await sb.from('flows').update({ name: args.name, context: args.context || null, short_id: shortId, ...gateFields, updated_at: new Date().toISOString() }).eq('id', existingFlowId).eq('user_id', userId)
         flowId = existingFlowId
       } else {
-        const { data: flow, error } = await sb.from('flows').insert({ user_id: userId, project_id: project.id, name: args.name, context: args.context || null, short_id: shortId }).select('id').single()
+        const { data: flow, error } = await sb.from('flows').insert({ user_id: userId, project_id: project.id, name: args.name, context: args.context || null, short_id: shortId, ...gateFields }).select('id').single()
         if (error || !flow) throw new Error(error?.message || 'Failed to create flow')
         flowId = flow.id
       }
@@ -4453,7 +4490,10 @@ Call submit_validation_result with:
         const ref = t.short_id != null ? `#${t.short_id}` : t.id.slice(0, 8)
         return `  Step ${i + 1}: ${ref} — ${t.text}`
       }).join('\n')
-      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…  Short ID: ${shortId}`
+      const bypassNote = gateBypassed
+        ? `\n\n⚠ CONTRACT GATE BYPASSED — this flow was finalized with ${violations.length} unresolved contract issue${violations.length !== 1 ? 's' : ''} (reason: "${gateFields.gate_bypass_reason}"). It is recorded as gate-bypassed and is visibly weaker than a fully-blessed flow.`
+        : ''
+      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…  Short ID: ${shortId}${bypassNote}`
     }
 
     case 'recompute_flow_steps': {
