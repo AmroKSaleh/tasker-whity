@@ -108,7 +108,7 @@ export default function ProjectHeader({ project, onRename, onFocus, onOpenContex
         </div>
 
         <button className="btn btn-sm" onClick={onOpenContext}>
-          ✦ Context
+          ✦ Foundation
         </button>
         <button className="btn btn-sm" onClick={onOpenKB}>
           KB

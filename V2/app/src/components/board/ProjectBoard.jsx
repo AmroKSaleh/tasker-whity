@@ -48,16 +48,24 @@ function dueLabel(due_date) {
 function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete }) {
   const done = task.status === 'done'
   const ip = task.status === 'in_progress'
+  const seed = task.kind === 'seed'
   const prio = task.priority === 'medium' ? 'med' : task.priority
   return (
     <div
       onClick={() => onOpen(task.id)}
       className={clsx(
-        'group relative rounded-lg border bg-paper px-2.5 py-2 cursor-pointer transition-colors',
-        done ? 'border-line-2 opacity-55' : 'border-line-2 hover:border-line',
+        'group relative rounded-lg border px-2.5 py-2 cursor-pointer transition-colors',
+        seed ? 'border-dashed border-accent/50 bg-accent/[0.03] hover:border-accent' : done ? 'border-line-2 bg-paper opacity-55' : 'border-line-2 bg-paper hover:border-line',
       )}
     >
       {ip && <span className="absolute left-[-1px] top-2 bottom-2 w-0.5 bg-accent rounded-sm" />}
+      {seed && (
+        <div className="mb-1.5">
+          <span className="inline-flex items-center gap-1 rounded bg-accent/10 text-accent text-[9px] font-bold uppercase tracking-[0.06em] px-1.5 py-0.5">
+            ⚑ Seed → {task.seed_target}
+          </span>
+        </div>
+      )}
       <span className="absolute -left-1 top-1/2 -translate-y-1/2 text-mute-2 opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none">
         <GripVertical size={12} />
       </span>

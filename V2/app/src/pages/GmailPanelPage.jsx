@@ -4,7 +4,7 @@ import clsx from 'clsx'
 import { supabase } from '../lib/supabase'
 import AppShell from '../components/editorial/AppShell'
 import { Kicker } from '../components/editorial/atoms'
-import IntakePanel from '../components/connectors/IntakePanel'
+import Conductor from '../components/connectors/Conductor'
 
 function fromName(from) {
   const m = from?.match(/^\s*"?([^"<]+?)"?\s*</)
@@ -20,7 +20,6 @@ export default function GmailPanelPage() {
   const [projects, setProjects] = useState([])
   const [projectId, setProjectId] = useState('')
   const [sending, setSending] = useState({})       // id -> bool (creating intake job)
-  const [activeJobId, setActiveJobId] = useState(null)
 
   useEffect(() => {
     let cancelled = false
@@ -51,20 +50,20 @@ export default function GmailPanelPage() {
     if (body[id] === undefined) fetchBody(id)
   }
 
-  // +Task → capture the email as an intake job and open the panel. The agent
-  // structures it (nudge: "process intake" in CC); the panel renders the result.
+  // +Task → capture the email as a pending intake job. It surfaces in the docked
+  // Conductor's In-flight tab (realtime); the agent structures it ("process intake"
+  // in CC) and it moves to Parked for review + import.
   async function createIntakeJob(m) {
     setSending(s => ({ ...s, [m.id]: true }))
     try {
       const { data: { user } } = await supabase.auth.getUser()
       const text = body[m.id] && body[m.id] !== 'loading' ? body[m.id] : await fetchBody(m.id)
-      const { data: job } = await supabase.from('intake_jobs').insert({
+      await supabase.from('intake_jobs').insert({
         user_id: user.id,
         source: 'gmail',
         payload: { from: m.from, subject: m.subject, date: m.date, body: text || m.snippet || '' },
         status: 'pending',
-      }).select('id').single()
-      if (job) setActiveJobId(job.id)
+      })
     } finally {
       setSending(s => ({ ...s, [m.id]: false }))
     }
@@ -72,7 +71,8 @@ export default function GmailPanelPage() {
 
   return (
     <AppShell active="gmail">
-      <div className="px-7 py-8 md:px-10" style={{ maxWidth: 820 }}>
+      <div className="px-7 py-8 md:px-10 flex items-start gap-8 lg:gap-12">
+        <div className="w-full max-w-[760px] shrink-0">
         <Kicker className="mb-2">CONNECTORS · GMAIL</Kicker>
         <h1 className="text-h1 m-0">Gmail.</h1>
         <p className="text-[12px] text-mute-2 mt-1.5 mb-6">Recent inbox. <span className="font-medium text-ink-2">+ Task</span> hands the email to your agent (say <span className="font-mono">process intake</span> in CC) — it structures tasks you review &amp; import.</p>
@@ -87,12 +87,12 @@ export default function GmailPanelPage() {
         ) : messages.length === 0 ? (
           <p className="text-[13px] text-mute">No messages in the inbox.</p>
         ) : (
-          <div className="flex flex-col rounded-xl border border-line-2 overflow-hidden">
+          <div className="flex flex-col rounded-xl border border-line bg-surf-2 overflow-hidden shadow-sm">
             {messages.map(m => {
               const isOpen = openId === m.id
               return (
                 <div key={m.id} className="border-b border-line-2 last:border-b-0">
-                  <div className={clsx('flex items-start gap-2 px-4 py-3 hover:bg-surf-2 transition-colors', m.unread && 'bg-surf-2/40')}>
+                  <div className={clsx('flex items-start gap-2 px-4 py-3 hover:bg-surf transition-colors', m.unread && 'bg-surf/50')}>
                     <button onClick={() => toggle(m.id)} className="flex-1 min-w-0 text-left">
                       <div className="flex items-center gap-2">
                         {m.unread && <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />}
@@ -123,17 +123,9 @@ export default function GmailPanelPage() {
             })}
           </div>
         )}
+        </div>
+        <Conductor source="gmail" projects={projects} defaultProjectId={projectId} />
       </div>
-
-      {activeJobId && (
-        <IntakePanel
-          jobId={activeJobId}
-          projects={projects}
-          defaultProjectId={projectId}
-          onClose={() => setActiveJobId(null)}
-          onImported={() => {}}
-        />
-      )}
     </AppShell>
   )
 }

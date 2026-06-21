@@ -283,6 +283,9 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
             ) : (
               <div className="flex flex-col gap-1.5">
                 {milestones.map((m, i) => {
+                  // Steps may be plain strings or objects { summary, detail } — render
+                  // safely either way (mirrors get_task); rendering a raw object crashes React.
+                  const label = typeof m === 'string' ? m : (m?.summary ?? '')
                   const done = checkedSteps[i] === true
                   return (
                     <div key={i} className="flex items-start gap-2">
@@ -290,7 +293,7 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
                         ? <CheckSquare size={14} className="text-[#4ade80] shrink-0 mt-0.5" />
                         : <Square size={14} className="text-mute-2 shrink-0 mt-0.5" />}
                       <span className={clsx('text-[12.5px] leading-snug', done ? 'text-mute-2 line-through' : 'text-ink-2')}>
-                        {m}
+                        {label}
                       </span>
                     </div>
                   )

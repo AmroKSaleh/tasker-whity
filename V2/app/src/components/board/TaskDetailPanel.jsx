@@ -359,6 +359,32 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
             {task.text}
           </h2>
 
+          {task.kind === 'seed' && (
+            <div className="rounded-lg border border-dashed border-accent/50 bg-accent/[0.04] px-3.5 py-3">
+              <div className="text-[10px] font-bold uppercase tracking-[0.06em] text-accent mb-1.5">⚑ Seed → {task.seed_target}</div>
+              <p className="text-[12px] text-ink-2 leading-relaxed mb-2">
+                A placeholder, not work to do directly. Resolve it with your agent in Claude Code —{' '}
+                {task.seed_target === 'flow'
+                  ? <>it runs <span className="font-mono">build_new_flow</span> from the pre-brief below.</>
+                  : <>discuss the open questions, then it calls <span className="font-mono">resolve_seed</span> to create the real, placed task.</>}
+              </p>
+              {Array.isArray(task.seed_open_questions) && task.seed_open_questions.length > 0 && (
+                <div>
+                  <div className="text-[9px] font-mono uppercase tracking-widest text-mute-2 mb-1">Open questions</div>
+                  <ul className="flex flex-col gap-1">
+                    {task.seed_open_questions.map((q, i) => (
+                      <li key={i} className="text-[12px] text-ink-2 flex gap-1.5"><span className="text-accent">•</span><span>{q}</span></li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
+          {task.spawned_from_seed_id && (
+            <p className="text-[11px] text-mute-2">↳ created from a resolved seed</p>
+          )}
+
           <Field label="Status">
             <StatusSegmented value={task.status} onChange={(v) => patch({ status: v })} />
           </Field>

@@ -1,15 +1,40 @@
 import { useRef } from 'react'
 import clsx from 'clsx'
 
+// The Foundation — fixed core first (the load-bearing fields every project needs),
+// then extended. Flexible/agent-added keys render separately (see below). Order here
+// mirrors the MCP foundation render + the bootstrap_project interview order.
 export const CONTEXT_FIELDS = [
-  { key: 'goal',               label: 'Goal',              placeholder: 'What is this project trying to achieve?' },
-  { key: 'why',                label: 'Why it matters',    placeholder: 'Why does this project exist?' },
-  { key: 'scope',              label: 'Scope',             placeholder: "What's included — and what isn't?" },
-  { key: 'risks',              label: 'Known risks',       placeholder: 'What could go wrong?' },
-  { key: 'definition_of_done', label: 'Definition of done', placeholder: 'What does success look like?' },
-  { key: 'constraints',        label: 'Constraints',       placeholder: 'Deadlines, budget, team size…' },
-  { key: 'ai_behavior',        label: 'AI working style',  placeholder: 'Flag things proactively, or wait until I ask?' },
+  { key: 'goal',               label: 'Goal',                     placeholder: 'What is this project trying to achieve?' },
+  { key: 'why',                label: 'Why (intent)',             placeholder: 'The real problem behind it — why does this exist?' },
+  { key: 'scope',              label: 'Scope (in / out)',         placeholder: "What's included — and explicitly what isn't?" },
+  { key: 'definition_of_done', label: 'Success looks like',       placeholder: 'The concrete end-state when this is done.' },
+  { key: 'failure',            label: 'Failure looks like',       placeholder: 'Anti-goals — what must this avoid?' },
+  { key: 'quality_bar',        label: 'Quality bar',              placeholder: 'Throwaway prototype, or production-grade?' },
+  { key: 'success_metrics',    label: 'Success metrics',          placeholder: 'How is success measured?' },
+  { key: 'audience',           label: 'Audience',                 placeholder: 'Who is this for?' },
+  { key: 'constraints',        label: 'Constraints',              placeholder: 'Deadlines, budget, stack, platform…' },
+  { key: 'risks',              label: 'Known risks',              placeholder: 'What could go wrong?' },
+  { key: 'ai_behavior',        label: 'AI working style / autonomy', placeholder: 'Decide alone or check with me? Flag proactively?' },
+  { key: 'assumptions',        label: 'Assumptions & open questions', placeholder: 'What was assumed, and what is still unknown?' },
 ]
+
+const KNOWN_KEYS = new Set(CONTEXT_FIELDS.map(f => f.key).concat('done_looks_like'))
+const humanize = k => k.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+
+// Coerce any stored value to readable text — fields may be saved by the agent as a
+// nested object (e.g. scope: { in, out }) or an array; never show "[object Object]".
+function toDisplay(v) {
+  if (v == null) return ''
+  if (Array.isArray(v)) return v.filter(Boolean).join('; ')
+  if (typeof v === 'object') {
+    return Object.entries(v)
+      .filter(([, x]) => x != null && String(x).trim())
+      .map(([k, x]) => `${humanize(k)}: ${Array.isArray(x) ? x.filter(Boolean).join('; ') : x}`)
+      .join('\n')
+  }
+  return String(v)
+}
 
 function AutoTextarea({ value, placeholder, onChange, readOnly }) {
   const ref = useRef(null)
@@ -24,7 +49,7 @@ function AutoTextarea({ value, placeholder, onChange, readOnly }) {
   return (
     <textarea
       ref={ref}
-      value={value || ''}
+      value={toDisplay(value)}
       placeholder={placeholder}
       onChange={handleChange}
       readOnly={readOnly}
@@ -41,6 +66,8 @@ function AutoTextarea({ value, placeholder, onChange, readOnly }) {
 export default function ContextPoints({ points = {}, onChange, readOnly = false }) {
   const filled = CONTEXT_FIELDS.filter(f => points[f.key])
   const empty  = CONTEXT_FIELDS.filter(f => !points[f.key])
+  // Flexible / agent-added keys (per project type) — not part of the fixed schema.
+  const extra  = Object.keys(points).filter(k => !KNOWN_KEYS.has(k) && points[k])
 
   function update(key, value) {
     onChange?.({ ...points, [key]: value || null })
@@ -55,6 +82,18 @@ export default function ContextPoints({ points = {}, onChange, readOnly = false 
           <AutoTextarea
             value={points[key]}
             placeholder={placeholder}
+            onChange={val => update(key, val)}
+            readOnly={readOnly}
+          />
+        </div>
+      ))}
+
+      {/* Flexible / agent-added fields (per project type) */}
+      {extra.map(key => (
+        <div key={key} className="rounded-lg border border-line-2 bg-surf-2 px-3 py-2.5">
+          <div className="font-mono text-[9px] uppercase tracking-widest text-mute mb-1.5">{humanize(key)}</div>
+          <AutoTextarea
+            value={points[key]}
             onChange={val => update(key, val)}
             readOnly={readOnly}
           />

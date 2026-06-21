@@ -243,7 +243,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
     const project = await resolveProject(sb, userId, prefix)
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, review_enabled, review_bar, review_verdict')
+        .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict')
         .eq('project_id', project.id).eq('short_id', shortId).eq('user_id', userId)
         .maybeSingle()
       if (task) return task
@@ -251,7 +251,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
   }
   // Fall back to UUID
   const { data } = await sb.from('tasks')
-    .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, review_enabled, review_bar, review_verdict').eq('id', taskRef).eq('user_id', userId).maybeSingle()
+    .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict').eq('id', taskRef).eq('user_id', userId).maybeSingle()
   return data ?? null
 }
 
@@ -349,6 +349,74 @@ async function getOrCreateBacklog(sb: any, projectId: string): Promise<string> {
   return data.id
 }
 
+// Foundation = the project's grounding, stored in projects.context (TDE-262). Fixed-core
+// fields render first in a stable order; any flexible/extra keys the agent added per
+// project type render after. One renderer, used by get_project (full) and get_task
+// (grounding injection on every task).
+const FOUNDATION_LABELS: Record<string, string> = {
+  goal: 'Goal',
+  why: 'Why (intent)',
+  scope: 'Scope (in / out)',
+  definition_of_done: 'Success looks like',
+  done_looks_like: 'Success looks like',     // legacy alias
+  failure: 'Failure looks like (anti-goals)',
+  quality_bar: 'Quality bar',
+  success_metrics: 'Success metrics',
+  audience: 'Audience',
+  constraints: 'Constraints',
+  risks: 'Risks',
+  ai_behavior: 'AI working style / autonomy',
+  assumptions: 'Assumptions & open questions',
+}
+const FOUNDATION_ORDER = ['goal', 'why', 'scope', 'definition_of_done', 'done_looks_like', 'failure', 'quality_bar', 'success_metrics', 'audience', 'constraints', 'risks', 'ai_behavior', 'assumptions']
+
+function renderFoundation(ctx: any): string[] {
+  if (!ctx || typeof ctx !== 'object') return []
+  const seen = new Set<string>()
+  const out: string[] = []
+  const emit = (key: string) => {
+    if (seen.has(key)) return
+    const val = ctx[key]
+    if (val == null || val === '') return
+    let text: string
+    if (Array.isArray(val)) {
+      text = val.filter(Boolean).join('; ')
+    } else if (typeof val === 'object') {
+      // Nested objects (e.g. scope: { in, out }) — flatten to readable sub-fields
+      // instead of "[object Object]".
+      text = Object.entries(val)
+        .filter(([, v]) => v != null && String(v).trim())
+        .map(([k, v]) => `${k.replace(/_/g, ' ').toUpperCase()}: ${Array.isArray(v) ? v.filter(Boolean).join('; ') : v}`)
+        .join('  ·  ')
+    } else {
+      text = String(val)
+    }
+    if (!text.trim()) return
+    seen.add(key)
+    const label = FOUNDATION_LABELS[key] || key.replace(/_/g, ' ').replace(/\b\w/g, (c: string) => c.toUpperCase())
+    out.push(`${label}: ${text}`)
+  }
+  for (const k of FOUNDATION_ORDER) emit(k)
+  for (const k of Object.keys(ctx)) emit(k)   // flexible / unknown keys, in insertion order
+  return out
+}
+
+// Derive a 2–5 uppercase-letter prefix (the short-ID handle, e.g. WMP-3) from a project
+// name, unique within the user's projects. Returns null if a clean one can't be found.
+async function deriveProjectPrefix(sb: any, userId: string, name: string): Promise<string | null> {
+  const words = String(name || '').toUpperCase().split(/[^A-Z]+/).filter(Boolean)
+  let base = (words.length >= 2 ? words.slice(0, 4).map((w: string) => w[0]).join('') : (words[0] || '').slice(0, 4))
+  if (base.length < 2) base = (base + 'PRJ').slice(0, 3)
+  base = base.slice(0, 5)
+  const { data: rows } = await sb.from('projects').select('prefix').eq('user_id', userId)
+  const taken = new Set((rows || []).map((r: any) => (r.prefix || '').toUpperCase()).filter(Boolean))
+  for (const suffix of ['', 'X', 'Y', 'Z', 'A', 'B', 'C', 'D', 'E', 'F']) {
+    const cand = (base.slice(0, 5 - suffix.length) + suffix)
+    if (cand.length >= 2 && cand.length <= 5 && !taken.has(cand)) return cand
+  }
+  return null
+}
+
 // Returned in the `instructions` field of the initialize response — the one place the
 // MCP can teach the model at CONNECTION time, with no tool call required (clients that
 // support InitializeResult.instructions feed it into the model's context). Keep it tight:
@@ -372,6 +440,7 @@ const ASSISTANT_DIRECTIVES = [
   'When you begin working on a task, the FIRST thing to do is set its status to in_progress. Calling get_task does this automatically; if you start work without calling get_task, set it explicitly via update_task before doing anything else. When the work is genuinely and verifiably complete, mark it done with complete_task; otherwise leave it in_progress.',
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
+  'When the user wants to CREATE / SET UP A NEW PROJECT, call bootstrap_project FIRST (before create_project) to get the Foundation interview playbook — do NOT free-form an empty project. Distill the conversation you just had into a draft Foundation (core: why · scope incl. what is OUT · success · failure · quality bar · honest gaps; plus extras per project type), then run a short dependency-ordered, react-to-a-draft interview to close only the load-bearing gaps, challenging weak/unrealistic input. On ONE ratification, persist via create_project(name, context) and propose the IS. Trash input = trash output: lift the input quality, do not transcribe it.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and call get_task_critique on the producer task to get the clean validator notes, then use AskUserQuestion to present those findings to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
@@ -418,13 +487,33 @@ const TOOLS = [
     },
   },
   {
+    name: 'get_project_foundation',
+    description: 'Read JUST the project Foundation (the grounding produced by bootstrap_project: why · scope · success · failure · quality bar · assumptions + extras) — without the full project/task dump. Cheap way to re-read grounding on demand.',
+    inputSchema: {
+      type: 'object',
+      properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'bootstrap_project',
+    description: 'Start a NEW project the grounded way. Call this FIRST when the user asks to create / set up a project — BEFORE create_project. Returns a Foundation interview playbook: you distill the conversation you just had (and the repo, if any) into a project Foundation — the load-bearing core (why · scope incl. what is OUT · success · failure · quality bar · honest gaps) plus flexible extras per project type — filling what you legitimately can, then running a short, dependency-ordered, react-to-a-draft interview to close ONLY the load-bearing gaps, challenging weak or unrealistic input as you go. On the user\'s OK you persist via create_project(name, context). Do not free-form project creation; trash input = trash output, so your job is to lift input quality, not transcribe it.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        name:   { type: 'string', description: 'Working name (optional — can be settled during the interview).' },
+        intent: { type: 'string', description: 'Optional one-line of what the user said they want, to seed the draft.' },
+      },
+    },
+  },
+  {
     name: 'create_project',
-    description: 'Create a new project. Auto-seeds a baseline Instruction Set (task hygiene + working preferences); after creating, propose 2–4 project-specific IS additions for the user to confirm.',
+    description: 'Create a new project. PREFER bootstrap_project first to ground it with a Foundation distilled from the conversation; use create_project directly only for a deliberately quick/empty project. Pass the ratified Foundation as `context`. Auto-seeds a baseline Instruction Set; after creating, propose 2–4 project-specific IS additions for the user to confirm.',
     inputSchema: {
       type: 'object',
       properties: {
         name: { type: 'string' },
-        context: { type: 'object', description: 'Optional: { goal, why, scope, risks, done_looks_like }' },
+        context: { type: 'object', description: 'The Foundation. Core: { goal, why, scope, definition_of_done, failure, quality_bar, assumptions }. Extended: { audience, success_metrics, constraints, risks, ai_behavior }. Plus any flexible keys that fit the project type.' },
       },
       required: ['name'],
     },
@@ -516,18 +605,45 @@ const TOOLS = [
   },
   {
     name: 'create_task',
-    description: 'Create a single task. For a multi-step process toward a goal — where steps hand off to each other and need quality checks between them — do NOT create tasks ad hoc; use build_new_flow instead.',
+    description: 'Create a single task. For a multi-step process toward a goal — where steps hand off to each other and need quality checks between them — do NOT create tasks ad hoc; use build_new_flow instead. To create a SEED (a placeholder whose deliverable is another artifact, for work that is needed but underspecified, or a flow worth building later), pass kind:"seed" with seed_target and open_questions.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string' },
         section_id: { type: 'string', description: 'Optional. Task is ungrouped if omitted.' },
         text:       { type: 'string', description: 'Task title' },
-        detail:     { type: 'string', description: 'Optional context or description' },
+        detail:     { type: 'string', description: 'Optional context or description. For a seed: the rough subject + why it is needed (the pre-brief).' },
         priority:   { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
         due_date:   { type: 'string', description: 'ISO date YYYY-MM-DD (optional)' },
+        kind:       { type: 'string', enum: ['normal', 'seed'], description: 'Default "normal". "seed" = a placeholder resolved later into a real task or flow.' },
+        seed_target:    { type: 'string', enum: ['task', 'flow'], description: 'Seeds only: what this resolves into — a concrete task (resolve_seed) or a flow (build_new_flow).' },
+        open_questions: { type: 'array', items: { type: 'string' }, description: 'Seeds only: the SPECIFIC gaps blocking specification, so resolution is a short targeted interview.' },
+        milestones:     { type: 'array', items: { type: 'string' }, description: 'Optional ordered milestone texts to add to the task in one call (no separate add_milestone needed).' },
       },
       required: ['project_id', 'text'],
+    },
+  },
+  {
+    name: 'resolve_seed',
+    description: 'Resolve a CONTEXT SEED (seed_target "task") into a real, placed task — AFTER discussing its open questions with the user. Atomically: creates the concrete task from task_spec, places it, marks the seed done, and links the new task back to the seed (provenance). PASS task_spec.section_id with the resolved task\'s REAL home — the resolved task must NOT stay in the "Needs Context" staging section (if omitted it lands in Backlog, not the seed\'s section). For FLOW seeds, do NOT use this — run build_new_flow with the seed pre-brief instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        seed_id: { type: 'string', description: 'The seed task to resolve (UUID or short ID).' },
+        task_spec: {
+          type: 'object',
+          description: 'The resolved concrete task.',
+          properties: {
+            text:       { type: 'string', description: 'Task title.' },
+            detail:     { type: 'string', description: 'Resolved context/description.' },
+            priority:   { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
+            section_id: { type: 'string', description: 'Where it belongs (UUID). Defaults to the seed\'s section if omitted.' },
+            milestones: { type: 'array', items: { type: 'string' }, description: 'Optional ordered milestones.' },
+          },
+          required: ['text'],
+        },
+      },
+      required: ['seed_id', 'task_spec'],
     },
   },
   {
@@ -1625,27 +1741,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         sb.from('sections').select('*').eq('project_id', project.id).order('sort_order'),
         sb.from('tasks').select('*').eq('project_id', project.id).order('sort_order'),
       ])
-      const ctx = project.context ?? {}
+      const foundationLines = renderFoundation(project.context)
       const lines: string[] = [
         `# ${project.name}`,
         `prefix: ${project.prefix} | slug: ${project.slug} | id: ${project.id}`,
         '',
-        '## Context',
-        ctx.goal            ? `Goal: ${ctx.goal}`                     : null,
-        ctx.why             ? `Why: ${ctx.why}`                       : null,
-        ctx.scope           ? `Scope: ${ctx.scope}`                   : null,
-        ctx.risks           ? `Risks: ${ctx.risks}`                   : null,
-        ctx.done_looks_like ? `Done looks like: ${ctx.done_looks_like}` : null,
+        '## Foundation',
+        ...(foundationLines.length ? foundationLines : ['(no Foundation set — run bootstrap_project to ground it)']),
         '',
-      ].filter((l): l is string => l !== null)
+      ]
 
       for (const s of (sections ?? [])) {
         lines.push(`## Section: ${s.name}  (id: ${s.id})`)
         const sts = (tasks ?? []).filter((t: any) => t.section_id === s.id)
         if (!sts.length) { lines.push('(empty)'); lines.push(''); continue }
         for (const t of sts) {
-          const badges = [t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
-          lines.push(`- [id: ${t.id}] ${t.text}  (${badges})`)
+          const sid = (project.prefix && t.short_id != null) ? `${project.prefix}-${t.short_id}` : t.id
+          const badges = [t.kind === 'seed' ? `SEED→${t.seed_target}` : null, t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
+          lines.push(`- [${sid}] ${t.text}  (${badges})`)
           if (t.detail) lines.push(`  Notes: ${t.detail}`)
         }
         lines.push('')
@@ -1654,20 +1767,97 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (ungrouped.length) {
         lines.push('## Ungrouped Tasks')
         for (const t of ungrouped) {
-          const badges = [t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
-          lines.push(`- [id: ${t.id}] ${t.text}  (${badges})`)
+          const sid = (project.prefix && t.short_id != null) ? `${project.prefix}-${t.short_id}` : t.id
+          const badges = [t.kind === 'seed' ? `SEED→${t.seed_target}` : null, t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
+          lines.push(`- [${sid}] ${t.text}  (${badges})`)
           if (t.detail) lines.push(`  Notes: ${t.detail}`)
         }
       }
       return lines.join('\n')
     }
 
+    case 'bootstrap_project': {
+      return JSON.stringify({
+        status: 'run_foundation_interview',
+        name: args.name || null,
+        instruction: 'You are creating a NEW project WITH the user. The grounding source is the conversation you JUST had with them (plus the repo, if one exists) — distill it; do NOT make the user re-supply what they already told you. Run the Foundation interview below YOURSELF using your interactive question tool (AskUserQuestion). Persist ONLY after the user ratifies the whole Foundation. Remember: trash input = trash output — your job is to LIFT the input quality (challenge, fill gaps, bring expertise), not to transcribe.',
+        principle: 'The user is the DECISION-MAKER, not the knowledge source. You are the expert in the room. People also critique far better than they create — so show drafts to react to, never blank-page asks. And nobody (not even you) can front-load every unknown — so the Foundation is a first draft of the truth, marked revisable, deepened as work exposes what was missing.',
+        foundation_schema: {
+          note: 'Persist as the project `context` object via create_project. Fixed CORE is required for every project; EXTENDED + FLEXIBLE are added when they fit the project type (hybrid: fixed core + flexible rest).',
+          core_required: {
+            goal: 'The outcome the project achieves.',
+            why: 'The real problem/need behind it (intent) — what lets you make aligned tradeoffs later. ONLY the user knows this; never fabricate it.',
+            scope: 'What is IN and, explicitly, what is OUT. The out-of-scope is half the value (stops gold-plating + drift).',
+            definition_of_done: 'What success looks like — a concrete end-state.',
+            failure: 'What failure looks like / anti-goals — what to AVOID. Most-skipped, high-leverage.',
+            quality_bar: 'Throwaway prototype vs production-grade. Changes effort allocation more than almost anything; nobody states it unprompted.',
+            assumptions: 'What you INFERRED/ASSUMED (mark the load-bearing ones) + the open load-bearing unknowns. This keeps the Foundation honest instead of falsely certain.',
+          },
+          extended: {
+            audience: 'Who the project is FOR (distinct from the user).',
+            success_metrics: 'The measurable version of success — feeds task contracts / the judge.',
+            constraints: 'Hard limits: budget, timeline, stack, platform, legal/brand.',
+            risks: 'What could go wrong.',
+            ai_behavior: 'Autonomy: what you decide alone vs escalate; working style.',
+          },
+          flexible: 'Add any extra context keys that fit THIS project type (content project → voice/themes; SaaS → core features; research → hypotheses/methods). Core is always present; the rest flexes.',
+        },
+        grill_me_rules: [
+          'CONVERSATION-FIRST: draft every field you can from the discussion you just had (+ repo if present). Never ask what you already have.',
+          'REACT, DON\'T INTERROGATE: each question presents YOUR draft of a field for confirm/correct ("I\'d define success as X — right, or am I off?"), never a blank ask.',
+          'DEPENDENCY-ORDERED, BATCH THE INDEPENDENT: walk roughly why/intent → scope (esp. OUT) → success → failure → metrics/quality/constraints. Ask one-at-a-time ONLY where an answer reshapes the next question; BATCH genuinely independent fields into a single AskUserQuestion call (it takes up to 4) — e.g. platform + quality bar together — so a simple project is not 7 sequential round-trips. Each option set carries a (Recommended) default EXCEPT user-only fields (next rule).',
+          'USER-ONLY FIELDS — DON\'T ANCHOR: for fields only the user can know and where you have no expert basis (above all the "why"/intent), do NOT push a (Recommended). Ask in plain prose first and formalize after, or present options with no recommended pick — so you are not anchoring the user to your guesses on the one field you should least lead.',
+          'CHALLENGE IN-FLIGHT: push back the moment input is vague, contradictory, or an unrealistic timeline/ambition appears — before moving on. After any MULTI-SELECT scope question, run a COHERENCE PASS: scan for a picked item that contradicts the goal or another exclusion (e.g. a feature that adds recurring effort against a "save time" goal) and challenge it before locking. You are the expert, not a stenographer.',
+          'ONLY LOAD-BEARING GAPS: skip anything you can fill yourself or that does not change execution. Stop once the fixed core is solid — adaptive depth, not a fixed questionnaire (sometimes 3 questions, sometimes 8).',
+          'MARK PROVENANCE: separate what you inferred/assumed from what only the user can know; force engagement on the latter. Never present an invented business/market fact as settled.',
+        ],
+        playbook: [
+          '1. DRAFT FROM THE CONVERSATION: build a first-pass Foundation (core + any fitting extras) from the discussion + repo. Mark assumptions and the load-bearing unknowns explicitly.',
+          '2. RUN THE REACT-INTERVIEW: walk the dependency order, presenting your draft of each gap to confirm/correct and challenging weak input. One-at-a-time only where answers chain; batch independent fields into one call. Cover the fixed core fully; add flexible fields where the project type warrants. Keep it short — only the gaps.',
+          '3. RATIFY: show the WHOLE Foundation (core + extras, with assumptions/unknowns flagged) for ONE confirmation pass.',
+          '4. PERSIST then TAILOR IS (see persistence).',
+          '5. POPULATE THE BOARD (opt-in): offer to turn the Foundation into a starting board — propose it in ONE ratify pass, sorted by readiness (see `population`), and create only on the user\'s OK. This is the payoff: a project you can start working, not a grounded shell.',
+          '6. KEEP IT LIVING: when later output is weak, attribute it to thin grounding and offer to deepen the Foundation — that is how the user learns input quality drives output quality.',
+        ],
+        population: {
+          when: 'After the Foundation is persisted + IS tailored. OPT-IN — ask first; propose, then ONE ratify pass; never silent auto-spew, never a mega-ceremony.',
+          buckets: [
+            'CONCRETE TASK — path is clear from the Foundation: create_task in its real section now.',
+            'FLOW SEED — a multi-step, contract-linked process (needs build_new_flow\'s contract interview, a flat task can\'t carry the I/O gates): create_task(kind:"seed", seed_target:"flow", open_questions:[...]) in a "Suggested Flows" section. detail = the flow pre-brief (goal, rough steps, intended I/O contracts, why).',
+            'CONTEXT SEED — needed but underspecified: create_task(kind:"seed", seed_target:"task", open_questions:[...]) in a "Needs Context" section, instead of fabricating fake precision. Resolved later via resolve_seed once the user closes the open questions.',
+            'KB FROM DECISIONS — capture the real decisions made during the interview ("chose X over Y because Z") via create_kb_entry. Decisions, not guesses.',
+          ],
+          sections: 'Provision the real HOME sections the work implies from the Foundation BEFORE seeding — e.g. if growth/marketing is a live risk or a seed area, create a "Growth/Marketing" section so a resolved growth seed has somewhere to land. Don\'t leave resolved work stuck in staging sections. Use create_task with milestones:[...] inline (no separate add_milestone calls).',
+          restraint: 'Be SPARING with seeds — most near-term work should be concrete; avoid a seed graveyard. Do NOT manufacture milestone-level precision for work nobody understands yet. "Suggested Flows" and "Needs Context" are STAGING sections (seeds only); resolved seeds move to a real home section, never stay there. Both are distinct from the auto-created Backlog (Backlog = not-yet-prioritized).',
+        },
+        persistence: {
+          when: 'ONLY after the user ratifies the Foundation.',
+          steps: [
+            'create_project(name, context) — pass the whole ratified Foundation as the context object (core + extended + any flexible keys).',
+            'A baseline Instruction Set is auto-seeded. Then propose 2–4 project-specific IS additions (conventions, output/working style, autonomy) drawn from the Foundation; add confirmed ones via create_is_entry (universal:true for rules that must hold inside flows).',
+            'If load-bearing unknowns remain, keep them in context.assumptions and tell the user what is still open.',
+          ],
+        },
+      })
+    }
+
+    case 'get_project_foundation': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const foundationLines = renderFoundation(project.context)
+      if (!foundationLines.length) return `"${project.name}" has no Foundation yet. Run bootstrap_project to ground it (intent, scope, success/failure, quality bar).`
+      return [`# Foundation — ${project.name}`, '', ...foundationLines.map(l => `- ${l}`)].join('\n')
+    }
+
     case 'create_project': {
       const { name, context } = args
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
         + '-' + Date.now().toString(36)
+      // Auto-assign a short-ID handle (prefix) so tasks get usable IDs (e.g. WMP-3)
+      // from the start. Caller can rename it later via update_project.
+      const prefix = await deriveProjectPrefix(sb, userId, name)
       const { data, error } = await sb.from('projects')
-        .insert({ name, slug, user_id: userId, context: context ?? {} })
+        .insert({ name, slug, user_id: userId, context: context ?? {}, ...(prefix ? { prefix } : {}) })
         .select().single()
       if (error) throw new Error(error.message)
       await getOrCreateBacklog(sb, data.id)
@@ -1675,9 +1865,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       // A baseline Instruction Set (task hygiene + working preferences) is seeded
       // automatically by an AFTER INSERT trigger on `projects` (TDE-193), so it applies
       // to every creation path. Here we just nudge the assistant to tailor it.
-      return `Created project "${name}"\nslug: ${data.slug}\nid:   ${data.id}` +
+      return `Created project "${name}"\nprefix: ${data.prefix || '(none — set one via update_project)'} | slug: ${data.slug} | id: ${data.id}` +
         `\n\nA baseline Instruction Set (task hygiene + working preferences) was applied automatically.` +
-        `\n\nNEXT — tailor it: from what you know about this project (stack, language, conventions, workflow, output/commit style), propose 2–4 specific IS additions and ask the user to confirm before adding them via create_is_entry. Set universal:true for rules that must hold even inside flows (e.g. code style, deploy rules). Don't assume — propose, then add only what's confirmed.`
+        `\n\nNEXT — tailor it: from what you know about this project (stack, language, conventions, workflow, output/commit style), propose 2–4 specific IS additions and ask the user to confirm before adding them via create_is_entry. Set universal:true for rules that must hold even inside flows (e.g. code style, deploy rules). Don't assume — propose, then add only what's confirmed.` +
+        `\n\nTHEN, to go from grounding to action, offer to build the first concrete chunk of work as a flow (build_new_flow).`
     }
 
     case 'update_project_context': {
@@ -1805,9 +1996,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case 'create_task': {
-      const { project_id, section_id, text, detail, priority, due_date } = args
+      const { project_id, section_id, text, detail, priority, due_date, kind, seed_target, open_questions, milestones } = args
       const project = await resolveProject(sb, userId, project_id)
       if (!project) return `Project "${project_id}" not found.`
+      const isSeed = kind === 'seed'
+      if (isSeed && !['task', 'flow'].includes(seed_target)) return 'A seed requires seed_target: "task" or "flow".'
       const resolvedSectionId = section_id ?? await getOrCreateBacklog(sb, project.id)
       const siblingQuery = sb.from('tasks').select('sort_order').eq('project_id', project.id).eq('section_id', resolvedSectionId)
       const { data: lastSibling } = await siblingQuery.order('sort_order', { ascending: false }).limit(1).maybeSingle()
@@ -1822,9 +2015,51 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         due_date: due_date ?? null,
         status: 'pending',
         sort_order: sortOrder,
+        kind: isSeed ? 'seed' : 'normal',
+        seed_target: isSeed ? seed_target : null,
+        seed_open_questions: isSeed && Array.isArray(open_questions) ? open_questions : null,
       }).select().single()
       if (error) throw new Error(error.message)
+      for (const m of (Array.isArray(milestones) ? milestones : []).map((x: string) => String(x).trim()).filter(Boolean)) {
+        await sb.rpc('append_milestone', { p_task_id: data.id, p_user_id: userId, p_text: m })
+      }
+      if (isSeed) {
+        return `Created ${seed_target} SEED "${text}"\nid: ${data.id}\nResolve it later: discuss the open questions with the user, then ${seed_target === 'flow' ? 'build_new_flow with the pre-brief' : 'resolve_seed(seed_id, task_spec)'} — do NOT work it as a normal task.`
+      }
       return `Created task "${text}"\nid: ${data.id}`
+    }
+
+    case 'resolve_seed': {
+      const seed = await resolveTask(sb, userId, args.seed_id)
+      if (!seed) return `Seed "${args.seed_id}" not found.`
+      if (seed.kind !== 'seed') return `Task "${args.seed_id}" is not a seed.`
+      if (seed.seed_target === 'flow') return `This is a FLOW seed — resolve it by running build_new_flow with its pre-brief, not resolve_seed.`
+      const spec = args.task_spec || {}
+      if (!spec.text) return 'task_spec.text is required.'
+      // Default to Backlog, NOT the seed's section — a resolved task must not stay in
+      // the "Needs Context" staging section it was seeded in.
+      const sectionId = spec.section_id || await getOrCreateBacklog(sb, seed.project_id)
+      const { data: lastSibling } = await sb.from('tasks').select('sort_order')
+        .eq('project_id', seed.project_id).eq('section_id', sectionId)
+        .order('sort_order', { ascending: false }).limit(1).maybeSingle()
+      const sortOrder = (lastSibling?.sort_order ?? -1) + 1
+      const { data: newTask, error } = await sb.from('tasks').insert({
+        project_id: seed.project_id,
+        section_id: sectionId,
+        user_id: userId,
+        text: spec.text,
+        detail: spec.detail ?? null,
+        priority: spec.priority ?? 'medium',
+        status: 'pending',
+        sort_order: sortOrder,
+        spawned_from_seed_id: seed.id,
+      }).select().single()
+      if (error) throw new Error(error.message)
+      for (const m of (Array.isArray(spec.milestones) ? spec.milestones : []).map((x: string) => String(x).trim()).filter(Boolean)) {
+        await sb.rpc('append_milestone', { p_task_id: newTask.id, p_user_id: userId, p_text: m })
+      }
+      await sb.from('tasks').update({ status: 'done' }).eq('id', seed.id)
+      return `Resolved seed "${seed.text}" → created task "${spec.text}" (id: ${newTask.id}). Seed closed and linked (provenance).`
     }
 
     case 'update_task': {
@@ -1987,6 +2222,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `ID: ${shortRef} | Project: ${full.project?.name ?? '—'} | Section: ${full.section?.name ?? 'Ungrouped'}`,
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
       ]
+      // Seeds: make it loud — this is a placeholder to RESOLVE, not work to do.
+      if (full.kind === 'seed') {
+        const q = Array.isArray(full.seed_open_questions) ? full.seed_open_questions : []
+        lines.push(`\n⚑ THIS IS A SEED — it resolves into a ${full.seed_target || 'task'}. Do NOT do this work directly.`)
+        lines.push(full.seed_target === 'flow'
+          ? 'To resolve: discuss the open questions with the user to firm up the flow, then run build_new_flow using the pre-brief in Context below.'
+          : 'To resolve: discuss the open questions with the user, then call resolve_seed(seed_id, task_spec) — it creates the real, placed task and closes this seed.')
+        if (q.length) { lines.push('Open questions to resolve:'); for (const x of q) lines.push(`  • ${x}`) }
+      }
       if (full.detail) lines.push(`\nContext:\n${full.detail}`)
       const steps: any[] = disc?.steps ?? []
       const checked: boolean[] = disc?.checked_steps ?? []
@@ -2009,6 +2253,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           lines.push(`  ${r.status === 'pass' ? '✓' : '✗'} ${label}${extra}`)
         }
         if (v.critique) lines.push(`  Critique:\n${String(v.critique).split('\n').map((l: string) => '    ' + l).join('\n')}`)
+      }
+
+      // Inject the project Foundation (TDE-262): every task is anchored to intent,
+      // scope, success/failure and the quality bar — not just the IS/KB. This is the
+      // grounding the bootstrap_project interview produces.
+      if (full.project_id) {
+        const { data: proj } = await sb.from('projects').select('context').eq('id', full.project_id).maybeSingle()
+        const foundationLines = renderFoundation(proj?.context)
+        if (foundationLines.length) {
+          lines.push('\n---')
+          lines.push('# Project Foundation')
+          for (const l of foundationLines) lines.push(`- ${l}`)
+        }
       }
 
       // Inject the governing Instruction Set (TDE-233 flow-level IS).
@@ -3760,14 +4017,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const tasks = Array.isArray(args.tasks) ? args.tasks : []
       const result = args.error ? null : { analysis: args.analysis || '', tasks }
       await sb.from('intake_jobs').update({
-        status: args.error ? 'error' : 'done',
+        status: args.error ? 'error' : 'ready',   // 'ready' = parked in the Conductor, awaiting human placement
         result,
         error: args.error || null,
         updated_at: new Date().toISOString(),
       }).eq('id', job.id)
       return args.error
         ? `Marked intake job ${String(args.job_id).slice(0, 8)} as error.`
-        : `Submitted ${tasks.length} proposed task${tasks.length !== 1 ? 's' : ''} for job ${String(args.job_id).slice(0, 8)} — now rendering in the web app for the human to review + import.`
+        : `Submitted ${tasks.length} proposed task${tasks.length !== 1 ? 's' : ''} for job ${String(args.job_id).slice(0, 8)} — now parked in the web app Conductor for the human to review + import.`
     }
 
     case 'enable_task_review': {
