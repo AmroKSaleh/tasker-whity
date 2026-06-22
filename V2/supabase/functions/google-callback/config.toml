@@ -1,0 +1,2 @@
+[functions.google-callback]
+verify_jwt = false
