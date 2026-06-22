@@ -441,7 +441,7 @@ const ASSISTANT_DIRECTIVES = [
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'NEVER be sycophantic. When you have a different or better view on a design, plan, scope, or contract, push back and argue it — challenge vague, contradictory, unrealistic, or over-scoped input. Pushback exists to improve the input and the result, not disagreement for its own sake; when the user is right, say so plainly and proceed. Applies everywhere: bootstrap_project, build_new_flow, reviews, planning.',
-  'When the user wants to CREATE / SET UP A NEW PROJECT, call bootstrap_project FIRST (before create_project) to get the Foundation interview playbook — do NOT free-form an empty project. Distill the conversation you just had into a draft Foundation (core: why · scope incl. what is OUT · success · failure · quality bar · honest gaps; plus extras per project type), then run a short dependency-ordered, react-to-a-draft interview to close only the load-bearing gaps, challenging weak/unrealistic input. On ONE ratification, persist via create_project(name, context) and propose the IS. Trash input = trash output: lift the input quality, do not transcribe it.',
+  'When the user wants to CREATE / SET UP A NEW PROJECT, call bootstrap_project FIRST (before create_project) and FOLLOW THE PHASES IT RETURNS — do NOT run your own multiple-choice quiz. The interview is THREE PHASES: (1) ELICIT in open PROSE — plain free-text questions about vision / why / taste / fears, NOT AskUserQuestion tiles; (2) DRAFT the Foundation brief, show it, then probe its gaps (tiles OK only for genuine expertise forks like platform/scope); (3) BLESS — show the full written brief for line-level edit, and persist via create_project ONLY after the user blesses it. Challenge weak / contradictory / over-scoped input at every phase — never sycophantic (e.g. if they pick two big features for v1, question it, don\'t just accept it). Then populate the board INCLUDING seeds for the deferred scope.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and call get_task_critique on the producer task to get the clean validator notes, then use AskUserQuestion to present those findings to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
@@ -498,13 +498,28 @@ const TOOLS = [
   },
   {
     name: 'bootstrap_project',
-    description: 'Start a NEW project the grounded way. Call this FIRST when the user asks to create / set up a project — BEFORE create_project. Returns a Foundation interview playbook: you distill the conversation you just had (and the repo, if any) into a project Foundation — the load-bearing core (why · scope incl. what is OUT · success · failure · quality bar · honest gaps) plus flexible extras per project type — filling what you legitimately can, then running a short, dependency-ordered, react-to-a-draft interview to close ONLY the load-bearing gaps, challenging weak or unrealistic input as you go. On the user\'s OK you persist via create_project(name, context). Do not free-form project creation; trash input = trash output, so your job is to lift input quality, not transcribe it.',
+    description: 'STEP 1 of a GATED interview for creating a NEW project. Call this FIRST when the user asks to create / set up a project — do NOT use create_project for that. It returns ONLY Phase 1 (open-prose elicitation) + a draft_id; the later phases are released one at a time by bootstrap_advance, so you cannot skip ahead or run a multiple-choice quiz. The project is created only from a user-BLESSED draft. trash in = trash out — lift input quality, never transcribe.',
     inputSchema: {
       type: 'object',
       properties: {
         name:   { type: 'string', description: 'Working name (optional — can be settled during the interview).' },
         intent: { type: 'string', description: 'Optional one-line of what the user said they want, to seed the draft.' },
       },
+    },
+  },
+  {
+    name: 'bootstrap_advance',
+    description: 'Advance the gated bootstrap interview one phase at a time (after bootstrap_project). Each call returns ONLY the next phase. Steps in order: "elicited" (after asking the open Phase-1 questions; submit the user\'s free-text answers) → "drafted" (after drafting + probing the Foundation brief; submit the brief) → "blessed" (after the user blesses the brief line-by-line; submit the final brief — THIS creates the project). Steps are enforced; you cannot jump ahead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        draft_id: { type: 'string', description: 'The draft id from bootstrap_project.' },
+        step:     { type: 'string', enum: ['elicited', 'drafted', 'blessed'], description: 'Which phase you are completing.' },
+        answers:  { type: 'string', description: 'Step "elicited": the user\'s VERBATIM free-text answers to your open Phase-1 questions.' },
+        brief:    { type: 'object', description: 'Steps "drafted"/"blessed": the Foundation brief object (core + extended + flexible keys — the project context shape).' },
+        name:     { type: 'string', description: 'Step "blessed": the final project name.' },
+      },
+      required: ['draft_id', 'step'],
     },
   },
   {
@@ -1778,71 +1793,105 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case 'bootstrap_project': {
+      const { data: draft, error } = await sb.from('project_drafts')
+        .insert({ user_id: userId, name: args.name || null, intent: args.intent || null, status: 'eliciting' })
+        .select('id').single()
+      if (error) throw new Error(error.message)
       return JSON.stringify({
-        status: 'run_foundation_interview',
-        name: args.name || null,
-        hard_rule: 'NEVER be sycophantic. Challenge vague, contradictory, unrealistic, or thin input — every time, at every phase. Pushback exists to improve the input and the result, NOT to disagree for its own sake; when the user is right, say so plainly and move on. Accepting weak input to be agreeable is a failure of this tool.',
-        instruction: 'You are creating a NEW project WITH the user via an INTERVIEW that ends in a written Foundation brief the user reviews and BLESSES — NOT a multiple-choice quiz, and NOT a black box you fill behind their back. Run it yourself (see `interview`). Persist ONLY after the user blesses the brief. trash in = trash out: your job is to LIFT input quality — elicit in their own words, challenge, synthesize, fill gaps with expertise — never to transcribe.',
-        principle: 'The user is the DECISION-MAKER and the source of what only they can know (vision, the real why, taste, real constraints); YOU are the expert who shapes that raw input into something sharp. Free-text input from the user is GOOD and wanted — the skill is asking WELL and PROCESSING well (synthesize + challenge), not avoiding it. People critique better than they create, so turn their words into a DRAFT they can red-pen — a real written artifact, never option tiles. The Foundation is a first draft of the truth, revisable as work exposes the unknown.',
-        foundation_schema: {
-          note: 'Persist as the project `context` object via create_project. Fixed CORE is required for every project; EXTENDED + FLEXIBLE are added when they fit the project type (hybrid: fixed core + flexible rest).',
+        status: 'foundation_interview_started',
+        draft_id: draft.id,
+        phase: 1,
+        hard_rule: 'NEVER be sycophantic. Challenge vague, contradictory, unrealistic, or thin input — every time, at every phase. Pushback exists to improve the input and the result, NOT to disagree for its own sake; when the user is right, say so and move on. Accepting weak input to be agreeable is a failure of this tool.',
+        do_not: 'Do NOT open with AskUserQuestion. Do NOT draft the brief yet. Do NOT call create_project (it is a quick/empty escape hatch, not this path). The later phases unlock one at a time via bootstrap_advance — you cannot skip ahead.',
+        phase_1_elicit: 'PHASE 1 — ELICIT, in the user\'s OWN WORDS, in plain PROSE (just ask in chat). If they have not already described the project, ask them to. Then a few genuinely OPEN follow-ups for what ONLY they know: the real why, the vision, what a great outcome FEELS like, their ambition, what they fear / what would make it suck. Listen, reflect back, dig. Tiles cannot capture vision or taste — using AskUserQuestion for elicitation is the known failure of this tool.',
+        principle: 'The user is the DECISION-MAKER and the source of what only they can know; YOU are the expert who shapes that raw input into something sharp. Free-text input is GOOD and wanted — the skill is asking WELL and PROCESSING well (synthesize + challenge), not avoiding it. People critique better than they create — so later you turn their words into a DRAFT they red-pen, never option tiles.',
+        foundation_target: {
+          note: 'What you are building toward across the phases — persisted as the project `context`. Fixed CORE required; EXTENDED + FLEXIBLE as they fit the project type.',
           core_required: {
             goal: 'The outcome the project achieves.',
-            why: 'The real problem/need behind it (intent) — what lets you make aligned tradeoffs later. ONLY the user knows this; never fabricate it.',
-            scope: 'What is IN and, explicitly, what is OUT. The out-of-scope is half the value (stops gold-plating + drift).',
+            why: 'The real problem/need behind it (intent). ONLY the user knows this; never fabricate it.',
+            scope: 'What is IN and, explicitly, what is OUT. The out-of-scope is half the value.',
             definition_of_done: 'What success looks like — a concrete end-state.',
-            failure: 'What failure looks like / anti-goals — what to AVOID. Most-skipped, high-leverage.',
-            quality_bar: 'Throwaway prototype vs production-grade. Changes effort allocation more than almost anything; nobody states it unprompted.',
-            assumptions: 'What you INFERRED/ASSUMED (mark the load-bearing ones) + the open load-bearing unknowns. This keeps the Foundation honest instead of falsely certain.',
+            failure: 'What failure looks like / anti-goals. Most-skipped, high-leverage.',
+            quality_bar: 'Throwaway prototype vs production-grade. Nobody states it unprompted.',
+            assumptions: 'What you inferred/assumed (mark load-bearing) + open load-bearing unknowns.',
           },
-          extended: {
-            audience: 'Who the project is FOR (distinct from the user).',
-            success_metrics: 'The measurable version of success — feeds task contracts / the judge.',
-            constraints: 'Hard limits: budget, timeline, stack, platform, legal/brand.',
-            risks: 'What could go wrong.',
-            ai_behavior: 'Autonomy: what you decide alone vs escalate; working style.',
-          },
-          flexible: 'Add any extra context keys that fit THIS project type (content project → voice/themes; SaaS → core features; research → hypotheses/methods). Core is always present; the rest flexes.',
-          one_brief_many_lenses: 'The Foundation is ONE written brief, scaled to the project — NOT a suite of formal documents. But it must COVER the distinct information lenses the classic requirements docs each capture: business rationale (BRD: why/goal), market + audience (MRD), functional behavior (FRD/PRD: scope/done), technical constraints (SRS: constraints/stack), and scope + deliverables (SOW: scope in/out). Use that as the checklist of what to cover, not as separate outputs.',
+          extended: 'audience, success_metrics, constraints, risks, ai_behavior — add when relevant.',
+          flexible: 'Extra keys that fit the project type (content → voice/themes; SaaS → core features; research → hypotheses).',
+          one_brief_many_lenses: 'ONE written brief, scaled — not a doc suite — but covering the lenses BRD (why/goal) · MRD (market/audience) · FRD/PRD (scope/done) · SRS (constraints/stack) · SOW (scope in/out).',
         },
-        sequence: [
-          '1. ELICIT — phase 1 (open, in their words).',
-          '2. DRAFT + PROBE — phase 2 (draft the brief now, then interrogate its gaps).',
-          '3. BLESS — phase 3 (line-level confirm/edit of the written brief).',
-          '4. PERSIST + tailor IS (see persistence).',
-          '5. POPULATE the board incl. seeds for deferred scope (see population).',
-          '6. KEEP IT LIVING — when later output is weak, attribute it to thin grounding and offer to deepen the brief.',
-        ],
-        interview: {
-          shape: 'Three phases, broad → narrow → bless. Depth is PROPORTIONAL to the project and to what is still unknown — skip anything already answered, stop when the load-bearing fields are solid. NOT a fixed question count (could be 3 questions, could be 10).',
-          phase_1_elicit: 'OPEN, in the user\'s OWN WORDS — plain conversational prose, NOT AskUserQuestion tiles. If they have not already described the project, ask them to. Then a few genuinely open follow-ups for what ONLY they know: the real why, the vision, what a great outcome FEELS like, their ambition, what they fear/what would make it suck. Listen, reflect back, dig. Do NOT reduce these to multiple choice — tiles cannot capture vision or taste.',
-          phase_2_draft_and_probe: 'DRAFT THE BRIEF NOW, visibly, from phase 1 (+ repo if any) — show the user real text, early. Then ask your remaining questions as INTERROGATIONS OF YOUR OWN DRAFT, anchored to that text: "I wrote X for scope — what is missing or wrong?", "Y and Z contradict — which wins?", "I assumed Q — confirm?". For genuine expertise FORKS (platform, build approach, scope IN/OUT) THIS is where AskUserQuestion tiles with a (Recommended) default belong. Drafting early means the user sees and steers the artifact BEFORE anything is built on it — the failure mode to avoid is asking blind then revealing a finished doc at the very end.',
-          phase_3_bless: 'Present the FULL written Foundation brief (all info-lenses; assumptions + open unknowns flagged) for line-level CONFIRM/EDIT — never a one-line "save it?" toggle. Invite specific corrections; revise and re-show. Bound it to ~1–2 revise passes, then bless. Persist ONLY on bless.',
-          elicit_vs_select: 'OPEN PROSE questions to ELICIT what only the user knows (vision/why/taste/fears). AskUserQuestion TILES only to DECIDE between options you can credibly generate (expertise forks), each with a (Recommended) default EXCEPT user-only fields (never anchor the "why"). Forcing elicitation into tiles was the old mistake — do not repeat it.',
-          challenge: 'Across ALL phases, honor the hard_rule: never sycophantic. Push back the instant input is vague, contradictory, or an unrealistic timeline/ambition appears — before moving on. After any MULTI-SELECT scope question, run a COHERENCE PASS: scan for a pick that contradicts the goal or another exclusion and challenge it before locking. Mark provenance — separate what you inferred/assumed from what only the user can know, and never present an invented business/market fact as settled.',
-        },
-        population: {
-          when: 'After the Foundation is persisted + IS tailored. OPT-IN — ask first; propose, then ONE ratify pass; never silent auto-spew, never a mega-ceremony.',
-          mandatory: 'Populate is NOT finished when the core/near-term work is created. You MUST ALSO seed the DEFERRED scope — the fast-follows, the explicit scope_out items, and the undecided/open threads from the Foundation. THIS HOLDS EVEN WHEN YOU BUILD A CORE FLOW: building the flow and seeding the rest are NOT alternatives — a core flow does not mean populate is done. A board where a real product reads as a handful of tasks, because everything deferred is invisible, is WRONG. "Lean MVP" means the core is concrete and the rest is SEEDED — not vanished into Foundation prose. Before finishing populate, re-scan scope_out + assumptions and confirm each deferred thread is captured as a seed (or a deliberate, stated omission).',
-          design_is_core: 'For any product whose value depends on look / feel / delight (consumer, UX-heavy, "make it fun"), DESIGN is core work, not deferrable polish — emit a concrete design task (or a design seed), never bury it inside another task as a sub-bullet.',
-          buckets: [
-            'CONCRETE TASK — path is clear from the Foundation: create_task in its real section now.',
-            'FLOW SEED — a multi-step, contract-linked process (needs build_new_flow\'s contract interview, a flat task can\'t carry the I/O gates): create_task(kind:"seed", seed_target:"flow", open_questions:[...]) in a "Suggested Flows" section. detail = the flow pre-brief (goal, rough steps, intended I/O contracts, why).',
-            'CONTEXT SEED — needed but underspecified: create_task(kind:"seed", seed_target:"task", open_questions:[...]) in a "Needs Context" section, instead of fabricating fake precision. Resolved later via resolve_seed once the user closes the open questions.',
-            'KB FROM DECISIONS — capture the real decisions made during the interview ("chose X over Y because Z") via create_kb_entry. Decisions, not guesses.',
-          ],
-          sections: 'Provision the real HOME sections the work implies from the Foundation BEFORE seeding — e.g. if growth/marketing is a live risk or a seed area, create a "Growth/Marketing" section so a resolved growth seed has somewhere to land. Don\'t leave resolved work stuck in staging sections. Use create_task with milestones:[...] inline (no separate add_milestone calls).',
-          restraint: 'Restraint is about PRECISION, not coverage: do NOT fabricate milestone-level detail or concrete tasks for work nobody understands yet — that is exactly what a seed is for (honest low-precision capture). It does NOT mean skip the deferred scope; coverage is mandatory (see `mandatory`). "Suggested Flows" and "Needs Context" are STAGING sections (seeds only); resolved seeds move to a real home section, never stay there. Both are distinct from the auto-created Backlog (Backlog = not-yet-prioritized).',
-        },
-        persistence: {
-          when: 'ONLY after the user ratifies the Foundation.',
-          steps: [
-            'create_project(name, context) — pass the whole ratified Foundation as the context object (core + extended + any flexible keys).',
-            'A baseline Instruction Set is auto-seeded. Then propose 2–4 project-specific IS additions (conventions, output/working style, autonomy) drawn from the Foundation; add confirmed ones via create_is_entry (universal:true for rules that must hold inside flows).',
-            'If load-bearing unknowns remain, keep them in context.assumptions and tell the user what is still open.',
-          ],
-        },
+        next: `When you have the user's free-text answers, call bootstrap_advance(draft_id:"${draft.id}", step:"elicited", answers:<their VERBATIM words>).`,
       })
+    }
+
+    case 'bootstrap_advance': {
+      const { draft_id, step } = args
+      if (!draft_id || !step) return 'draft_id and step are required.'
+      const { data: draft } = await sb.from('project_drafts').select('*').eq('id', draft_id).eq('user_id', userId).maybeSingle()
+      if (!draft) return `Draft "${draft_id}" not found — call bootstrap_project first.`
+      const nowIso = new Date().toISOString()
+
+      if (step === 'elicited') {
+        if (draft.status !== 'eliciting') return `Out of order: this draft is at "${draft.status}", past elicitation. Continue from there.`
+        const answers = String(args.answers || '').trim()
+        if (answers.length < 40) return 'Phase 1 is not done. Submit the user\'s ACTUAL free-text answers (their verbatim words) as `answers`. If you have not asked the open prose questions yet, ask them now — do NOT use AskUserQuestion tiles for this.'
+        await sb.from('project_drafts').update({ status: 'drafting', brief: { _elicited: answers }, updated_at: nowIso }).eq('id', draft.id)
+        return JSON.stringify({
+          status: 'phase_2_draft_and_probe',
+          phase: 2,
+          instruction: 'PHASE 2 — DRAFT the Foundation brief NOW from their answers (+ repo if any) and SHOW it to the user as real text. Then PROBE its gaps as interrogations of YOUR OWN draft: "I wrote X for scope — missing or wrong?", "Y and Z contradict — which wins?", "I assumed Q — confirm?". ONLY here may you use AskUserQuestion tiles, and ONLY for genuine expertise FORKS (platform, build approach, scope IN/OUT) with a (Recommended) default — never anchor the "why".',
+          challenge: 'Honor the hard_rule — never sycophantic. Push back on weak/contradictory/over-scoped input before locking it (e.g. if they want two big features in v1, question whether v1 needs both). Mark what you inferred vs what only they can confirm.',
+          next: 'Once the user has SEEN the drafted brief, call bootstrap_advance(draft_id, step:"drafted", brief:<Foundation object: core + extended + flexible keys>).',
+        })
+      }
+
+      if (step === 'drafted') {
+        if (draft.status !== 'drafting' && draft.status !== 'blessing') return `Out of order: this draft is at "${draft.status}". Complete step "elicited" (Phase 1) first.`
+        const brief = args.brief
+        if (!brief || typeof brief !== 'object' || Array.isArray(brief)) return 'Submit the drafted Foundation as `brief` — an object with the core fields (goal, why, scope, definition_of_done, failure, quality_bar, assumptions).'
+        await sb.from('project_drafts').update({ status: 'blessing', brief, updated_at: nowIso }).eq('id', draft.id)
+        return JSON.stringify({
+          status: 'phase_3_bless',
+          phase: 3,
+          instruction: 'PHASE 3 — BLESS. Present the FULL written brief to the user for LINE-LEVEL confirm/edit — never a one-line "save it?" toggle. Make every change they ask for; revise and re-show (bound to ~1–2 passes). Do NOT create the project until they EXPLICITLY bless it.',
+          next: 'When the user blesses the brief, call bootstrap_advance(draft_id, step:"blessed", brief:<final edited Foundation>, name:<the project name>).',
+        })
+      }
+
+      if (step === 'blessed') {
+        if (draft.status !== 'blessing') return `Out of order: this draft is at "${draft.status}". You must draft (step "drafted") and have the user review it before blessing.`
+        const brief = (args.brief && typeof args.brief === 'object' && !Array.isArray(args.brief)) ? args.brief : draft.brief
+        if (!brief || typeof brief !== 'object' || brief._elicited) return 'Submit the final blessed Foundation as `brief` (the full object the user blessed, not the raw elicitation).'
+        const name = (args.name || draft.name || '').trim() || 'Untitled Project'
+        const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36)
+        const prefix = await deriveProjectPrefix(sb, userId, name)
+        const { data: proj, error: perr } = await sb.from('projects')
+          .insert({ name, slug, user_id: userId, context: brief, ...(prefix ? { prefix } : {}) })
+          .select().single()
+        if (perr) throw new Error(perr.message)
+        await getOrCreateBacklog(sb, proj.id)
+        await sb.from('project_drafts').update({ status: 'done', brief, updated_at: nowIso }).eq('id', draft.id)
+        return JSON.stringify({
+          status: 'project_created',
+          project: { prefix: proj.prefix || null, slug: proj.slug, id: proj.id },
+          tailor_is: 'A baseline Instruction Set was auto-seeded. Propose 2–4 project-specific IS additions (conventions, output/working style, autonomy) drawn from the brief; add confirmed ones via create_is_entry (universal:true for rules that must hold inside flows).',
+          then_populate: 'After the IS, run the POPULATE phase below (opt-in — offer it, propose in ONE ratify pass).',
+          population: {
+            mandatory: 'Populate is NOT finished when the core/near-term work is created. You MUST ALSO seed the DEFERRED scope — fast-follows, the explicit scope_out items, and the undecided/open threads from the brief. THIS HOLDS EVEN WHEN YOU BUILD A CORE FLOW: building the flow and seeding the rest are NOT alternatives. A board where a real product reads as a handful of tasks because everything deferred is invisible is WRONG. Before finishing, re-scan scope_out + assumptions and confirm each deferred thread is a seed (or a stated, deliberate omission).',
+            design_is_core: 'For any product whose value depends on look/feel/delight (consumer, UX-heavy, "make it fun"), DESIGN is core work — emit a concrete design task (or design seed), never bury it as a sub-bullet.',
+            buckets: [
+              'CONCRETE TASK — path clear from the brief: create_task in its real section now (use milestones:[...] inline).',
+              'FLOW SEED — multi-step contract-linked process: create_task(kind:"seed", seed_target:"flow", open_questions:[...]) in a "Suggested Flows" section; detail = the flow pre-brief.',
+              'CONTEXT SEED — needed but underspecified: create_task(kind:"seed", seed_target:"task", open_questions:[...]) in a "Needs Context" section; resolved later via resolve_seed.',
+              'KB FROM DECISIONS — capture real decisions made during the interview ("chose X over Y because Z") via create_kb_entry.',
+            ],
+            sections: 'Provision the real HOME sections the work implies BEFORE seeding (e.g. a "Design" or "Growth" section) so resolved seeds have somewhere to land — never leave resolved work in a staging section.',
+            restraint: 'Restraint is about PRECISION not coverage: don\'t fabricate milestone detail for work nobody understands yet (that is what a seed is for). Coverage of deferred scope is mandatory. "Suggested Flows"/"Needs Context" are STAGING (seeds only); Backlog = not-yet-prioritized.',
+          },
+        })
+      }
+
+      return `Unknown step "${step}". Use "elicited", then "drafted", then "blessed" — in order.`
     }
 
     case 'get_project_foundation': {
