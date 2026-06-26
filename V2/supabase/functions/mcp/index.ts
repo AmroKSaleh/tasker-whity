@@ -407,8 +407,9 @@ const FOUNDATION_LABELS: Record<string, string> = {
   risks: 'Risks',
   ai_behavior: 'AI working style / autonomy',
   assumptions: 'Assumptions & open questions',
+  coherence_decisions: 'Deliberate decisions (why)',
 }
-const FOUNDATION_ORDER = ['goal', 'why', 'scope', 'definition_of_done', 'done_looks_like', 'failure', 'quality_bar', 'success_metrics', 'audience', 'constraints', 'risks', 'ai_behavior', 'assumptions']
+const FOUNDATION_ORDER = ['goal', 'why', 'scope', 'definition_of_done', 'done_looks_like', 'failure', 'quality_bar', 'success_metrics', 'audience', 'constraints', 'risks', 'ai_behavior', 'assumptions', 'coherence_decisions']
 
 function renderFoundation(ctx: any): string[] {
   if (!ctx || typeof ctx !== 'object') return []
@@ -419,6 +420,18 @@ function renderFoundation(ctx: any): string[] {
     const val = ctx[key]
     if (val == null || val === '') return
     let text: string
+    // coherence_decisions (TDE-300): deliberate decisions + their rationale, captured
+    // during the bootstrap probe. Render one-per-line so multi-clause "decision — because"
+    // entries stay readable instead of being ';'-smushed into one blob.
+    if (key === 'coherence_decisions' && Array.isArray(val)) {
+      const entries = val.filter(Boolean).map((v: any) => String(v).trim()).filter(Boolean)
+      if (!entries.length) return
+      seen.add(key)
+      // One multi-line entry: the label takes the caller's "- " prefix (where added),
+      // the bullets carry their own "•" — so no double marker in any caller.
+      out.push(`${FOUNDATION_LABELS[key]}:\n` + entries.map((e: string) => `  • ${e}`).join('\n'))
+      return
+    }
     if (Array.isArray(val)) {
       text = val.filter(Boolean).join('; ')
     } else if (typeof val === 'object') {
@@ -2258,7 +2271,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           phase: 2,
           instruction: 'PHASE 2 — DRAFT the Foundation brief NOW from their answers (+ repo if any) and SHOW it to the user as real text. Then PROBE its gaps as interrogations of YOUR OWN draft: "I wrote X for scope — missing or wrong?", "Y and Z contradict — which wins?", "I assumed Q — confirm?". ONLY here may you use AskUserQuestion tiles, and ONLY for genuine expertise FORKS (platform, build approach, scope IN/OUT) with a (Recommended) default — never anchor the "why".',
           challenge: 'Honor the hard_rule — never sycophantic. Push back on weak/contradictory/over-scoped input before locking it (e.g. if they want two big features in v1, question whether v1 needs both). Mark what you inferred vs what only they can confirm.',
-          next: 'Once the user has SEEN the drafted brief, call bootstrap_advance(draft_id, step:"drafted", brief:<Foundation object: core + extended + flexible keys>).',
+          record_decisions: 'When a probe RESOLVES into a deliberate choice (deferred scope, a contradiction settled, a road not taken), capture it in the brief as a `coherence_decisions` entry: an array of self-contained "<decision> — because <rationale>" strings (e.g. "Deferred subscriptions to Phase 2 — the core booking flow must prove out first"). This is decision provenance: it surfaces in the Foundation so future agents inherit the WHY and do not re-litigate settled calls or re-propose deferred scope. Only real decisions with a rationale — not every question asked.',
+          next: 'Once the user has SEEN the drafted brief, call bootstrap_advance(draft_id, step:"drafted", brief:<Foundation object: core + extended + flexible keys, incl. coherence_decisions[] for any decisions reached>).',
         })
       }
 
