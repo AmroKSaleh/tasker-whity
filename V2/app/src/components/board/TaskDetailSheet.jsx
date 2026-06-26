@@ -18,6 +18,33 @@ function Field({ label, children }) {
   )
 }
 
+// Context textarea that remembers its dragged height across task opens/closes (TDE-284).
+// One remembered size for the box, stored in localStorage; re-applied when a task opens.
+const CTX_HEIGHT_KEY = 'tasker-context-box-height'
+function ContextTextarea({ taskId, defaultValue, onSave }) {
+  const ref = useRef(null)
+  useEffect(() => {
+    const h = localStorage.getItem(CTX_HEIGHT_KEY)
+    if (h && ref.current) ref.current.style.height = h
+  }, [taskId])
+  function persistHeight() {
+    const el = ref.current
+    if (!el) return
+    try { localStorage.setItem(CTX_HEIGHT_KEY, el.style.height || `${el.offsetHeight}px`) } catch { /* ignore */ }
+  }
+  return (
+    <textarea
+      ref={ref}
+      key={taskId}
+      defaultValue={defaultValue}
+      onMouseUp={persistHeight}
+      onBlur={(e) => onSave(e.currentTarget.value)}
+      placeholder="Add context…"
+      className="w-full min-h-[80px] rounded-md border border-line-2 bg-surf-2 p-3 font-sans text-[13px] leading-[1.55] text-ink-2 resize-y focus:outline-none focus:border-accent focus:bg-paper"
+    />
+  )
+}
+
 export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneChange, project, onContextUpdate, refreshKey = 0, compact = false }) {
   const messagesOnOpenRef = useRef(0)
 
@@ -247,15 +274,10 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
           </Field>
 
           <Field label="Context">
-            <textarea
+            <ContextTextarea
+              taskId={task.id}
               defaultValue={task.detail || ''}
-              key={task.id}
-              onBlur={(e) => {
-                const detail = e.currentTarget.value
-                if (detail !== (task.detail || '')) patch({ detail })
-              }}
-              placeholder="Add context…"
-              className="w-full min-h-[80px] rounded-md border border-line-2 bg-surf-2 p-3 font-sans text-[13px] leading-[1.55] text-ink-2 resize-y focus:outline-none focus:border-accent focus:bg-paper"
+              onSave={(detail) => { if (detail !== (task.detail || '')) patch({ detail }) }}
             />
           </Field>
 
