@@ -1,3 +1,4 @@
+import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { Home, Folder, Workflow, Calendar, Search, BookOpen, Settings } from 'lucide-react'
@@ -5,6 +6,7 @@ import { useSidebarStore } from '../../store/useSidebarStore'
 import { useConnectedProviders } from '../../hooks/useConnectedProviders'
 import { useParkedCounts } from '../../hooks/useParkedCounts'
 import { CONNECTORS } from '../../lib/connectors'
+import GlobalSearch from '../search/GlobalSearch'
 
 function RailButton({ icon: Icon, label, active, expanded, onClick, badge }) {
   return (
@@ -40,6 +42,20 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
   const connectedIds = useConnectedProviders()
   const parkedCounts = useParkedCounts()
   const panelConnectors = CONNECTORS.filter(c => c.panelRoute && connectedIds.includes(c.id))
+  const [searchOpen, setSearchOpen] = useState(false)
+
+  // ⌘K / Ctrl-K opens global task search from anywhere.
+  useEffect(() => {
+    function onKey(e) {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setSearchOpen(true)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
+
   return (
     <div className="w-full h-screen flex overflow-hidden bg-paper text-ink">
       {/* LEFT RAIL — 56px footprint, hover-expands as an overlay */}
@@ -58,7 +74,7 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
             <RailButton icon={Folder}   label="Projects" active={active === 'projects'} expanded={expanded} onClick={() => navigate('/projects')} />
             <RailButton icon={Workflow} label="Flows"    active={active === 'flows'}    expanded={expanded} onClick={() => navigate('/flows')} />
             <RailButton icon={Calendar} label="Calendar" active={active === 'calendar'} expanded={expanded} />
-            <RailButton icon={Search}   label="Search"   active={active === 'search'}   expanded={expanded} />
+            <RailButton icon={Search}   label="Search"   active={active === 'search'}   expanded={expanded} onClick={() => setSearchOpen(true)} />
           </div>
           {panelConnectors.length > 0 && (
             <div className="flex flex-col gap-0.5 mt-1 pt-1 border-t border-line-2">
@@ -83,6 +99,8 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
 
       {/* RIGHT RAIL */}
       {rightRail}
+
+      <GlobalSearch open={searchOpen} onClose={() => setSearchOpen(false)} />
     </div>
   )
 }
