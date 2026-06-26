@@ -1,3 +1,8 @@
+/* ⏸️ PARKED 2026-06-26 — see the full context banner in bin/tasker.js. This
+ * "repo-native local lens" is dormant, not in active development. The source
+ * abstraction below is the extension point: adding a format = one factory here.
+ * The never-built pieces (deleted task TDE-243) were a Claude Code native source
+ * + write-back for read-only imports. Revive only for a dev-acquisition funnel. */
 /**
  * Board "sources" — abstract WHERE the local server gets its data.
  *

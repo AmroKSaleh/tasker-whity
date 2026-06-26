@@ -1,4 +1,35 @@
 #!/usr/bin/env node
+/* ============================================================================
+ * ⏸️  PARKED — 2026-06-26 (by user decision). NOT in active development.
+ * ----------------------------------------------------------------------------
+ * WHAT THIS IS: the "repo-native local lens." `npx tasker` in a code repo walks
+ * up to find a task source, then serves a localhost web board (the same React
+ * app) that reads — and for some formats edits — tasks that live in the repo's
+ * own files. Local-first, no cloud/login. The pitch was zero-friction dev
+ * adoption: meet developers where they already are.
+ *
+ * WHY PARKED (the honest call): it's a SECOND product surface that splits a solo
+ * builder's focus away from Tasker's actual wedge — the cloud + MCP side
+ * (contracts, flows, KB, connectors, AI as a first-class user). It's a second
+ * deployment target to maintain, there was no demand signal, and the owner
+ * wasn't personally using it. Speculative adoption tooling, built ahead of need.
+ *
+ * WHAT WORKS TODAY (if revived as-is): detects `.tasker/project.json` (rich,
+ * editable via writer.js) and Spec Kit / markdown `tasks.md` (read-only mirror,
+ * TDE-147). Local API + SSE + React board. `.tasker/` file format spec:
+ * V2/docs/tasker-file-format.md; worked example under V2/examples/.
+ *
+ * WHAT WAS NEVER BUILT (deleted task TDE-243): (1) a Claude Code native task
+ * source — abandoned partly because CC's todos are ephemeral session state, not
+ * a stable parseable format; (2) write-back for imported formats (spec-kit is
+ * still read-only / 405 on PATCH); (3) bundling the built React app into the
+ * published @tasker/local npm package (the ../client/ bin path is stubbed for this).
+ *
+ * REVIVE ONLY IF: you make a deliberate dev-ACQUISITION push and want a free,
+ * zero-signup local tool as the top-of-funnel. That strategic question survives
+ * as the GTM task "Resolve two-product strategy — cloud vs local" (TG-7). Until
+ * that's an actual plan with a target audience, leave this dormant.
+ * ============================================================================ */
 /**
  * npx tasker
  *

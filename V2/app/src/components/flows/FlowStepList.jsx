@@ -45,6 +45,41 @@ function RuleRow({ rule }) {
   )
 }
 
+// One validator critique line — pass/fail glyph + rule label + the validator's note.
+function CritiqueRuleRow({ rule, ok }) {
+  return (
+    <div className="flex items-start gap-2 py-0.5">
+      <span className={clsx('mt-[1px] text-[11px] font-bold shrink-0', ok ? 'text-[#3a9d57]' : 'text-[#C0432D]')}>{ok ? '✓' : '✗'}</span>
+      <span className="text-[11.5px] text-ink-2 leading-snug">
+        <span className="font-medium">{rule.label || rule.rule_id}</span>
+        {rule.note && <span className="text-mute-2"> — {rule.note}</span>}
+        {rule.observed_value && <span className="block font-mono text-[9.5px] text-mute-2 mt-0.5 whitespace-pre-wrap">{rule.observed_value}</span>}
+      </span>
+    </div>
+  )
+}
+
+// The validator subagent's critique for one handoff edge (TDE-215): overall verdict +
+// per-rule fails (first) and passes. Reads output.critiques written by submit_validation_result.
+function CritiqueBlock({ critique, toStep }) {
+  const fails = critique.fails ?? []
+  const passes = critique.passes ?? []
+  const pass = critique.overall === 'pass'
+  return (
+    <div>
+      <Kicker className="mb-1">
+        VALIDATION{toStep ? ` · → STEP ${String(toStep).padStart(2, '0')}` : ''} ·{' '}
+        <span className={pass ? 'text-[#3a9d57]' : 'text-[#C0432D]'}>{pass ? 'PASS' : 'FAIL'}</span>
+        {critique.validator && critique.validator !== 'unverified' ? ` · ${critique.validator}` : ''}
+      </Kicker>
+      {(fails.length || passes.length)
+        ? <>{fails.map((r, i) => <CritiqueRuleRow key={`f${i}`} rule={r} ok={false} />)}
+            {passes.map((r, i) => <CritiqueRuleRow key={`p${i}`} rule={r} ok />)}</>
+        : <p className="text-[11px] text-mute-2">No per-rule notes recorded.</p>}
+    </div>
+  )
+}
+
 // Read-only blessing indicator for the inline view (bless action lives in the panel).
 function BlessTag({ contract, hasRules }) {
   if (!hasRules) return null
@@ -75,6 +110,9 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
         const isOpen = open.has(task.id)
         const edges = inputEdges(task.input)
         const oRules = outputRules(task.output)
+        const critiques = (task.output?.critiques && typeof task.output.critiques === 'object')
+          ? Object.entries(task.output.critiques)
+          : []
         const deps = edges
           .map(e => stepByTaskId.get(e.source_task_id))
           .filter(Boolean)
@@ -138,6 +176,9 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
                     : <p className="text-[11px] text-mute-2">No output contract set.</p>}
                   <BlessTag contract={task.output?.contract} hasRules={oRules.length > 0} />
                 </div>
+                {critiques.map(([edgeKey, c]) => (
+                  <CritiqueBlock key={edgeKey} critique={c} toStep={stepByTaskId.get(edgeKey)} />
+                ))}
               </div>
             )}
           </div>

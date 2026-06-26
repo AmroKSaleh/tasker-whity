@@ -214,6 +214,26 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
             <PrioritySegmented value={task.priority} onChange={(v) => patch({ priority: v })} />
           </Field>
 
+          <Field label="Section / Group">
+            <div className="flex gap-2">
+              <select
+                value={task.section_id || ''}
+                onChange={(e) => patch({ section_id: e.target.value || null, group_id: null })}
+                className="flex-1 min-w-0 rounded-md border border-line-2 bg-surf-2 px-3 py-2.5 text-[13px] text-ink-2 outline-none focus:border-accent cursor-pointer"
+              >
+                {[...sections].sort((a, b) => a.name.localeCompare(b.name)).map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+              </select>
+              <select
+                value={task.group_id || ''}
+                onChange={(e) => patch({ group_id: e.target.value || null })}
+                className="flex-1 min-w-0 rounded-md border border-line-2 bg-surf-2 px-3 py-2.5 text-[13px] text-ink-2 outline-none focus:border-accent cursor-pointer"
+              >
+                <option value="">No group</option>
+                {groups.filter(g => g.section_id === task.section_id).sort((a, b) => a.name.localeCompare(b.name)).map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+              </select>
+            </div>
+          </Field>
+
           <Field label="Due date">
             <div className="flex items-center gap-2.5 rounded-md border border-line-2 bg-surf-2 px-3 py-2.5">
               <Calendar className="h-3.5 w-3.5 shrink-0 text-mute" />
