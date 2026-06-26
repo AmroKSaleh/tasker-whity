@@ -65,6 +65,17 @@ function SortableMilestone({ id, step, checked, onToggle, onDelete }) {
         {checked && <span style={{ color: '#fff', fontSize: 8, fontWeight: 900, lineHeight: 1 }}>✓</span>}
       </button>
       <span className={clsx('flex-1 text-[12.5px] leading-snug', checked ? 'text-mute line-through' : 'text-ink-2')}>
+        {(step.kind === 'prerequisite' || step.kind === 'question') && (
+          <span
+            className={clsx(
+              'mr-1.5 align-middle rounded px-1 py-px text-[8.5px] font-mono font-bold uppercase tracking-wider border',
+              step.kind === 'prerequisite' ? 'border-accent/40 text-accent' : 'border-line text-mute-2'
+            )}
+            title={step.kind === 'prerequisite' ? 'Prerequisite — settle before resolving the seed' : 'Open question — answer during resolution'}
+          >
+            {step.kind === 'prerequisite' ? 'prereq' : 'Q'}
+          </span>
+        )}
         {step.summary}
       </span>
       <button onClick={onDelete} className="opacity-0 group-hover/step:opacity-100 btn-delete transition-opacity shrink-0">
@@ -514,8 +525,11 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
                 A placeholder, not work to do directly. Resolve it with your agent in Claude Code —{' '}
                 {task.seed_target === 'flow'
                   ? <>it runs <span className="font-mono">build_new_flow</span> from the pre-brief below.</>
-                  : <>discuss the open questions, then it calls <span className="font-mono">resolve_seed</span> to create the real, placed task.</>}
+                  : <>settle the checklist below, then it calls <span className="font-mono">resolve_seed</span> to create the real, placed task.</>}
+                {' '}Checklist items tagged <span className="font-mono text-accent">prereq</span> should be done first; open <span className="font-mono">Q</span>s are answered while resolving.
               </p>
+              {/* Legacy: seeds created before the TDE-300 merge stored questions here.
+                  New seeds fold them into the milestone checklist below (typed). */}
               {Array.isArray(task.seed_open_questions) && task.seed_open_questions.length > 0 && (
                 <div>
                   <div className="text-[9px] font-mono uppercase tracking-widest text-mute-2 mb-1">Open questions</div>

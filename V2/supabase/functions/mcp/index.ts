@@ -698,7 +698,7 @@ const TOOLS = [
   },
   {
     name: 'create_task',
-    description: 'Create a single task. For a multi-step process toward a goal — where steps hand off to each other and need quality checks between them — do NOT create tasks ad hoc; use build_new_flow instead. To create a SEED (a placeholder whose deliverable is another artifact, for work that is needed but underspecified, or a flow worth building later), pass kind:"seed" with seed_target and open_questions.',
+    description: 'Create a single task. For a multi-step process toward a goal — where steps hand off to each other and need quality checks between them — do NOT create tasks ad hoc; use build_new_flow instead. To create a SEED (a placeholder whose deliverable is another artifact, for work that is needed but underspecified, or a flow worth building later), pass kind:"seed" with seed_target plus open_questions and/or milestones — a seed has ONE unified checklist (open_questions become "answer-during-resolution" items, milestones become "settle-first" prerequisites that soft-gate resolution).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -710,8 +710,8 @@ const TOOLS = [
         due_date:   { type: 'string', description: 'ISO date YYYY-MM-DD (optional)' },
         kind:       { type: 'string', enum: ['normal', 'seed'], description: 'Default "normal". "seed" = a placeholder resolved later into a real task or flow.' },
         seed_target:    { type: 'string', enum: ['task', 'flow'], description: 'Seeds only: what this resolves into — a concrete task (resolve_seed) or a flow (build_new_flow).' },
-        open_questions: { type: 'array', items: { type: 'string' }, description: 'Seeds only: the SPECIFIC gaps blocking specification, so resolution is a short targeted interview.' },
-        milestones:     { type: 'array', items: { type: 'string' }, description: 'Optional ordered milestone texts to add to the task in one call (no separate add_milestone needed).' },
+        open_questions: { type: 'array', items: { type: 'string' }, description: 'Seeds only: the SPECIFIC gaps blocking specification — things ANSWERED with the user during resolution. Stored as kind="question" items in the seed\'s unified checklist (they do NOT gate resolution).' },
+        milestones:     { type: 'array', items: { type: 'string' }, description: 'Ordered milestone texts added in one call (no separate add_milestone needed). On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind="prerequisite" checklist items that soft-gate resolve_seed / build_new_flow. On a normal task they are plain milestones.' },
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent (default) = AI runs it; user = human executes, AI coaches; external = third party (web admin, client, etc.). A single flow can mix executor types.' },
         human_guidance: { type: 'string', description: 'For user/external steps only: the human-facing step instructions shown in guide mode. Distinct from detail (which is AI-facing context). Write as a clear action directive: what the person must do, where, and how to verify it worked.' },
       },
@@ -720,11 +720,12 @@ const TOOLS = [
   },
   {
     name: 'resolve_seed',
-    description: 'Resolve a CONTEXT SEED (seed_target "task") into a real, placed task — AFTER discussing its open questions with the user. Atomically: creates the concrete task from task_spec, places it, marks the seed done, and links the new task back to the seed (provenance). PASS task_spec.section_id with the resolved task\'s REAL home — the resolved task must NOT stay in the "Needs Context" staging section (if omitted it lands in Backlog, not the seed\'s section). For FLOW seeds, do NOT use this — run build_new_flow with the seed pre-brief instead.',
+    description: 'Resolve a CONTEXT SEED (seed_target "task") into a real, placed task — AFTER settling its checklist with the user. The seed checklist is unified (TDE-300): kind="question" items are answered during this conversation; kind="prerequisite" items are work that should be done first and SOFT-GATE this call (unmet prerequisites are surfaced and you must pass proceed_anyway:true to override). Atomically: creates the concrete task from task_spec, places it, marks the seed done, and links the new task back to the seed (provenance). PASS task_spec.section_id with the resolved task\'s REAL home — the resolved task must NOT stay in the "Needs Context" staging section (if omitted it lands in Backlog, not the seed\'s section). For FLOW seeds, do NOT use this — run build_new_flow with the seed pre-brief instead.',
     inputSchema: {
       type: 'object',
       properties: {
         seed_id: { type: 'string', description: 'The seed task to resolve (UUID or short ID).' },
+        proceed_anyway: { type: 'boolean', description: 'Override the soft prerequisite gate. Default false. When false, resolving a seed that still has unchecked kind="prerequisite" checklist items is refused with the list of unmet prerequisites — confirm with the user, then retry with true.' },
         task_spec: {
           type: 'object',
           description: 'The resolved concrete task.',
@@ -1858,12 +1859,13 @@ const TOOLS = [
   },
   {
     name: 'build_new_flow',
-    description: 'Start building a NEW flow — a chain of contract-linked tasks toward a goal (sections/groups are just filing; the flow is the I/O chain). Call this when the user wants to create a multi-step process/flow from scratch. It does NOT build anything itself: it returns an interview playbook + the project\'s current tasks/sections (grounding). YOU then run a grill-me-style interview, propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
+    description: 'Start building a NEW flow — a chain of contract-linked tasks toward a goal (sections/groups are just filing; the flow is the I/O chain). Call this when the user wants to create a multi-step process/flow from scratch, OR to resolve a FLOW seed (pass its seed_id). It does NOT build anything itself: it returns an interview playbook + the project\'s current tasks/sections (grounding). When seed_id is given it also returns the seed\'s pre-brief and unified checklist, and SOFT-GATES on any unmet kind="prerequisite" items (surfaced for you to confirm with the user before building — never a hard block). YOU then run a grill-me-style interview, propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID the flow belongs to' },
         goal: { type: 'string', description: 'The end goal of the flow in the user\'s words (the final deliverable). Optional — if omitted, the playbook tells you to elicit it first.' },
+        seed_id: { type: 'string', description: 'Optional. The FLOW seed this build resolves (UUID or short ID). When given, the response includes the seed pre-brief + checklist and surfaces any unmet prerequisites (soft gate). Mark the seed done after name_flow.' },
       },
       required: ['project_id'],
     },
@@ -2296,8 +2298,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
             design_is_core: 'For any product whose value depends on look/feel/delight (consumer, UX-heavy, "make it fun"), DESIGN is core work — emit a concrete design task (or design seed), never bury it as a sub-bullet.',
             buckets: [
               'CONCRETE TASK — path clear from the brief: create_task in its real section now (use milestones:[...] inline).',
-              'FLOW SEED — multi-step contract-linked process: create_task(kind:"seed", seed_target:"flow", open_questions:[...]) in a "Suggested Flows" section; detail = the flow pre-brief.',
-              'CONTEXT SEED — needed but underspecified: create_task(kind:"seed", seed_target:"task", open_questions:[...]) in a "Needs Context" section; resolved later via resolve_seed.',
+              'FLOW SEED — multi-step contract-linked process: create_task(kind:"seed", seed_target:"flow", open_questions:[...], milestones:[...]) in a "Suggested Flows" section; detail = the flow pre-brief. open_questions = answered when building; milestones = prerequisites to settle first (they soft-gate build_new_flow).',
+              'CONTEXT SEED — needed but underspecified: create_task(kind:"seed", seed_target:"task", open_questions:[...], milestones:[...]) in a "Needs Context" section; resolved later via resolve_seed. Use milestones for any prerequisite that must be done before this can be specced.',
               'KB FROM DECISIONS — capture real decisions made during the interview ("chose X over Y because Z") via create_kb_entry.',
             ],
             sections: 'Provision the real HOME sections the work implies BEFORE seeding (e.g. a "Design" or "Growth" section) so resolved seeds have somewhere to land — never leave resolved work in a staging section.',
@@ -2519,16 +2521,35 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         sort_order: sortOrder,
         kind: isSeed ? 'seed' : 'normal',
         seed_target: isSeed ? seed_target : null,
-        seed_open_questions: isSeed && Array.isArray(open_questions) ? open_questions : null,
+        // seed_open_questions is DEPRECATED (TDE-300): open questions now live in the
+        // unified seed checklist as kind='question' milestones. Kept null on new seeds;
+        // the column remains only so legacy seeds created before the merge still render.
+        seed_open_questions: null,
         executor: resolvedExecutor,
         human_guidance: human_guidance ?? null,
       }).select().single()
       if (error) throw new Error(error.message)
-      for (const m of (Array.isArray(milestones) ? milestones : []).map((x: string) => String(x).trim()).filter(Boolean)) {
-        await sb.rpc('append_milestone', { p_task_id: data.id, p_user_id: userId, p_text: m })
-      }
+      const clean = (xs: any) => (Array.isArray(xs) ? xs : []).map((x: any) => String(x).trim()).filter(Boolean)
       if (isSeed) {
-        return `Created ${seed_target} SEED "${text}"\nid: ${data.id}\nResolve it later: discuss the open questions with the user, then ${seed_target === 'flow' ? 'build_new_flow with the pre-brief' : 'resolve_seed(seed_id, task_spec)'} — do NOT work it as a normal task.`
+        // MERGE (TDE-300): a seed carries ONE checklist, not two parallel lists. Both
+        // open_questions and prerequisite milestones fold into task_discussions.steps as
+        // typed items — kind='question' (answer during resolution) / kind='prerequisite'
+        // (settle before resolving; soft-gated). WHY MERGED: the distinction only mattered
+        // for differentiated downstream behaviour (answered-question→flow design vs.
+        // prerequisite-output→flow input), which was deferred — so two primitives was
+        // over-engineering. The kind tag is retained for that future, inert for now.
+        for (const q of clean(open_questions)) {
+          await sb.rpc('append_milestone_kind', { p_task_id: data.id, p_user_id: userId, p_text: q, p_kind: 'question' })
+        }
+        for (const m of clean(milestones)) {
+          await sb.rpc('append_milestone_kind', { p_task_id: data.id, p_user_id: userId, p_text: m, p_kind: 'prerequisite' })
+        }
+        return `Created ${seed_target} SEED "${text}"\nid: ${data.id}\n` +
+          `Its checklist: ${clean(open_questions).length} question(s) to answer during resolution, ${clean(milestones).length} prerequisite(s) to settle first.\n` +
+          `Resolve it later: settle/answer the checklist with the user, then ${seed_target === 'flow' ? 'build_new_flow(seed_id) with the pre-brief' : 'resolve_seed(seed_id, task_spec)'} — open prerequisites trigger a soft gate. Do NOT work it as a normal task.`
+      }
+      for (const m of clean(milestones)) {
+        await sb.rpc('append_milestone', { p_task_id: data.id, p_user_id: userId, p_text: m })
       }
       return `Created task "${text}"\nid: ${data.id}`
     }
@@ -2540,6 +2561,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (seed.seed_target === 'flow') return `This is a FLOW seed — resolve it by running build_new_flow with its pre-brief, not resolve_seed.`
       const spec = args.task_spec || {}
       if (!spec.text) return 'task_spec.text is required.'
+      // Soft prerequisite gate (TDE-300): a seed can carry kind='prerequisite' checklist
+      // items — work that should be settled before it's resolved. Surface unmet ones and
+      // ask; proceed_anyway:true overrides. Questions (kind='question') are answered
+      // DURING resolution, so they never gate. Soft by design — consistent with trusting
+      // the honest user; we'll tighten based on override-rate data if needed.
+      if (!args.proceed_anyway) {
+        const { data: sd } = await sb.from('task_discussions').select('steps, checked_steps').eq('task_id', seed.id).maybeSingle()
+        const sSteps: any[] = Array.isArray(sd?.steps) ? sd.steps : []
+        const sChecked: boolean[] = Array.isArray(sd?.checked_steps) ? sd.checked_steps : []
+        const unmet = sSteps
+          .map((s: any, i: number) => ({ summary: typeof s === 'string' ? s : s.summary, kind: typeof s === 'string' ? null : (s.kind ?? null), checked: !!sChecked[i] }))
+          .filter(x => x.kind === 'prerequisite' && !x.checked)
+        if (unmet.length) {
+          return `⚠ This seed has ${unmet.length} unmet prerequisite${unmet.length > 1 ? 's' : ''}:\n` +
+            unmet.map(x => `  ○ ${x.summary}`).join('\n') +
+            `\n\nThese should usually be settled before resolving the seed. Confirm with the user. To resolve anyway, call resolve_seed again with proceed_anyway: true.`
+        }
+      }
       // Default to Backlog, NOT the seed's section — a resolved task must not stay in
       // the "Needs Context" staging section it was seeded in.
       const sectionId = spec.section_id || await getOrCreateBacklog(sb, seed.project_id)
@@ -2735,18 +2774,46 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
       ]
       // Seeds: make it loud — this is a placeholder to RESOLVE, not work to do.
-      if (full.kind === 'seed') {
-        const q = Array.isArray(full.seed_open_questions) ? full.seed_open_questions : []
-        lines.push(`\n⚑ THIS IS A SEED — it resolves into a ${full.seed_target || 'task'}. Do NOT do this work directly.`)
-        lines.push(full.seed_target === 'flow'
-          ? 'To resolve: discuss the open questions with the user to firm up the flow, then run build_new_flow using the pre-brief in Context below.'
-          : 'To resolve: discuss the open questions with the user, then call resolve_seed(seed_id, task_spec) — it creates the real, placed task and closes this seed.')
-        if (q.length) { lines.push('Open questions to resolve:'); for (const x of q) lines.push(`  • ${x}`) }
-      }
-      if (full.detail) lines.push(`\nContext:\n${full.detail}`)
       const steps: any[] = disc?.steps ?? []
       const checked: boolean[] = disc?.checked_steps ?? []
-      if (steps.length) {
+      if (full.kind === 'seed') {
+        lines.push(`\n⚑ THIS IS A SEED — it resolves into a ${full.seed_target || 'task'}. Do NOT do this work directly.`)
+        lines.push(full.seed_target === 'flow'
+          ? 'To resolve: settle the checklist with the user to firm up the flow, then run build_new_flow(seed_id) using the pre-brief in Context below.'
+          : 'To resolve: settle the checklist with the user, then call resolve_seed(seed_id, task_spec) — it creates the real, placed task and closes this seed.')
+        // Unified, typed seed checklist (TDE-300): questions (answered during resolution)
+        // and prerequisites (settle first; soft-gated) both live as typed milestones.
+        const items = steps.map((s: any, i: number) => ({
+          summary: typeof s === 'string' ? s : s.summary,
+          kind: typeof s === 'string' ? null : (s.kind ?? null),
+          checked: !!checked[i], i,
+        }))
+        const prereqs = items.filter(x => x.kind === 'prerequisite')
+        const questions = items.filter(x => x.kind === 'question')
+        const other = items.filter(x => x.kind !== 'prerequisite' && x.kind !== 'question')
+        if (prereqs.length) {
+          lines.push('Prerequisites — settle BEFORE resolving (soft gate):')
+          for (const x of prereqs) lines.push(`  ${x.checked ? '✓' : '○'} (index ${x.i}) ${x.summary}`)
+          const open = prereqs.filter(x => !x.checked).length
+          if (open) lines.push(`  ⚠ ${open} prerequisite${open > 1 ? 's' : ''} still open — confirm with the user before resolving, or pass proceed_anyway:true.`)
+        }
+        if (questions.length) {
+          lines.push('Open questions — answer WITH the user during resolution:')
+          for (const x of questions) lines.push(`  ${x.checked ? '✓' : '○'} (index ${x.i}) ${x.summary}`)
+        }
+        if (other.length) {
+          lines.push('Checklist:')
+          for (const x of other) lines.push(`  ${x.checked ? '✓' : '○'} (index ${x.i}) ${x.summary}`)
+        }
+        // Legacy fallback: seeds created before the merge stored questions in the column.
+        if (!items.length && Array.isArray(full.seed_open_questions) && full.seed_open_questions.length) {
+          lines.push('Open questions to resolve:')
+          for (const x of full.seed_open_questions) lines.push(`  • ${x}`)
+        }
+      }
+      if (full.detail) lines.push(`\nContext:\n${full.detail}`)
+      // Generic milestones block — skipped for seeds (the checklist above already renders them).
+      if (steps.length && full.kind !== 'seed') {
         lines.push('\nMilestones:')
         steps.forEach((s: any, i: number) => {
           const label = typeof s === 'string' ? s : s.summary
@@ -4842,10 +4909,40 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         status: t.status,
       }))
 
+      // Resolving a FLOW seed: surface its pre-brief + unified checklist as grounding, and
+      // soft-gate on unmet prerequisites (TDE-300). Soft — build_new_flow only returns a
+      // playbook; the agent confirms with the user before building.
+      let seedBlock: any = null
+      if (args.seed_id) {
+        const seed = await resolveTask(sb, userId, args.seed_id)
+        if (seed && seed.kind === 'seed' && seed.seed_target === 'flow') {
+          const { data: sd } = await sb.from('task_discussions').select('steps, checked_steps').eq('task_id', seed.id).maybeSingle()
+          const sSteps: any[] = Array.isArray(sd?.steps) ? sd.steps : []
+          const sChecked: boolean[] = Array.isArray(sd?.checked_steps) ? sd.checked_steps : []
+          const checklist = sSteps.map((s: any, i: number) => ({
+            summary: typeof s === 'string' ? s : s.summary,
+            kind: typeof s === 'string' ? null : (s.kind ?? null),
+            checked: !!sChecked[i],
+          }))
+          const unmet = checklist.filter(x => x.kind === 'prerequisite' && !x.checked).map(x => x.summary)
+          seedBlock = {
+            seed_id: project.prefix && seed.short_id != null ? `${project.prefix}-${seed.short_id}` : seed.id,
+            pre_brief: seed.detail || null,
+            checklist,
+            unresolved_prerequisites: unmet,
+            gate: unmet.length
+              ? `SOFT GATE: ${unmet.length} prerequisite(s) for this seed are still open — surface them to the user and confirm they want to build now before running the interview.`
+              : null,
+            on_finish: 'After name_flow, mark this seed done (update_task status:done) — building the flow resolves it.',
+          }
+        }
+      }
+
       return JSON.stringify({
         status: 'run_flow_interview',
         mode: 'create',
         goal: args.goal || null,
+        seed: seedBlock,
         instruction: 'You are building a NEW flow with the user. Run the interview below YOURSELF using your interactive question tool (AskUserQuestion / ask_question). A flow = a chain of contract-linked tasks; sections/groups are just filing and do not define the flow. Do NOT create or wire any tasks until the user confirms the whole proposed flow at the end.',
         grill_me_rules: [
           'Ask ONE question at a time; each answer determines the next question.',
