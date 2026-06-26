@@ -9,6 +9,7 @@ import DocsPage from './pages/DocsPage'
 import DocsV2Page from './pages/DocsV2Page'
 import SettingsPage from './pages/SettingsPage'
 import GmailPanelPage from './pages/GmailPanelPage'
+import GoogleTasksPage from './pages/GoogleTasksPage'
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
 
 export default function App() {
@@ -41,6 +42,7 @@ export default function App() {
           }
         />
         <Route path="/connectors/gmail" element={<AuthGuard><GmailPanelPage /></AuthGuard>} />
+        <Route path="/connectors/google-tasks" element={<AuthGuard><GoogleTasksPage /></AuthGuard>} />
       </Routes>
     </BrowserRouter>
   )

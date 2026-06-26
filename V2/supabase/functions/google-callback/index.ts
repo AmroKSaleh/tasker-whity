@@ -36,6 +36,18 @@ function timingSafeEqual(a: Uint8Array, b: Uint8Array): boolean {
   return r === 0
 }
 
+// Pull the email claim out of an OpenID Connect id_token (JWT). Best-effort — no signature
+// check needed here: the token came straight from Google's token endpoint over TLS.
+function emailFromIdToken(idToken: string | undefined): string | null {
+  if (!idToken) return null
+  try {
+    const claims = JSON.parse(new TextDecoder().decode(b64urlToBytes(idToken.split('.')[1])))
+    return typeof claims.email === 'string' ? claims.email : null
+  } catch {
+    return null
+  }
+}
+
 Deno.serve(async (req) => {
   const url = new URL(req.url)
   const target = (Deno.env.get('APP_URL') ?? '').replace(/\/$/, '')
@@ -87,7 +99,7 @@ Deno.serve(async (req) => {
     // = only what the user EXPLICITLY connected this/previous times (from the signed state) —
     // this drives the per-service UI so connecting Gmail doesn't light up Drive/Tasks.
     const { data: existing } = await sb.from('user_settings')
-      .select('google_scopes, google_connected_scopes').eq('user_id', userId).maybeSingle()
+      .select('google_scopes, google_connected_scopes, google_drive_folder_id').eq('user_id', userId).maybeSingle()
     const prev = (existing?.google_scopes ?? '').split(' ').filter(Boolean)
     const fresh = String(tok.scope ?? '').split(' ').filter(Boolean)
     const scopes = Array.from(new Set([...prev, ...fresh])).join(' ')
@@ -108,7 +120,32 @@ Deno.serve(async (req) => {
     // Never overwrite a stored refresh token with null.
     if (tok.refresh_token) patch.google_refresh_token = tok.refresh_token
 
+    // Connected-account email (from the openid/email scope) — shown in Settings → Connectors.
+    const email = emailFromIdToken(tok.id_token)
+    if (email) patch.google_email = email
+
     await sb.from('user_settings').upsert(patch, { onConflict: 'user_id' })
+
+    // On first Drive connect, create a "Tasker" folder in the user's Drive and
+    // store its id so all subsequent file operations use it as root.
+    const driveScope = 'https://www.googleapis.com/auth/drive.file'
+    const connectingDrive = reqScopes.includes(driveScope) || fresh.includes(driveScope)
+    if (connectingDrive && !existing?.google_drive_folder_id) {
+      try {
+        const folderRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${tok.access_token}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Tasker', mimeType: 'application/vnd.google-apps.folder' }),
+        })
+        const folder = await folderRes.json()
+        if (folderRes.ok && folder.id) {
+          await sb.from('user_settings').update({ google_drive_folder_id: folder.id }).eq('user_id', userId)
+        }
+      } catch (e) {
+        console.error('[google-callback] Drive folder creation failed:', e)
+      }
+    }
+
     return back('connected')
   } catch (e) {
     console.error('[google-callback]', e)

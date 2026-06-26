@@ -70,5 +70,5 @@ export function useGoogleCalendar() {
     }
   }, [connection, isConnected])
 
-  return { isConnected, isExpired, loading, connect, disconnect, pushTask, removeTask, fetchEvents }
+  return { isConnected, isExpired, loading, email: connection?.email ?? null, connect, disconnect, pushTask, removeTask, fetchEvents }
 }

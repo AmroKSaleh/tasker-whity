@@ -160,7 +160,47 @@ async function refreshGoogleToken(sb: any, userId: string, refreshToken: string)
 // Return a VALID Google access token for the user, refreshing if it's expired
 // (60s skew). null if Google isn't connected or the refresh failed. This is the
 // single accessor every Google service tool (Drive/Gmail/Tasks) should call.
-// deno-lint-ignore no-unused-vars -- foundation accessor; first consumer is the Drive tool (TDE)
+async function findOrCreateDriveFolder(token: string, parentId: string, name: string): Promise<string> {
+  const q = encodeURIComponent(`name='${name}' and '${parentId}' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false`)
+  const res = await fetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id)`, { headers: { Authorization: `Bearer ${token}` } })
+  const data = await res.json()
+  if (data.files?.length) return data.files[0].id
+  const create = await fetch('https://www.googleapis.com/drive/v3/files', {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, mimeType: 'application/vnd.google-apps.folder', parents: [parentId] }),
+  })
+  const folder = await create.json()
+  if (!folder.id) throw new Error(`Failed to create Drive folder "${name}"`)
+  return folder.id
+}
+
+async function moveDriveFilesToFolder(sb: any, token: string, task: any, userId: string, targetName: string): Promise<void> {
+  const driveFiles: any[] = task.output?.drive_files ?? []
+  if (!driveFiles.length) return
+  const { data: settings } = await sb.from('user_settings').select('google_drive_folder_id').eq('user_id', userId).maybeSingle()
+  const taskerRootId = settings?.google_drive_folder_id
+  if (!taskerRootId) return
+  const { data: proj } = await sb.from('projects').select('google_drive_folder_id').eq('id', task.project_id).maybeSingle()
+  const projectFolderId = proj?.google_drive_folder_id
+  if (!projectFolderId) return
+  const targetFolderId = await findOrCreateDriveFolder(token, projectFolderId, targetName)
+  for (const file of driveFiles) {
+    try {
+      const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${file.file_id}?fields=parents`, { headers: { Authorization: `Bearer ${token}` } })
+      const meta = await metaRes.json()
+      const oldParents = (meta.parents ?? []).join(',')
+      await fetch(`https://www.googleapis.com/drive/v3/files/${file.file_id}?addParents=${targetFolderId}&removeParents=${oldParents}`, {
+        method: 'PATCH',
+        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+        body: '{}',
+      })
+    } catch (e) {
+      console.error('[mcp] drive move failed:', file.file_id, e)
+    }
+  }
+}
+
 async function loadGoogleAccessToken(sb: any, userId: string): Promise<string | null> {
   const { data } = await sb.from('user_settings')
     .select('google_access_token, google_refresh_token, google_token_expiry')
@@ -442,12 +482,14 @@ const ASSISTANT_DIRECTIVES = [
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'NEVER be sycophantic. When you have a different or better view on a design, plan, scope, or contract, push back and argue it — challenge vague, contradictory, unrealistic, or over-scoped input. Pushback exists to improve the input and the result, not disagreement for its own sake; when the user is right, say so plainly and proceed. Applies everywhere: bootstrap_project, build_new_flow, reviews, planning.',
   'When the user wants to CREATE / SET UP A NEW PROJECT, call bootstrap_project FIRST (before create_project) and FOLLOW THE PHASES IT RETURNS — do NOT run your own multiple-choice quiz. The interview is THREE PHASES: (1) ELICIT in open PROSE — plain free-text questions about vision / why / taste / fears, NOT AskUserQuestion tiles; (2) DRAFT the Foundation brief, show it, then probe its gaps (tiles OK only for genuine expertise forks like platform/scope); (3) BLESS — show the full written brief for line-level edit, and persist via create_project ONLY after the user blesses it. Challenge weak / contradictory / over-scoped input at every phase — never sycophantic (e.g. if they pick two big features for v1, question it, don\'t just accept it). Then populate the board INCLUDING seeds for the deferred scope.',
+  'FLOW vs AD-HOC — when to reach for a flow: use a flow only when ALL THREE hold — (1) multiple steps drive toward ONE goal, (2) steps HAND OFF to each other (one step\'s output is the next step\'s input), and (3) at least one handoff carries a real quality risk worth gating. If steps are independent, one-shot, or trivial, use plain tasks — do NOT manufacture a flow for a simple checklist; the gate overhead (contracts, validators, revision loop) is pure cost with no payoff there. Proactively SUGGEST a flow when you notice work that fits all three, even if the user framed it as loose tasks. OPTIMIZING flow usage: keep flows short — only the steps with genuine handoffs belong in the chain; attach an output contract ONLY where a handoff has real quality risk, not on every step; prefer kind=check rules (deterministic, no validator subagent, 1 call) over kind=judgment whenever a check can express the bar; reserve multi-vote judgment validation for high-stakes blockers. A flow with no contracts is just ordered tasks — if nothing needs gating, it should not be a flow.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and call get_task_critique on the producer task to get the clean validator notes, then use AskUserQuestion to present those findings to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
   'FLOW IDENTITY: After persisting a new flow (after all create_task + set_task_output + set_task_input calls), call name_flow with all task IDs and a descriptive name (e.g. "Blog Post Publication Flow"). Optionally add a context string — the goal, constraints, or background that applies to all tasks. At the start of any flow run, call get_flow_context to orient yourself. Use update_flow_context to log progress or decisions that future agents in the flow should know.',
   'RUN FLOW: When the user asks you to run, execute, or start a flow — call run_flow first (with flow_id or any task_id in the flow). Read the playbook it returns. Then self-sequence through every step in order: execute → store_artifact → complete_task → validate → handle action. Do NOT prompt the user between steps unless action=ask_human. The flow runs to completion (or human intervention) in one session.',
   'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. Submit two fields: (1) observed_value — the raw datum from running it: exact word count ("1,542 words"), command output ("exit 0: All 24 tests passed"), file path ("/src/index.ts found"), pattern match ("keyword \'auth\' found at line 47"). Submitting without observed_value is REJECTED by the server. (2) note — interpretation of the observed_value against the rule (e.g. "1,542 words — exceeds the 1,000-word minimum"). How to produce observed_value: word/char count → run `echo "..." | wc -w` via Bash; command check → run it via Bash, capture stdout + exit code; file existence → Glob/Read, record the path; pattern → Grep/Read and record the match. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) ALSO requires a note — the specific deficiency. This applies to the validator subagent too.',
+  'SELF-CONTAINED TASK CONTEXT: When creating any task — via create_task, resolve_seed, or as flow tasks — write the detail field so a cold reader (no access to this chat, session memory, or external notes) can pick it up and act. Include: the goal/why of this specific task, any key decisions or open questions, pointers to load-bearing context (relevant files, KB entries, prior decisions), and the obvious next step. Not a transcript dump — the minimum a cold reader needs to act. Applies to ALL creation paths: direct create_task calls, bootstrap_project populate phase, flow task creation, and resolve_seed outputs.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -535,6 +577,28 @@ const TOOLS = [
     },
   },
   {
+    name: 'export_project',
+    description: 'Export an ENTIRE project to a portable, full-fidelity JSON bundle: Foundation/context, sections, groups, tasks (with milestones, I/O edges + contracts, flow membership, custom statuses), flows (+ flow IS/KB), the project Knowledge Base and Instruction Set. The returned JSON is the input to import_project — save it to a file to back up a project or move it to another account. Ephemeral state (drafts, intake jobs) is intentionally excluded.',
+    inputSchema: {
+      type: 'object',
+      properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'import_project',
+    description: 'Recreate a project from a bundle produced by export_project. Always creates a NEW project (fresh slug + prefix) under the current account — never merges into an existing one. All internal references (I/O edges, flow membership, seed provenance, custom statuses) are remapped to fresh IDs; task short IDs (e.g. TDE-304) are preserved. Flow short IDs are regenerated (they are unique per account).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        bundle: { type: 'object', description: 'The export bundle object (the JSON returned by export_project, parsed).' },
+        name: { type: 'string', description: 'Optional name for the imported project. Defaults to the bundle\'s project name.' },
+        reset_progress: { type: 'boolean', description: 'If true, all imported tasks are set to pending (a clean template copy). Default false — statuses and completion are preserved (a true backup).' },
+      },
+      required: ['bundle'],
+    },
+  },
+  {
     name: 'update_project_context',
     description: 'Update or extend the project context fields (goal, why, scope, risks, done_looks_like). Merges with existing context.',
     inputSchema: {
@@ -593,6 +657,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'rename_section',
+    description: 'Rename an existing section. Non-destructive — only the name changes; tasks, groups, and ordering are untouched.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        section_id: { type: 'string', description: 'Section UUID' },
+        name: { type: 'string', description: 'New section name' },
+      },
+      required: ['project_id', 'section_id', 'name'],
+    },
+  },
+  {
     name: 'delete_section',
     description: 'Delete a section. By default REFUSES if the section still has tasks (move them to another section first, e.g. via update_task/move_task_to_group). Pass delete_tasks: true to delete the section together with all its tasks and groups. Irreversible — confirm with the user before calling.',
     inputSchema: {
@@ -628,13 +705,15 @@ const TOOLS = [
         project_id: { type: 'string' },
         section_id: { type: 'string', description: 'Optional. Task is ungrouped if omitted.' },
         text:       { type: 'string', description: 'Task title' },
-        detail:     { type: 'string', description: 'Optional context or description. For a seed: the rough subject + why it is needed (the pre-brief).' },
+        detail:     { type: 'string', description: 'Context/description. Write so a cold reader (no chat history, no session memory) can act on this task alone: goal/why, key decisions or open questions, pointers to relevant files/KB/decisions, and obvious next step. For a seed: the rough subject + why it is needed (the pre-brief).' },
         priority:   { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
         due_date:   { type: 'string', description: 'ISO date YYYY-MM-DD (optional)' },
         kind:       { type: 'string', enum: ['normal', 'seed'], description: 'Default "normal". "seed" = a placeholder resolved later into a real task or flow.' },
         seed_target:    { type: 'string', enum: ['task', 'flow'], description: 'Seeds only: what this resolves into — a concrete task (resolve_seed) or a flow (build_new_flow).' },
         open_questions: { type: 'array', items: { type: 'string' }, description: 'Seeds only: the SPECIFIC gaps blocking specification, so resolution is a short targeted interview.' },
         milestones:     { type: 'array', items: { type: 'string' }, description: 'Optional ordered milestone texts to add to the task in one call (no separate add_milestone needed).' },
+        executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent (default) = AI runs it; user = human executes, AI coaches; external = third party (web admin, client, etc.). A single flow can mix executor types.' },
+        human_guidance: { type: 'string', description: 'For user/external steps only: the human-facing step instructions shown in guide mode. Distinct from detail (which is AI-facing context). Write as a clear action directive: what the person must do, where, and how to verify it worked.' },
       },
       required: ['project_id', 'text'],
     },
@@ -651,7 +730,7 @@ const TOOLS = [
           description: 'The resolved concrete task.',
           properties: {
             text:       { type: 'string', description: 'Task title.' },
-            detail:     { type: 'string', description: 'Resolved context/description.' },
+            detail:     { type: 'string', description: 'Resolved context/description. Write self-contained: goal/why, key decisions, pointers to load-bearing context, obvious next step — enough for a cold reader to act without the chat.' },
             priority:   { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
             section_id: { type: 'string', description: 'Where it belongs (UUID). Defaults to the seed\'s section if omitted.' },
             milestones: { type: 'array', items: { type: 'string' }, description: 'Optional ordered milestones.' },
@@ -675,9 +754,11 @@ const TOOLS = [
         priority:   { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
         status:     { type: 'string', enum: ['pending', 'in_progress', 'done'] },
         due_date:   { type: 'string' },
-        section_id: { type: 'string', description: 'Move task to a different section (use section UUID)' },
-        group_id:   { type: 'string', description: 'Move task to a different group (use group UUID), or null to remove from group' },
-        pinned:     { type: 'boolean', description: 'Pin or unpin the task' },
+        section_id:     { type: 'string', description: 'Move task to a different section (use section UUID)' },
+        group_id:       { type: 'string', description: 'Move task to a different group (use group UUID), or null to remove from group' },
+        pinned:         { type: 'boolean', description: 'Pin or unpin the task' },
+        executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent = AI; user = human (AI coaches); external = third party.' },
+        human_guidance: { type: 'string', description: 'Human-facing step instructions for guide mode (user/external steps). Replaces existing.' },
       },
       required: ['task_id'],
     },
@@ -781,6 +862,47 @@ const TOOLS = [
         universal:  { type: 'boolean', description: 'If true, this rule always applies, even inside a flow with its own IS. Default false.' },
       },
       required: ['project_id', 'title', 'content'],
+    },
+  },
+  {
+    name: 'create_default_is_entry',
+    description: 'Create a PERSONAL default Instruction Set entry (account-level, not tied to a project). These reusable conventions (code style, deploy rules, tone, autonomy) are auto-seeded into EVERY new project you create, after the built-in baseline. Use for rules you want on by default everywhere. Existing projects are unaffected.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title:     { type: 'string', description: 'Short title for the directive' },
+        content:   { type: 'string', description: 'The instruction content (markdown supported)' },
+        universal: { type: 'boolean', description: 'If true, seeded entries apply even inside flows with their own IS. Default false.' },
+      },
+      required: ['title', 'content'],
+    },
+  },
+  {
+    name: 'list_default_is_entries',
+    description: 'List your PERSONAL default Instruction Set entries (account-level) that auto-seed every new project.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'update_default_is_entry',
+    description: 'Update a personal default Instruction Set entry by id. Only provided fields change. Affects only FUTURE projects — already-created projects keep the copy they were seeded with.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entry_id:  { type: 'string', description: 'UUID of the default IS entry (from list_default_is_entries).' },
+        title:     { type: 'string' },
+        content:   { type: 'string' },
+        universal: { type: 'boolean' },
+      },
+      required: ['entry_id'],
+    },
+  },
+  {
+    name: 'delete_default_is_entry',
+    description: 'Delete a personal default Instruction Set entry by id. Affects only future projects.',
+    inputSchema: {
+      type: 'object',
+      properties: { entry_id: { type: 'string', description: 'UUID of the default IS entry.' } },
+      required: ['entry_id'],
     },
   },
   {
@@ -933,6 +1055,73 @@ const TOOLS = [
         task_id: { type: 'string', description: 'Optional: any task in the flow — used to derive the repo when repo is omitted.' },
       },
       required: ['path'],
+    },
+  },
+  {
+    name: 'drive_upload_file',
+    description: 'Create a file in the user\'s Google Drive. Defaults to a plain text file, but can create an EDITABLE native Google Doc or Sheet (target_type) via Drive\'s convert-on-import. Files are placed in Tasker/ProjectName/FlowShortId/ (or standalone/ for non-flow tasks). Pass task_id to place the file in the right project/flow subfolder and record the Drive file ID on the task. Requires Google Drive connected via Settings → Connectors.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        filename:  { type: 'string', description: 'Filename, e.g. "report.md" or "Article Draft". For docs/sheets the extension is cosmetic — Drive shows it as a native Doc/Sheet.' },
+        content:   { type: 'string', description: 'Text content of the file. For target_type "doc": pass HTML or Markdown. For "sheet": pass CSV.' },
+        task_id:   { type: 'string', description: 'Optional: task UUID or short ID. Places file in the right project/flow subfolder and records the Drive file ID on the task output.' },
+        target_type: { type: 'string', enum: ['file', 'doc', 'sheet'], description: 'What to create. "file" (default) = raw file as-is. "doc" = editable Google Doc (converts from HTML/Markdown). "sheet" = editable Google Sheet (converts from CSV).' },
+        mime_type: { type: 'string', description: 'Source content MIME. For "file": the file\'s own type (default text/plain; use text/markdown for .md). For "doc": text/html (default) or text/markdown. For "sheet": text/csv (default). This is the format Drive converts FROM, not the Google-apps type.' },
+      },
+      required: ['filename', 'content'],
+    },
+  },
+  {
+    name: 'drive_read_file',
+    description: 'Read the text content of a file in the user\'s Google Drive by its file ID. Requires Google Drive connected.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        file_id: { type: 'string', description: 'Google Drive file ID (returned by drive_upload_file or drive_list_files)' },
+      },
+      required: ['file_id'],
+    },
+  },
+  {
+    name: 'drive_list_files',
+    description: 'List files in the user\'s Tasker folder in Google Drive. Returns id, name, mimeType, size, and modifiedTime for each file. Requires Google Drive connected.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Optional: extra Drive query filter (e.g. "name contains \'report\'"). Appended to the parent-folder filter.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'list_google_task_lists',
+    description: 'List the user\'s Google Task lists. Requires Google Tasks connected via Settings → Connectors.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'list_google_tasks',
+    description: 'List pending tasks from a specific Google Task list. Returns title, notes, due date, and task ID.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        list_id:           { type: 'string',  description: 'Google Task list ID (from list_google_task_lists)' },
+        include_completed: { type: 'boolean', description: 'Include completed tasks. Default false.' },
+      },
+      required: ['list_id'],
+    },
+  },
+  {
+    name: 'pull_google_task',
+    description: 'Pull a Google Task into Tasker as a new pending task in the specified section.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        list_id:    { type: 'string', description: 'Google Task list ID (from list_google_task_lists)' },
+        task_id:    { type: 'string', description: 'Google Task ID to pull (from list_google_tasks)' },
+        section_id: { type: 'string', description: 'Tasker section ID to create the task in' },
+      },
+      required: ['list_id', 'task_id', 'section_id'],
     },
   },
   {
@@ -1257,6 +1446,19 @@ const TOOLS = [
     },
   },
   {
+    name: 'move_task',
+    description: 'Move a task to a DIFFERENT project. Reassigns the short ID into the target project\'s sequence and preserves text, detail, priority, status, output contract, and stored artifact. Side effects (the task is leaving its old project): it is unlinked from any flow, its section/group is reset (section/group are project-scoped), and cross-project I/O dependency edges are DROPPED — both the task\'s own input edges and any references to it from tasks left behind. The response reports exactly what was dropped. For same-project moves between sections/groups use update_task or move_task_to_group instead.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31) to move' },
+        target_project_id: { type: 'string', description: 'Destination project: prefix (e.g. WCP), slug, or UUID' },
+        target_section_id: { type: 'string', description: 'Optional: a section UUID in the TARGET project to drop the task into. If omitted (or not in the target project) the task lands with no section.' },
+      },
+      required: ['task_id', 'target_project_id'],
+    },
+  },
+  {
     name: 'analyze_section',
     description: 'Returns a structured, factual breakdown of a section (task counts by status, group balance, stale tasks) — no AI judgment. Use for raw numbers; use section_insights when you want interpretation and suggested actions.',
     inputSchema: {
@@ -1400,8 +1602,11 @@ const TOOLS = [
         task_id:        { type: 'string', description: 'Task UUID or short ID — the PRODUCER' },
         content:        { type: 'string', description: 'The actual produced output — verbatim, not a summary. This is exactly what the independent validator will grade.' },
         format:         { type: 'string', enum: ['text', 'markdown', 'code', 'json'], description: 'Optional format hint for the validator. Default: text.' },
-        commit_to_repo: { type: 'boolean', description: 'If true, also commit the artifact to the project\'s linked GitHub repo. Requires the project to have a linked repo (github_import_project) and a connected GitHub account.' },
-        filename:       { type: 'string', description: 'Filename for the committed file (e.g. "report.md"). Required when commit_to_repo is true. The path in the repo will be .tasker/artifacts/{flow-short-id or task-short-id}/{filename}.' },
+        commit_to_repo:  { type: 'boolean', description: 'If true, also commit the artifact to the project\'s linked GitHub repo. Requires the project to have a linked repo (github_import_project) and a connected GitHub account.' },
+        filename:        { type: 'string', description: 'Filename for the committed file (e.g. "report.md"). Required when commit_to_repo is true. The path in the repo will be .tasker/artifacts/{flow-short-id or task-short-id}/{filename}.' },
+        upload_to_drive: { type: 'boolean', description: 'If true, also upload the artifact to the user\'s Tasker folder in Google Drive. Requires Google Drive connected via the app Connectors page.' },
+        drive_filename:  { type: 'string', description: 'Filename for the Drive file (e.g. "report.md"). Required when upload_to_drive is true.' },
+        drive_target_type: { type: 'string', enum: ['file', 'doc', 'sheet'], description: 'When upload_to_drive is true: "file" (default) keeps the raw artifact; "doc" creates an editable Google Doc (artifact should be HTML/Markdown); "sheet" creates an editable Google Sheet (artifact should be CSV).' },
       },
       required: ['task_id', 'content'],
     },
@@ -1570,6 +1775,29 @@ const TOOLS = [
     },
   },
   {
+    name: 'guide_flow',
+    description: 'Start or resume guide mode for a flow that has user/external steps. Returns the current pending human step with its human_guidance text, AI coaching context, and what evidence is needed to advance. The agent\'s role in guide mode is coach + verifier (explain the step, answer "why", troubleshoot snags, check evidence) — NOT executor. Call this at the start of a guide session and whenever the user asks for the current step or needs help.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id: { type: 'string', description: 'Flow UUID or flow name (partial match).' },
+        task_id: { type: 'string', description: 'Any task in the flow — server finds the whole flow.' },
+      },
+    },
+  },
+  {
+    name: 'advance_guide',
+    description: 'Mark the current guide-mode step as done with evidence, then advance the cursor to the next human step (or signal that agent execution resumes). Requires evidence — a note, URL, or screenshot description proving the step was completed. The agent verifies the evidence before advancing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id: { type: 'string', description: 'Flow UUID or name.' },
+        task_id: { type: 'string', description: 'Any task in the flow.' },
+        evidence: { type: 'string', description: 'Proof that the current step is done: a URL, confirmation message, description of what the user observed, or any verifiable artifact. Required.' },
+      },
+    },
+  },
+  {
     name: 'run_flow',
     description: 'Get the full execution playbook for an existing flow — ordered steps with their contracts, current status, and the step-by-step protocol to run the flow to completion. Call this at the start of any flow run. The playbook tells you exactly what to produce at each step, what the quality gates check, and how to sequence store_artifact → complete_task → validate_output → submit_validation_result for each handoff.',
     inputSchema: {
@@ -1718,6 +1946,193 @@ async function resolveFlow(sb: any, userId: string, args: any): Promise<{ id: st
     }
   }
   return null
+}
+
+// ── Project export / import (full-fidelity portable bundle) ───────────────────
+// Serialize an ENTIRE project — Foundation, sections, groups, tasks (+ milestones,
+// I/O edges, contracts, flow membership, custom statuses), flows (+ flow IS/KB),
+// KB, IS — into a portable JSON bundle, and recreate it under a (possibly different)
+// account with fresh IDs. No DB migration: pure read + insert. Rows travel VERBATIM
+// (select '*') so column drift carries for free; import strips DB-managed fields and
+// remaps the handful of cross-row references. Reused by the export_project /
+// import_project tools (and a future web Download/Upload surface).
+const EXPORT_BUNDLE_VERSION = 1
+
+async function exportProjectBundle(sb: any, userId: string, projectId: string, logCtx?: any) {
+  const project = await resolveProject(sb, userId, projectId, logCtx)
+  if (!project) return null
+  const pid = project.id
+
+  const { data: full } = await sb.from('projects').select('*').eq('id', pid).single()
+  const [sections, groups, tasks, flows, statuses, knowledge, instructions] = await Promise.all([
+    sb.from('sections').select('*').eq('project_id', pid).order('sort_order'),
+    sb.from('groups').select('*').eq('project_id', pid).order('sort_order'),
+    sb.from('tasks').select('*').eq('project_id', pid).order('sort_order'),
+    sb.from('flows').select('*').eq('project_id', pid),
+    sb.from('project_statuses').select('*').eq('project_id', pid),
+    sb.from('project_knowledge').select('*').eq('project_id', pid),
+    sb.from('project_instructions').select('*').eq('project_id', pid),
+  ]).then((rs: any[]) => rs.map((r: any) => r.data || []))
+
+  const taskIds = tasks.map((t: any) => t.id)
+  const flowIds = flows.map((f: any) => f.id)
+  const [discussions, taskStatuses, flowIs, flowKb] = await Promise.all([
+    taskIds.length ? sb.from('task_discussions').select('*').in('task_id', taskIds) : Promise.resolve({ data: [] }),
+    taskIds.length ? sb.from('task_statuses').select('*').in('task_id', taskIds) : Promise.resolve({ data: [] }),
+    flowIds.length ? sb.from('flow_instructions').select('*').in('flow_id', flowIds) : Promise.resolve({ data: [] }),
+    flowIds.length ? sb.from('flow_knowledge').select('*').in('flow_id', flowIds) : Promise.resolve({ data: [] }),
+  ]).then((rs: any[]) => rs.map((r: any) => r.data || []))
+
+  return {
+    tasker_export: {
+      version: EXPORT_BUNDLE_VERSION,
+      source: { name: project.name, prefix: project.prefix || null, project_id: pid },
+    },
+    project: { name: full?.name ?? project.name, context: full?.context ?? {} },
+    sections, groups, tasks, flows,
+    statuses, task_statuses: taskStatuses,
+    flow_instructions: flowIs, flow_knowledge: flowKb,
+    knowledge, instructions,
+    task_discussions: discussions,
+  }
+}
+
+// Strip DB-managed columns; everything else on the row travels verbatim.
+function stripManaged(row: any, extra: string[] = []): any {
+  const out = { ...row }
+  for (const k of ['id', 'created_at', 'updated_at', 'user_id', 'project_id', ...extra]) delete out[k]
+  return out
+}
+
+// Remap the task→task references embedded in a task's input edges (and any legacy
+// output.target_task_id) to the freshly-minted task IDs.
+function remapTaskRefs(input: any, output: any, taskMap: Map<string, string>) {
+  const m = (id: string) => taskMap.get(id) || id
+  let newInput = input
+  if (input && typeof input === 'object') {
+    newInput = JSON.parse(JSON.stringify(input))
+    if (Array.isArray(newInput.edges)) {
+      newInput.edges = newInput.edges.map((e: any) => (e && e.source_task_id) ? { ...e, source_task_id: m(e.source_task_id) } : e)
+    } else if (newInput.source_task_id) {
+      newInput.source_task_id = m(newInput.source_task_id)
+    }
+  }
+  let newOutput = output
+  if (output && typeof output === 'object' && output.target_task_id) {
+    newOutput = { ...output, target_task_id: m(output.target_task_id) }
+  }
+  return { input: newInput, output: newOutput }
+}
+
+async function importProjectBundle(sb: any, userId: string, bundle: any, opts: { name?: string, reset_progress?: boolean }) {
+  if (!bundle || typeof bundle !== 'object' || !bundle.project) throw new Error('Invalid bundle: missing "project". Pass the object returned by export_project.')
+  const resetProgress = opts.reset_progress === true
+
+  // 1. New project (fresh slug + prefix), carrying the Foundation context verbatim.
+  const name = (opts.name && opts.name.trim()) || bundle.project.name || 'Imported Project'
+  const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36)
+  const prefix = await deriveProjectPrefix(sb, userId, name)
+  const { data: proj, error: pe } = await sb.from('projects')
+    .insert({ name, slug, user_id: userId, context: bundle.project.context ?? {}, ...(prefix ? { prefix } : {}) })
+    .select().single()
+  if (pe) throw new Error(`Failed to create project: ${pe.message}`)
+  const newProjectId = proj.id
+
+  // The projects AFTER-INSERT trigger auto-seeds a baseline Instruction Set. The bundle
+  // already carries the source project's full IS (baseline included), so clear the
+  // auto-seeded rows to keep the import an exact reproduction rather than a superset.
+  await sb.from('project_instructions').delete().eq('project_id', newProjectId)
+
+  // 2. Pre-mint new IDs for every FK-referenced entity so references remap in one pass.
+  const sectionMap = new Map<string, string>(), groupMap = new Map<string, string>(),
+        flowMap = new Map<string, string>(), statusMap = new Map<string, string>(),
+        taskMap = new Map<string, string>()
+  for (const s of bundle.sections || []) sectionMap.set(s.id, crypto.randomUUID())
+  for (const g of bundle.groups || []) groupMap.set(g.id, crypto.randomUUID())
+  for (const f of bundle.flows || []) flowMap.set(f.id, crypto.randomUUID())
+  for (const s of bundle.statuses || []) statusMap.set(s.id, crypto.randomUUID())
+  for (const t of bundle.tasks || []) taskMap.set(t.id, crypto.randomUUID())
+
+  const counts: Record<string, number> = {}
+  const insertRows = async (table: string, rows: any[]) => {
+    if (!rows.length) return
+    const { error } = await sb.from(table).insert(rows)
+    if (error) throw new Error(`Insert into ${table} failed: ${error.message}`)
+    counts[table] = (counts[table] || 0) + rows.length
+  }
+
+  // 3. Sections → groups (section FK) → custom statuses → flows (project FK).
+  await insertRows('sections', (bundle.sections || []).map((s: any) => ({
+    ...stripManaged(s), id: sectionMap.get(s.id), project_id: newProjectId,
+  })))
+  await insertRows('groups', (bundle.groups || []).map((g: any) => ({
+    ...stripManaged(g), id: groupMap.get(g.id), project_id: newProjectId,
+    section_id: g.section_id ? (sectionMap.get(g.section_id) ?? null) : null,
+  })))
+  await insertRows('project_statuses', (bundle.statuses || []).map((s: any) => ({
+    ...stripManaged(s), id: statusMap.get(s.id), project_id: newProjectId, user_id: userId,
+  })))
+  // Flow short_id is unique PER ACCOUNT, so it cannot be preserved — regenerate below.
+  await insertRows('flows', (bundle.flows || []).map((f: any) => ({
+    ...stripManaged(f, ['short_id']), id: flowMap.get(f.id), project_id: newProjectId, user_id: userId, short_id: null,
+  })))
+  if ((bundle.flows || []).length) {
+    let n = 1
+    if (proj.prefix) {
+      const { data: ex } = await sb.from('flows').select('short_id').eq('user_id', userId).like('short_id', `${proj.prefix}-F%`)
+      const used = (ex || []).map((r: any) => { const mm = r.short_id?.match(/^.+-F(\d+)$/); return mm ? parseInt(mm[1], 10) : 0 })
+      n = used.length ? Math.max(...used) + 1 : 1
+    }
+    for (const f of bundle.flows) {
+      const sid = proj.prefix ? `${proj.prefix}-F${n++}` : `${name} - F${n++}`
+      await sb.from('flows').update({ short_id: sid }).eq('id', flowMap.get(f.id))
+    }
+  }
+
+  // 4. Tasks. Preserve short_id (new project is empty, so original numbers stay unique
+  //    AND collision-free — the trigger only fires when short_id is null). Remap FKs and
+  //    embedded I/O references; defer the task→task seed link to a 2nd pass.
+  await insertRows('tasks', (bundle.tasks || []).map((t: any) => {
+    const { input, output } = remapTaskRefs(t.input, t.output, taskMap)
+    return {
+      ...stripManaged(t, ['intake_job_id', 'spawned_from_seed_id', 'completed_at']),
+      id: taskMap.get(t.id), project_id: newProjectId, user_id: userId,
+      status: resetProgress ? 'pending' : t.status,
+      completed_at: (!resetProgress && t.status === 'done') ? (t.completed_at ?? null) : null,
+      section_id: t.section_id ? (sectionMap.get(t.section_id) ?? null) : null,
+      group_id: t.group_id ? (groupMap.get(t.group_id) ?? null) : null,
+      flow_id: t.flow_id ? (flowMap.get(t.flow_id) ?? null) : null,
+      custom_status_id: t.custom_status_id ? (statusMap.get(t.custom_status_id) ?? null) : null,
+      intake_job_id: null, spawned_from_seed_id: null,
+      input, output,
+    }
+  }))
+  // 5. Backfill task→task seed provenance now that every task exists.
+  for (const t of (bundle.tasks || [])) {
+    if (t.spawned_from_seed_id && taskMap.has(t.spawned_from_seed_id)) {
+      await sb.from('tasks').update({ spawned_from_seed_id: taskMap.get(t.spawned_from_seed_id) }).eq('id', taskMap.get(t.id))
+    }
+  }
+
+  // 6. Leaf rows: milestones, task↔status junction, flow IS/KB, project KB/IS.
+  await insertRows('task_discussions', (bundle.task_discussions || [])
+    .filter((d: any) => taskMap.has(d.task_id))
+    .map((d: any) => ({ ...stripManaged(d, ['task_id']), task_id: taskMap.get(d.task_id), user_id: userId })))
+  await insertRows('task_statuses', (bundle.task_statuses || [])
+    .filter((ts: any) => taskMap.has(ts.task_id) && statusMap.has(ts.status_id))
+    .map((ts: any) => ({ ...stripManaged(ts, ['task_id', 'status_id']), task_id: taskMap.get(ts.task_id), status_id: statusMap.get(ts.status_id) })))
+  await insertRows('flow_instructions', (bundle.flow_instructions || [])
+    .filter((r: any) => flowMap.has(r.flow_id))
+    .map((r: any) => ({ ...stripManaged(r, ['flow_id']), flow_id: flowMap.get(r.flow_id), user_id: userId })))
+  await insertRows('flow_knowledge', (bundle.flow_knowledge || [])
+    .filter((r: any) => flowMap.has(r.flow_id))
+    .map((r: any) => ({ ...stripManaged(r, ['flow_id']), flow_id: flowMap.get(r.flow_id), user_id: userId })))
+  await insertRows('project_knowledge', (bundle.knowledge || [])
+    .map((r: any) => ({ ...stripManaged(r), project_id: newProjectId, user_id: userId })))
+  await insertRows('project_instructions', (bundle.instructions || [])
+    .map((r: any) => ({ ...stripManaged(r), project_id: newProjectId, user_id: userId })))
+
+  return { project: proj, counts }
 }
 
 // ── Tool handlers ─────────────────────────────────────────────
@@ -1924,6 +2339,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `\n\nTHEN, to go from grounding to action, offer to build the first concrete chunk of work as a flow (build_new_flow).`
     }
 
+    case 'export_project': {
+      const bundle = await exportProjectBundle(sb, userId, args.project_id, logCtx)
+      if (!bundle) return `Project "${args.project_id}" not found.`
+      // Return the raw JSON so the agent can write it straight to a file / hand it to import_project.
+      return JSON.stringify(bundle, null, 2)
+    }
+
+    case 'import_project': {
+      // Accept the bundle as an object, or as a JSON string (some clients stringify nested objects).
+      let bundle = args.bundle
+      if (typeof bundle === 'string') {
+        try { bundle = JSON.parse(bundle) } catch { return 'bundle could not be parsed as JSON. Pass the object returned by export_project.' }
+      }
+      if (!bundle || typeof bundle !== 'object') return 'bundle is required — pass the object returned by export_project.'
+      const { project, counts } = await importProjectBundle(sb, userId, bundle, { name: args.name, reset_progress: args.reset_progress })
+      const summary = Object.entries(counts).map(([k, v]) => `${v} ${k.replace(/_/g, ' ')}`).join(', ') || 'no child rows'
+      const srcPrefix = bundle.tasker_export?.source?.prefix
+      return `Imported project "${project.name}" (prefix: ${project.prefix || '(none)'} | id: ${project.id}).\nReproduced: ${summary}.` +
+        `\nTask short IDs preserved${srcPrefix ? ` (e.g. ${srcPrefix}-N → ${project.prefix}-N)` : ''}; flow short IDs regenerated for this account.` +
+        (args.reset_progress ? '\nAll tasks reset to pending (template copy).' : '\nStatuses and completion preserved (backup copy).')
+    }
+
     case 'update_project_context': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
@@ -1997,6 +2434,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       return `Created section "${args.name}" in "${project.name}"\nid: ${data.id}`
     }
 
+    case 'rename_section': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const { data: section } = await sb.from('sections')
+        .select('id, name').eq('id', args.section_id).eq('project_id', project.id).maybeSingle()
+      if (!section) return `Section not found in "${project.name}".`
+      const { error } = await sb.from('sections').update({ name: args.name }).eq('id', section.id)
+      if (error) throw new Error(error.message)
+      return `Renamed section "${section.name}" → "${args.name}" in "${project.name}".`
+    }
+
     case 'delete_section': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
@@ -2049,7 +2497,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case 'create_task': {
-      const { project_id, section_id, text, detail, priority, due_date, kind, seed_target, open_questions, milestones } = args
+      const { project_id, section_id, text, detail, priority, due_date, kind, seed_target, open_questions, milestones, executor, human_guidance } = args
       const project = await resolveProject(sb, userId, project_id)
       if (!project) return `Project "${project_id}" not found.`
       const isSeed = kind === 'seed'
@@ -2058,6 +2506,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const siblingQuery = sb.from('tasks').select('sort_order').eq('project_id', project.id).eq('section_id', resolvedSectionId)
       const { data: lastSibling } = await siblingQuery.order('sort_order', { ascending: false }).limit(1).maybeSingle()
       const sortOrder = (lastSibling?.sort_order ?? -1) + 1
+      const resolvedExecutor = executor && ['agent', 'user', 'external'].includes(executor) ? executor : 'agent'
       const { data, error } = await sb.from('tasks').insert({
         project_id: project.id,
         section_id: resolvedSectionId,
@@ -2071,6 +2520,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         kind: isSeed ? 'seed' : 'normal',
         seed_target: isSeed ? seed_target : null,
         seed_open_questions: isSeed && Array.isArray(open_questions) ? open_questions : null,
+        executor: resolvedExecutor,
+        human_guidance: human_guidance ?? null,
       }).select().single()
       if (error) throw new Error(error.message)
       for (const m of (Array.isArray(milestones) ? milestones : []).map((x: string) => String(x).trim()).filter(Boolean)) {
@@ -2117,7 +2568,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance']
       const patch: Record<string, any> = {}
       for (const k of allowed) if (k === 'group_id' ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
       const task = await resolveTask(sb, userId, task_id)
@@ -2187,6 +2638,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
 
       await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString() }).eq('id', task.id)
+      // Fire-and-forget: move Drive attachments to Completed/ subfolder.
+      if (task.output?.drive_files?.length) {
+        loadGoogleAccessToken(sb, userId).then(t => { if (t) moveDriveFilesToFolder(sb, t, task, userId, 'Completed') }).catch(() => {})
+      }
       // TDE-261 trigger: a review-enabled non-flow task gets judged on completion.
       let reviewNudge = ''
       if (task.review_enabled && !isFlowTask(task) && task.review_bar?.rules?.length) {
@@ -2205,6 +2660,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'delete_task': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return 'Task not found.'
+      // Fire-and-forget: move Drive attachments to Archived/ before deleting.
+      if (task.output?.drive_files?.length) {
+        loadGoogleAccessToken(sb, userId).then(t => { if (t) moveDriveFilesToFolder(sb, t, task, userId, 'Archived') }).catch(() => {})
+      }
       await sb.from('tasks').delete().eq('id', task.id)
       return `Deleted "${task.text}".`
     }
@@ -2619,6 +3078,48 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       return `Deleted IS entry "${data.title}".`
     }
 
+    // ── Personal default Instruction Sets (TDE-295) — account-level, auto-seed new projects ──
+    case 'create_default_is_entry': {
+      const { data: last } = await sb.from('default_instructions')
+        .select('sort_order').eq('user_id', userId).order('sort_order', { ascending: false }).limit(1).maybeSingle()
+      const sort_order = ((last?.sort_order) ?? -1) + 1
+      const { data, error } = await sb.from('default_instructions')
+        .insert({ user_id: userId, title: args.title, content: args.content, universal: args.universal === true, sort_order })
+        .select().single()
+      if (error) throw new Error(error.message)
+      return `Created personal default IS entry "${data.title}". It will auto-seed every NEW project${data.universal ? ' (universal — applies even inside flows)' : ''}. Existing projects are unchanged.`
+    }
+
+    case 'list_default_is_entries': {
+      const { data } = await sb.from('default_instructions')
+        .select('id, title, universal, updated_at')
+        .eq('user_id', userId)
+        .order('sort_order')
+      if (!data?.length) return 'No personal default Instruction Set entries. Create one with create_default_is_entry to auto-seed it into every new project.'
+      return data.map((e: any) => `[id: ${e.id}] ${e.title}${e.universal ? ' (universal)' : ''}`).join('\n')
+    }
+
+    case 'update_default_is_entry': {
+      const fields: any = {}
+      if (args.title     !== undefined) fields.title     = args.title
+      if (args.content   !== undefined) fields.content   = args.content
+      if (args.universal !== undefined) fields.universal = args.universal === true
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, or universal.'
+      const { data, error } = await sb.from('default_instructions')
+        .update(fields).eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return `Default IS entry "${args.entry_id}" not found.`
+      return `Updated personal default IS entry "${data.title}". Applies to FUTURE projects; existing projects keep their seeded copy.`
+    }
+
+    case 'delete_default_is_entry': {
+      const { data, error } = await sb.from('default_instructions')
+        .delete().eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
+      if (error) throw new Error(error.message)
+      if (!data) return `Default IS entry "${args.entry_id}" not found.`
+      return `Deleted personal default IS entry "${data.title}". Future projects won't seed it; existing projects are unchanged.`
+    }
+
     // ── Flow-level Instruction Set (TDE-233) ──
     case 'get_flow_is': {
       const flow = await resolveFlow(sb, userId, args)
@@ -3002,6 +3503,198 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       return `File: ${args.path}\nRepo: ${repo}\nSize: ${file.size} bytes\n\n---\n\n${decoded}`
     }
 
+    case 'drive_upload_file': {
+      const gToken = await loadGoogleAccessToken(sb, userId)
+      if (!gToken) return 'Google Drive not connected. Connect it via Settings → Connectors in the app.'
+      const { data: ds } = await sb.from('user_settings').select('google_drive_folder_id').eq('user_id', userId).maybeSingle()
+      let taskerRootId = ds?.google_drive_folder_id
+      if (!taskerRootId) {
+        const folderRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${gToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Tasker', mimeType: 'application/vnd.google-apps.folder' }),
+        })
+        const folder = await folderRes.json()
+        if (!folderRes.ok || !folder.id) return 'Failed to create Tasker Drive folder. Make sure Drive is connected.'
+        await sb.from('user_settings').update({ google_drive_folder_id: folder.id }).eq('user_id', userId)
+        taskerRootId = folder.id
+      }
+
+      let targetFolderId = taskerRootId
+      let task: any = null
+      if (args.task_id) {
+        const resolved = await resolveTask(sb, userId, args.task_id)
+        task = resolved
+        if (task) {
+          const { data: proj } = await sb.from('projects').select('name, google_drive_folder_id').eq('id', task.project_id).maybeSingle()
+          if (proj) {
+            let projectFolderId = proj.google_drive_folder_id
+            if (!projectFolderId) {
+              projectFolderId = await findOrCreateDriveFolder(gToken, taskerRootId, proj.name)
+              await sb.from('projects').update({ google_drive_folder_id: projectFolderId }).eq('id', task.project_id)
+            }
+            let subName = 'standalone'
+            if (task.flow_id) {
+              const { data: flow } = await sb.from('flows').select('short_id, id').eq('id', task.flow_id).maybeSingle()
+              subName = flow?.short_id || flow?.id?.slice(0, 8) || 'standalone'
+            }
+            targetFolderId = await findOrCreateDriveFolder(gToken, projectFolderId, subName)
+          }
+        }
+      }
+
+      // target_type controls the file's metadata mimeType (what Drive STORES it as);
+      // mime_type is the source content type Drive CONVERTS FROM. Setting metadata.mimeType
+      // to a google-apps type triggers convert-on-import → an editable native Doc/Sheet.
+      const targetType = args.target_type || 'file'
+      const GOOGLE_APPS = {
+        doc:   { metaMime: 'application/vnd.google-apps.document',    defaultSource: 'text/html' },
+        sheet: { metaMime: 'application/vnd.google-apps.spreadsheet', defaultSource: 'text/csv'  },
+      }
+      const native = GOOGLE_APPS[targetType as 'doc' | 'sheet']
+      const contentMime = args.mime_type || native?.defaultSource || 'text/plain'
+      const metaObj: Record<string, any> = { name: args.filename, parents: [targetFolderId] }
+      if (native) metaObj.mimeType = native.metaMime
+      const boundary = 'tasker_drive_boundary'
+      const meta = JSON.stringify(metaObj)
+      const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentMime}\r\n\r\n${args.content}\r\n--${boundary}--`
+      const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${gToken}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
+        body,
+      })
+      const uploaded = await uploadRes.json()
+      if (!uploadRes.ok) return `Drive upload failed: ${uploaded.error?.message ?? JSON.stringify(uploaded)}`
+
+      // Store Drive file ID on task output.drive_files
+      if (task && uploaded.id) {
+        const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+        const driveFiles = Array.isArray(prev.drive_files) ? prev.drive_files : []
+        driveFiles.push({ file_id: uploaded.id, filename: args.filename, mime_type: uploaded.mimeType ?? null, uploaded_at: new Date().toISOString() })
+        await sb.from('tasks').update({ output: { ...prev, drive_files: driveFiles } }).eq('id', task.id)
+      }
+
+      const location = args.task_id ? 'project/flow subfolder' : 'Tasker root folder'
+      const kind = native ? (targetType === 'doc' ? 'Google Doc' : 'Google Sheet') : 'file'
+      const link = uploaded.id ? ` https://drive.google.com/open?id=${uploaded.id}` : ''
+      return `Created ${kind} "${args.filename}" in Drive (${location}). File ID: ${uploaded.id}.${link}`
+    }
+
+    case 'drive_read_file': {
+      const gToken = await loadGoogleAccessToken(sb, userId)
+      if (!gToken) return 'Google Drive not connected. Connect it via Settings → Connectors in the app.'
+      // Native Google-apps files (Docs/Sheets) can't be downloaded with alt=media — they must be
+      // exported. Check the mimeType first, then export-or-download accordingly.
+      const metaRes = await fetch(`https://www.googleapis.com/drive/v3/files/${args.file_id}?fields=mimeType,name`, {
+        headers: { Authorization: `Bearer ${gToken}` },
+      })
+      const fileMeta = await metaRes.json().catch(() => ({}))
+      if (!metaRes.ok) return `Drive read failed: ${(fileMeta as any).error?.message ?? metaRes.statusText}`
+      const fileMime: string = (fileMeta as any).mimeType ?? ''
+      const EXPORT_AS: Record<string, string> = {
+        'application/vnd.google-apps.document':    'text/markdown',
+        'application/vnd.google-apps.spreadsheet': 'text/csv',
+      }
+      const exportMime = EXPORT_AS[fileMime]
+      const readUrl = exportMime
+        ? `https://www.googleapis.com/drive/v3/files/${args.file_id}/export?mimeType=${encodeURIComponent(exportMime)}`
+        : `https://www.googleapis.com/drive/v3/files/${args.file_id}?alt=media`
+      const readRes = await fetch(readUrl, { headers: { Authorization: `Bearer ${gToken}` } })
+      if (!readRes.ok) {
+        const err = await readRes.json().catch(() => ({}))
+        return `Drive read failed: ${(err as any).error?.message ?? readRes.statusText}`
+      }
+      const content = await readRes.text()
+      return content
+    }
+
+    case 'drive_list_files': {
+      const gToken = await loadGoogleAccessToken(sb, userId)
+      if (!gToken) return 'Google Drive not connected. Connect it via Settings → Connectors in the app.'
+      const { data: ds } = await sb.from('user_settings').select('google_drive_folder_id').eq('user_id', userId).maybeSingle()
+      let folderId = ds?.google_drive_folder_id
+      if (!folderId) {
+        const folderRes = await fetch('https://www.googleapis.com/drive/v3/files', {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${gToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify({ name: 'Tasker', mimeType: 'application/vnd.google-apps.folder' }),
+        })
+        const folder = await folderRes.json()
+        if (!folderRes.ok || !folder.id) return 'Failed to create Tasker Drive folder. Make sure Drive is connected.'
+        await sb.from('user_settings').update({ google_drive_folder_id: folder.id }).eq('user_id', userId)
+        folderId = folder.id
+      }
+      let q = `'${folderId}' in parents and trashed=false`
+      if (args.query) q += ` and ${args.query}`
+      const listRes = await fetch(
+        `https://www.googleapis.com/drive/v3/files?q=${encodeURIComponent(q)}&fields=files(id,name,mimeType,size,modifiedTime)&orderBy=modifiedTime desc&pageSize=50`,
+        { headers: { Authorization: `Bearer ${gToken}` } },
+      )
+      const list = await listRes.json()
+      if (!listRes.ok) return `Drive list failed: ${list.error?.message ?? JSON.stringify(list)}`
+      const files: any[] = list.files ?? []
+      if (!files.length) return 'No files found in Tasker Drive folder.'
+      return files.map((f: any) => `${f.name} (id: ${f.id}, type: ${f.mimeType}, size: ${f.size ?? '?'}B, modified: ${f.modifiedTime})`).join('\n')
+    }
+
+    case 'list_google_task_lists': {
+      const gToken = await loadGoogleAccessToken(sb, userId)
+      if (!gToken) return 'Google Tasks not connected. Connect via Settings → Connectors in the app.'
+      const res = await fetch('https://tasks.googleapis.com/tasks/v1/users/@me/lists?maxResults=100', {
+        headers: { Authorization: `Bearer ${gToken}` },
+      })
+      const data = await res.json()
+      if (!res.ok) return `Failed: ${data.error?.message ?? JSON.stringify(data)}`
+      const lists: any[] = data.items ?? []
+      if (!lists.length) return 'No Google Task lists found.'
+      return lists.map((l: any) => `${l.title} (id: ${l.id})`).join('\n')
+    }
+
+    case 'list_google_tasks': {
+      const gToken = await loadGoogleAccessToken(sb, userId)
+      if (!gToken) return 'Google Tasks not connected.'
+      const { list_id, include_completed = false } = args
+      const params = new URLSearchParams({ maxResults: '100', showCompleted: String(include_completed), showHidden: 'false' })
+      const res = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/${list_id}/tasks?${params}`, {
+        headers: { Authorization: `Bearer ${gToken}` },
+      })
+      const data = await res.json()
+      if (!res.ok) return `Failed: ${data.error?.message ?? JSON.stringify(data)}`
+      const tasks: any[] = data.items ?? []
+      if (!tasks.length) return 'No tasks found in this list.'
+      return tasks.map((t: any) =>
+        `${t.title} (id: ${t.id}${t.due ? `, due: ${t.due.slice(0, 10)}` : ''}${t.status === 'completed' ? ' [done]' : ''})`
+      ).join('\n')
+    }
+
+    case 'pull_google_task': {
+      const gToken = await loadGoogleAccessToken(sb, userId)
+      if (!gToken) return 'Google Tasks not connected.'
+      const { list_id, task_id, section_id } = args
+      const res = await fetch(`https://tasks.googleapis.com/tasks/v1/lists/${list_id}/tasks/${task_id}`, {
+        headers: { Authorization: `Bearer ${gToken}` },
+      })
+      const gtask = await res.json()
+      if (!res.ok) return `Failed to fetch Google Task: ${gtask.error?.message ?? JSON.stringify(gtask)}`
+      const { data: section } = await sb.from('sections').select('project_id').eq('id', section_id).maybeSingle()
+      if (!section) return 'Section not found.'
+      const { data: lastTask } = await sb.from('tasks').select('sorting_order').eq('section_id', section_id).order('sorting_order', { ascending: false }).limit(1).maybeSingle()
+      const insert: any = {
+        text: gtask.title || 'Untitled',
+        section_id,
+        project_id: section.project_id,
+        user_id: userId,
+        status: 'pending',
+        sorting_order: (lastTask?.sorting_order ?? 0) + 1000,
+        intake_source: 'google_tasks',
+      }
+      if (gtask.notes) insert.detail = gtask.notes
+      if (gtask.due) insert.due_date = gtask.due.slice(0, 10)
+      const { data: newTask, error: insertErr } = await sb.from('tasks').insert(insert).select('id, short_id').single()
+      if (insertErr) return `Failed to create task: ${insertErr.message}`
+      return `Pulled "${gtask.title}" → task ${newTask.short_id ?? newTask.id}`
+    }
+
     case '__init_tasker_session': {
       const { data: settings } = await sb.from('user_settings').select('ai_instructions').eq('user_id', userId).maybeSingle()
       const instructions = settings?.ai_instructions
@@ -3227,6 +3920,66 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       } else {
         return `Moved task ${task.prefix ? `${task.prefix}-${task.short_id}` : task.id} to ungrouped`
       }
+    }
+
+    case 'move_task': {
+      // Cross-project move (TDE-186, Phase 1). Single task, warn-and-drop cross-boundary edges.
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const target = await resolveProject(sb, userId, args.target_project_id)
+      if (!target) return `Target project "${args.target_project_id}" not found.`
+
+      const { data: srcProj } = await sb.from('projects').select('name, prefix').eq('id', task.project_id).maybeSingle()
+      const oldRef = srcProj?.prefix && task.short_id != null ? `${srcProj.prefix}-${task.short_id}` : task.id
+      if (task.project_id === target.id) return `"${task.text}" (${oldRef}) is already in "${target.name}".`
+
+      // short_id is reassigned ATOMICALLY by the task_short_id_trigger when project_id changes
+      // (advisory-locked per target project — safe under concurrent/bulk moves). We do NOT
+      // compute it here; we read it back from the UPDATE below.
+
+      // Validate an optional target section actually belongs to the target project.
+      let landingSection: string | null = null
+      let sectionNote = ''
+      if (args.target_section_id) {
+        const { data: sec } = await sb.from('sections').select('id, name').eq('id', args.target_section_id).eq('project_id', target.id).maybeSingle()
+        if (sec) landingSection = sec.id
+        else sectionNote = ` (ignored target_section_id — not a section of "${target.name}"; landed with no section)`
+      }
+
+      // Cross-boundary edges, dropped. (a) the task's own inputs all point at old-project sources.
+      const ownEdges = inputEdges(task.input)
+      // (b) tasks left behind that consume this task as a source — strip the dangling reference.
+      const [{ data: c1 }, { data: c2 }] = await Promise.all([
+        sb.from('tasks').select('id, input').eq('user_id', userId).contains('input', { source_task_id: task.id }),
+        sb.from('tasks').select('id, input').eq('user_id', userId).contains('input', { edges: [{ source_task_id: task.id }] }),
+      ])
+      const consumerMap = new Map<string, any>()
+      ;[...(c1 || []), ...(c2 || [])].forEach((t: any) => consumerMap.set(t.id, t))
+      const consumers = [...consumerMap.values()]
+      for (const c of consumers) {
+        const kept = inputEdges(c.input).filter((e: any) => e.source_task_id !== task.id)
+        await sb.from('tasks').update({ input: { edges: kept } }).eq('id', c.id)
+      }
+
+      const wasInFlow = !!task.flow_id
+      const { data: moved, error } = await sb.from('tasks').update({
+        project_id: target.id,
+        section_id: landingSection,
+        group_id: null,
+        flow_id: null,
+        flow_step: null,
+        input: { edges: [] },
+      }).eq('id', task.id).select('short_id').single()
+      if (error) throw new Error(error.message)
+
+      const newShortId = moved?.short_id
+      const newRef = target.prefix && newShortId != null ? `${target.prefix}-${newShortId}` : task.id
+      const notes: string[] = []
+      if (ownEdges.length) notes.push(`dropped ${ownEdges.length} input edge${ownEdges.length !== 1 ? 's' : ''} (sources stayed behind)`)
+      if (consumers.length) notes.push(`removed this task as a source from ${consumers.length} downstream task${consumers.length !== 1 ? 's' : ''}`)
+      if (wasInFlow) notes.push('unlinked from its flow')
+      const warn = notes.length ? `\nDropped on the way: ${notes.join('; ')}.` : ''
+      return `Moved "${task.text}" from "${srcProj?.name ?? 'old project'}" (${oldRef}) to "${target.name}" (${newRef})${sectionNote}.${warn}`
     }
 
     case 'analyze_section': {
@@ -3700,7 +4453,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         if (!flow) return `Flow "${args.flow_id}" not found.`
         flowRecord = flow
         const { data: tasks } = await sb.from('tasks')
-          .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, project:projects(name, prefix)')
+          .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, executor, human_guidance, project:projects(name, prefix)')
           .eq('flow_id', flow.id).eq('user_id', userId)
         flowTasks = tasks || []
       } else if (args.task_id) {
@@ -3712,7 +4465,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           const { data: flow } = await sb.from('flows').select('id, name, short_id, context, project_id').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
           flowRecord = flow || null
           const { data: tasks } = await sb.from('tasks')
-            .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, project:projects(name, prefix)')
+            .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, executor, human_guidance, project:projects(name, prefix)')
             .eq('flow_id', anchor.flow_id).eq('user_id', userId)
           flowTasks = tasks || []
         } else {
@@ -3724,7 +4477,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           if (!projectId) return `Could not determine project for task "${args.task_id}". Pass project_id.`
 
           const { data: allTasks } = await sb.from('tasks')
-            .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, project:projects(name, prefix)')
+            .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, executor, human_guidance, project:projects(name, prefix)')
             .eq('project_id', projectId).eq('user_id', userId)
           const all = allTasks || []
           const taskById = new Map(all.map((t: any) => [t.id, t]))
@@ -3808,14 +4561,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       lines.push('')
 
+      const executorIcon = (ex: string) => ex === 'user' ? '👤' : ex === 'external' ? '🔗' : '🤖'
+      const executorLabel = (ex: string) => ex === 'user' ? 'USER' : ex === 'external' ? 'EXTERNAL' : 'AGENT'
+      const hasHumanSteps = sorted.some((t: any) => t.executor === 'user' || t.executor === 'external')
+
       // Per-step details
       lines.push('── STEPS ──────────────────────────────────────────')
       sorted.forEach((t: any, i: number) => {
         const isDone = t.status === 'done'
         const isCurrent = i === pendingFrom
         const marker = isDone ? '✓ DONE' : isCurrent ? '▶ NEXT' : '○ WAITING'
+        const ex = t.executor || 'agent'
         lines.push(``)
-        lines.push(`${stepLabel(t, i)}  [${marker}]  — ${t.text}`)
+        lines.push(`${stepLabel(t, i)}  [${marker}]  ${executorIcon(ex)} ${executorLabel(ex)}  — ${t.text}`)
+
+        // Human guidance (user/external steps only)
+        if ((ex === 'user' || ex === 'external') && t.human_guidance) {
+          lines.push(`  Guide: ${t.human_guidance}`)
+        }
 
         // Incoming gate contracts (what this task demands from its producers)
         const edges = inputEdges(t.input)
@@ -3852,30 +4615,214 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
       })
 
+      const currentTask = sorted[pendingFrom]
+      const currentExecutor = currentTask?.executor || 'agent'
+
       lines.push('')
       lines.push('── EXECUTION PROTOCOL ─────────────────────────────')
-      lines.push(`Resume at ${stepLabel(sorted[pendingFrom], pendingFrom)}: "${sorted[pendingFrom].text}"`)
+      lines.push(`Resume at ${stepLabel(currentTask, pendingFrom)}: "${currentTask.text}"`)
+      if (hasHumanSteps) {
+        lines.push(`Mode: HYBRID — this flow mixes agent steps (🤖) and human steps (👤 USER / 🔗 EXTERNAL).`)
+      }
       lines.push('')
-      lines.push('For each step:')
-      lines.push('  1. Call get_task(task_id) — sets it in_progress automatically.')
-      lines.push('  2. Do the work. Produce the artifact.')
-      lines.push('  3. Call store_artifact(task_id, verbatim_content) — REQUIRED before completing if judgment output rules exist.')
-      lines.push('  4. Call complete_task(task_id).')
-      lines.push('  5. Validate the output:')
-      lines.push('       A. Check-only rules → call submit_validation_result directly (skip validate_output).')
-      lines.push('       B. Judgment rules → call validate_output to get validator_agent_prompt, then spawn a fresh')
-      lines.push('          adversarial validator subagent via the Agent tool passing that prompt unmodified.')
-      lines.push('  6. On action=pass → proceed to the next step.')
-      lines.push('     On action=regenerate → redo this step, re-validate. Max 3 attempts.')
-      lines.push('     On action=ask_human → call get_task_critique, then use AskUserQuestion to present to the human.')
-      lines.push('  7. Repeat until all steps are done.')
+
+      if (currentExecutor === 'user' || currentExecutor === 'external') {
+        lines.push(`Current step is a ${executorLabel(currentExecutor)} step — switch to guide mode:`)
+        lines.push('  1. Call guide_flow(flow_id) to get the full coaching context for this step.')
+        lines.push('  2. Present the human_guidance to the user, explain the step, answer questions, troubleshoot snags.')
+        lines.push('  3. When the user reports done, verify their evidence (URL, screenshot, confirmation).')
+        lines.push('  4. Call advance_guide(flow_id, evidence) to record the evidence and advance the cursor.')
+        lines.push('  5. If the next step is an AGENT step, self-sequence it as below; if it\'s another human step, loop guide_flow.')
+      } else {
+        lines.push('For each AGENT step:')
+        lines.push('  1. Call get_task(task_id) — sets it in_progress automatically.')
+        lines.push('  2. Do the work. Produce the artifact.')
+        lines.push('  3. Call store_artifact(task_id, verbatim_content) — REQUIRED before completing if judgment output rules exist.')
+        lines.push('  4. Call complete_task(task_id).')
+        lines.push('  5. Validate the output:')
+        lines.push('       A. Check-only rules → call submit_validation_result directly (skip validate_output).')
+        lines.push('       B. Judgment rules → call validate_output to get validator_agent_prompt, then spawn a fresh')
+        lines.push('          adversarial validator subagent via the Agent tool passing that prompt unmodified.')
+        lines.push('  6. On action=pass → proceed to the next step.')
+        lines.push('     On action=regenerate → redo this step, re-validate. Max 3 attempts.')
+        lines.push('     On action=ask_human → call get_task_critique, then use AskUserQuestion to present to the human.')
+        if (hasHumanSteps) {
+          lines.push('  7. When you reach a USER or EXTERNAL step → switch to guide mode (call guide_flow).')
+        } else {
+          lines.push('  7. Repeat until all steps are done.')
+        }
+      }
       lines.push('')
       lines.push('Rules:')
       lines.push('  • Do NOT skip a gate — every step with a gate contract MUST be validated before the next step runs.')
       lines.push('  • The validator subagent starts from a FAIL prior — it needs concrete evidence in the artifact to flip to pass.')
       lines.push('  • If a task has no output contract, complete it and move on (no validation needed).')
+      if (hasHumanSteps) {
+        lines.push('  • Guide mode: agent role is COACH + VERIFIER only. Do not execute human/external steps yourself.')
+        lines.push('  • Evidence is required to advance a guide step — do not call advance_guide without it.')
+      }
 
       return lines.join('\n')
+    }
+
+    case 'guide_flow':
+    case 'advance_guide': {
+      // Shared flow resolution for both guide tools
+      let guideFlowRecord: any = null
+      let guideTasks: any[] = []
+
+      const resolveGuideFlow = async () => {
+        if (args.flow_id) {
+          const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
+          if (looksLikeUuid) {
+            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+            guideFlowRecord = data
+          } else {
+            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
+            guideFlowRecord = data
+          }
+        } else if (args.task_id) {
+          const anchor = await resolveTask(sb, userId, args.task_id)
+          if (anchor?.flow_id) {
+            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+            guideFlowRecord = data
+          }
+        }
+        if (!guideFlowRecord) return false
+        const { data: tasks } = await sb.from('tasks')
+          .select('id, text, status, short_id, flow_step, input, output, executor, human_guidance, sort_order, project_id, project:projects(name, prefix)')
+          .eq('flow_id', guideFlowRecord.id).eq('user_id', userId)
+        guideTasks = tasks || []
+        return true
+      }
+
+      const found = await resolveGuideFlow()
+      if (!found || !guideFlowRecord) return 'Flow not found. Pass flow_id or task_id.'
+      if (!guideTasks.length) return 'No tasks found in this flow.'
+
+      // Sort by flow_step
+      const guideSorted = [...guideTasks].sort((a: any, b: any) => (a.flow_step ?? 999) - (b.flow_step ?? 999))
+      const guidePrefix = guideSorted[0]?.project?.prefix || ''
+      const guideRef = (t: any) => guidePrefix && t.short_id != null ? `${guidePrefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
+      const guideStepLabel = (t: any) => `Step ${t.flow_step ?? '?'} · ${guideRef(t)}`
+
+      if (name === 'guide_flow') {
+        // Find current pending human step (use guide_cursor hint or first non-done user/external)
+        const cursor = guideFlowRecord.guide_cursor
+        let currentStep: any = null
+        if (cursor != null) {
+          currentStep = guideSorted.find((t: any) => t.flow_step === cursor && t.status !== 'done')
+        }
+        if (!currentStep) {
+          currentStep = guideSorted.find((t: any) =>
+            t.status !== 'done' && (t.executor === 'user' || t.executor === 'external'))
+        }
+        if (!currentStep) {
+          const allDoneOrAgent = guideSorted.every((t: any) => t.status === 'done' || t.executor === 'agent')
+          if (allDoneOrAgent) return `No pending human/external steps in "${guideFlowRecord.name}". Switch to agent mode (run_flow) for any remaining agent steps.`
+          return `No pending human steps found in "${guideFlowRecord.name}".`
+        }
+
+        // Update guide cursor
+        await sb.from('flows').update({ guide_cursor: currentStep.flow_step }).eq('id', guideFlowRecord.id)
+
+        const ex = currentStep.executor || 'user'
+        const exLabel = ex === 'external' ? 'EXTERNAL' : 'USER'
+        const lines: string[] = []
+        lines.push(`Guide Mode — "${guideFlowRecord.name}"`)
+        lines.push(`Cursor: ${guideStepLabel(currentStep)} [${exLabel}] — ${currentStep.text}`)
+        lines.push(`Progress: ${guideSorted.filter((t: any) => t.status === 'done').length}/${guideSorted.length} steps done`)
+        lines.push('')
+        lines.push('── CURRENT STEP ────────────────────────────────────')
+        if (currentStep.human_guidance) {
+          lines.push(`What to do:`)
+          lines.push(`  ${currentStep.human_guidance}`)
+        } else {
+          lines.push(`Task: ${currentStep.text}`)
+          lines.push(`  (No human_guidance set — use the task title and context to coach the user.)`)
+        }
+        const stepEdges = inputEdges(currentStep.input)
+        if (stepEdges.length) {
+          lines.push('')
+          lines.push('Depends on outputs from:')
+          stepEdges.forEach((e: any) => {
+            const src = guideSorted.find((t: any) => t.id === e.source_task_id)
+            if (src) lines.push(`  • ${guideStepLabel(src)}: ${src.text}`)
+          })
+        }
+        const stepOut = outputContract(currentStep.output)
+        if (stepOut.rules.length) {
+          lines.push('')
+          lines.push('Evidence required (output contract):')
+          stepOut.rules.forEach((r: any) => lines.push(`  • ${r.label}: ${r.rule}`))
+        }
+        lines.push('')
+        lines.push('── AGENT ROLE ──────────────────────────────────────')
+        lines.push('You are COACH + VERIFIER — do NOT execute this step yourself.')
+        lines.push('1. Present the "What to do" instructions to the user clearly.')
+        lines.push('2. Explain the why behind the step if asked.')
+        lines.push('3. Help troubleshoot if they hit a snag (DNS, auth issues, confusing UIs, etc.).')
+        lines.push('4. When the user says they\'re done, ask for evidence (URL, confirmation message, screenshot description).')
+        lines.push('5. Verify the evidence is genuine and specific enough.')
+        lines.push('6. Once satisfied, call advance_guide(flow_id, evidence) to record and advance.')
+        return lines.join('\n')
+      }
+
+      // advance_guide
+      if (!args.evidence || !String(args.evidence).trim()) {
+        return 'Evidence is required to advance a guide step. Ask the user for a URL, confirmation, or description of what they did and observed.'
+      }
+
+      const cursor2 = guideFlowRecord.guide_cursor
+      let stepToAdvance: any = cursor2 != null
+        ? guideSorted.find((t: any) => t.flow_step === cursor2 && t.status !== 'done')
+        : guideSorted.find((t: any) => t.status !== 'done' && (t.executor === 'user' || t.executor === 'external'))
+
+      if (!stepToAdvance) return 'No pending guide step to advance. All human steps may already be done.'
+
+      // Store evidence as artifact
+      const existingOut = (stepToAdvance.output && typeof stepToAdvance.output === 'object') ? stepToAdvance.output : {}
+      const updatedOut = {
+        ...existingOut,
+        artifact: args.evidence,
+        artifact_format: 'text',
+        artifact_stored_at: new Date().toISOString(),
+      }
+      await sb.from('tasks').update({ output: updatedOut, status: 'done', completed_at: new Date().toISOString() }).eq('id', stepToAdvance.id)
+
+      // Find next pending human step
+      const nextHumanStep = guideSorted.find((t: any) =>
+        t.id !== stepToAdvance.id && t.status !== 'done' &&
+        (t.executor === 'user' || t.executor === 'external') &&
+        (t.flow_step ?? 0) > (stepToAdvance.flow_step ?? 0))
+
+      // Find next pending agent step
+      const nextAgentStep = guideSorted.find((t: any) =>
+        t.id !== stepToAdvance.id && t.status !== 'done' && t.executor === 'agent' &&
+        (t.flow_step ?? 0) > (stepToAdvance.flow_step ?? 0))
+
+      const nextCursor = nextHumanStep?.flow_step ?? null
+      await sb.from('flows').update({ guide_cursor: nextCursor }).eq('id', guideFlowRecord.id)
+
+      const advLines: string[] = []
+      advLines.push(`✓ Advanced: ${guideStepLabel(stepToAdvance)} "${stepToAdvance.text}" — marked done.`)
+      advLines.push(`Evidence recorded: ${String(args.evidence).slice(0, 120)}`)
+      advLines.push('')
+      if (nextHumanStep) {
+        advLines.push(`Next human step: ${guideStepLabel(nextHumanStep)} [${nextHumanStep.executor?.toUpperCase() || 'USER'}] — ${nextHumanStep.text}`)
+        advLines.push('Call guide_flow to get coaching context for this step.')
+      } else if (nextAgentStep) {
+        advLines.push(`Next step is an AGENT step: ${guideStepLabel(nextAgentStep)} — ${nextAgentStep.text}`)
+        advLines.push('Switch back to agent mode: call run_flow to get the execution playbook.')
+      } else {
+        const remaining = guideSorted.filter((t: any) => t.status !== 'done' && t.id !== stepToAdvance.id)
+        if (remaining.length === 0) {
+          advLines.push('Flow complete — all steps done.')
+        } else {
+          advLines.push(`Remaining steps: ${remaining.map((t: any) => `${guideStepLabel(t)} (${t.executor || 'agent'})`).join(', ')}`)
+        }
+      }
+      return advLines.join('\n')
     }
 
     case 'build_new_flow': {
@@ -3909,7 +4856,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         playbook: [
           '1. GROUND THE START: use project_context below and read the repo if relevant, then ask the user what they already have / where they are starting from. Do not ask about things you can already see.',
           '2. PIN THE GOAL' + (args.goal ? ` (stated: "${args.goal}")` : '') + ': confirm the end goal and treat it as the FINAL task\'s output contract.',
-          '3. FORWARD-DECOMPOSE one step at a time toward the goal, recommending a path each time, building the ordered chain of tasks.',
+          '3. FORWARD-DECOMPOSE one step at a time toward the goal, recommending a path each time, building the ordered chain of tasks. FOR EACH STEP, ask: who executes this — agent (AI does it), user (human does it, AI coaches), or external (third party like a web admin or client)? A single flow can be hybrid. For user/external steps, ask for human_guidance: what the person must do, where, and how to verify it worked.',
           '4. AUTHOR INPUTS FIRST, THEN DERIVE OUTPUTS (TDE-287): the consumer\'s input requirement is the BASE of the producer\'s contract. For each handoff, first pin the next task\'s input contract (its acceptance criteria) as structured, CONTEXT-FREE rules — the shape of acceptable output, never this run\'s subject. The producer\'s output def-of-done is then DERIVED from what its consumers demand (call derive_output_contract on the producer once edges are wired). RULE QUALITY: push toward sharp, checkable rules. Prefer kind=check with concrete params (word count, test command, file existence). For kind=judgment, require an objective criterion ("each sentence under 25 words" not "readable") and a stated way to verify it. Actively push back on vague rules like "good quality", "clear", "comprehensive" — ask the user what SPECIFICALLY makes it pass. Only make a step its own task if it produces a distinct, checkable output a later step depends on (a contract-worthy handoff).',
           '5. SURFACE ASSUMPTIONS, DON\'T INTERROGATE (TDE-287): present the WHOLE proposed flow (tasks + edges + derived contracts) AND the explicit list of assumptions/uncertainties you made deriving them (vague inherited rules, multi-consumer merges, handoffs with no criteria to derive from). Ask the human to confirm or correct — ONE pass. Assumption-surfacing on a concrete draft beats a cold questionnaire.',
           '6. ON CONFIRM, PERSIST then BLESS (see persistence). The name_flow gate will BLOCK finalize until every handoff has a non-trivial, human-blessed contract — so confirm_contract is a required step, not optional.',
@@ -3917,7 +4864,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         persistence: {
           when: 'ONLY after the user confirms the whole flow.',
           steps: [
-            'create_task for each step (pass section_id from project_context if it belongs in an existing section).',
+            'create_task for each step (pass section_id from project_context if it belongs in an existing section). For user/external steps, pass executor:"user"/"external" and human_guidance with the human-facing action directive.',
             'set_task_input(task_id, source_task_id, contract) on each consuming task — call once per upstream source (fan-in supported). The input contract is the consumer\'s acceptance criteria. Author these FIRST — they are the base of the producer\'s contract.',
             'derive_output_contract(task_id, apply:true) on each producing task to derive its def-of-done from its consumers\' input criteria (or set_task_output directly if you must). Surface the returned assumptions to the human.',
             'confirm_contract(task_id, contract_type) on each side the human has blessed — REQUIRED: name_flow blocks on unblessed contracts (TDE-287 gate).',
@@ -4299,7 +5246,55 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           repoNote = ' (skipped GitHub commit — no GitHub account connected)'
         }
       }
-      return `Artifact stored on "${task.text}" (${wordCount} words, format: ${args.format || 'text'}).${repoNote} Call complete_task when ready — if the task has judgment output rules, validate_output will now embed this artifact directly in the validator prompt.`
+      let driveNote = ''
+      if (args.upload_to_drive && args.drive_filename) {
+        const gToken = await loadGoogleAccessToken(sb, userId)
+        if (gToken) {
+          const { data: ds } = await sb.from('user_settings').select('google_drive_folder_id').eq('user_id', userId).maybeSingle()
+          const folderId = ds?.google_drive_folder_id
+          if (folderId) {
+            try {
+              // Same convert-on-import split as drive_upload_file: metadata.mimeType = google-apps
+              // target type triggers conversion; content Content-Type = source format to convert FROM.
+              const driveTarget = args.drive_target_type || 'file'
+              const NATIVE = {
+                doc:   { metaMime: 'application/vnd.google-apps.document',    defaultSource: 'text/html' },
+                sheet: { metaMime: 'application/vnd.google-apps.spreadsheet', defaultSource: 'text/csv'  },
+              }
+              const nativeArt = NATIVE[driveTarget as 'doc' | 'sheet']
+              const contentMime = nativeArt?.defaultSource || (args.format === 'markdown' ? 'text/markdown' : 'text/plain')
+              const boundary = 'tasker_artifact_boundary'
+              const metaObj: Record<string, any> = { name: args.drive_filename, parents: [folderId] }
+              if (nativeArt) metaObj.mimeType = nativeArt.metaMime
+              const meta = JSON.stringify(metaObj)
+              const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentMime}\r\n\r\n${args.content}\r\n--${boundary}--`
+              const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${gToken}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
+                body,
+              })
+              const uploaded = await uploadRes.json()
+              if (uploadRes.ok) {
+                const kind = nativeArt ? (driveTarget === 'doc' ? 'Google Doc' : 'Google Sheet') : 'file'
+                driveNote = ` Also created ${kind} in Google Drive as "${args.drive_filename}" (id: ${uploaded.id}).`
+                // Record Drive file ID on the task
+                const driveFiles = Array.isArray(prev.drive_files) ? prev.drive_files : []
+                driveFiles.push({ file_id: uploaded.id, filename: args.drive_filename, mime_type: uploaded.mimeType ?? null, uploaded_at: new Date().toISOString() })
+                await sb.from('tasks').update({ output: { ...prev, artifact: args.content, artifact_format: args.format || 'text', artifact_stored_at: new Date().toISOString(), drive_files: driveFiles } }).eq('id', task.id)
+              } else {
+                driveNote = ` (Drive upload failed: ${uploaded.error?.message ?? 'unknown'})`
+              }
+            } catch (err: any) {
+              driveNote = ` (Drive upload failed: ${err.message})`
+            }
+          } else {
+            driveNote = ' (skipped Drive upload — Google Drive not connected or no Tasker folder found)'
+          }
+        } else {
+          driveNote = ' (skipped Drive upload — Google Drive not connected)'
+        }
+      }
+      return `Artifact stored on "${task.text}" (${wordCount} words, format: ${args.format || 'text'}).${repoNote}${driveNote} Call complete_task when ready — if the task has judgment output rules, validate_output will now embed this artifact directly in the validator prompt.`
     }
 
     case 'validate_output': {

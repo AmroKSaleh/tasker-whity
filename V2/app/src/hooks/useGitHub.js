@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import {
   validateGitHubToken,
+  fetchGitHubAccount,
   saveGitHubToken,
   loadGitHubToken,
   removeGitHubToken,
@@ -18,6 +19,7 @@ export function useGitHub() {
   const [loading, setLoading] = useState(true)
   const [userId, setUserId] = useState(null)
   const [isOAuthUser, setIsOAuthUser] = useState(false)
+  const [account, setAccount] = useState(null)   // { login, email } | null
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -27,6 +29,8 @@ export function useGitHub() {
       loadGitHubToken(user.id).then(t => {
         setToken(t)
         setLoading(false)
+        // Resolve the connected account handle live from the stored token (no reconsent).
+        if (t) fetchGitHubAccount(t).then(setAccount).catch(() => {})
       })
     })
   }, [])
@@ -37,12 +41,14 @@ export function useGitHub() {
     await validateGitHubToken(pat)
     await saveGitHubToken(userId, pat)
     setToken(pat)
+    fetchGitHubAccount(pat).then(setAccount).catch(() => {})
   }, [userId])
 
   const disconnect = useCallback(async () => {
     if (!userId) return
     await removeGitHubToken(userId)
     setToken(null)
+    setAccount(null)
   }, [userId])
 
   const syncIssues = useCallback(async (repo, existingIssueNumbers) => {
@@ -93,5 +99,5 @@ export function useGitHub() {
     return { repoInfo, readme, sections }
   }, [token, isConnected])
 
-  return { isConnected, isOAuthUser, loading, connect, disconnect, syncIssues, fetchRepos, getIssuesWithBody, importRepo }
+  return { isConnected, isOAuthUser, loading, account, connect, disconnect, syncIssues, fetchRepos, getIssuesWithBody, importRepo }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
-import { X, Calendar, MoreHorizontal, Crosshair, Sparkles, GripVertical } from 'lucide-react'
+import { X, Calendar, MoreHorizontal, Crosshair, Sparkles, GripVertical, HardDrive } from 'lucide-react'
+import { uploadFileToDrive, driveFileUrl, deleteDriveFile } from '../../lib/driveFiles'
 import clsx from 'clsx'
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { SortableContext, useSortable, verticalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
@@ -132,6 +133,153 @@ export function PrioritySegmented({ value, onChange }) {
         )
       })}
     </div>
+  )
+}
+
+function DeleteFileDialog({ file, busy, error, onCancel, onConfirm }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40"
+      onClick={e => { if (e.target === e.currentTarget && !busy) onCancel() }}
+    >
+      <div className="bg-paper rounded-2xl w-full max-w-sm mx-4 shadow-xl flex flex-col">
+        <div className="flex items-center justify-between px-6 pt-6 pb-0">
+          <p className="text-[15px] font-semibold text-ink">Remove file</p>
+          <button onClick={() => !busy && onCancel()} className="text-mute hover:text-ink text-lg leading-none transition-colors">×</button>
+        </div>
+        <div className="flex flex-col gap-4 px-6 pt-3 pb-6">
+          <p className="text-[13px] text-ink-2 leading-snug">
+            <span className="font-medium text-ink">{file.filename}</span> — do you want to remove just the link from this task, or delete the file from Google Drive entirely?
+          </p>
+          <div className="flex flex-col gap-2">
+            <button
+              onClick={() => onConfirm('link')}
+              disabled={busy}
+              className="flex flex-col items-start gap-0.5 rounded-lg border border-line px-4 py-2.5 text-left hover:border-accent hover:bg-accent/[0.04] transition-colors disabled:opacity-50"
+            >
+              <span className="text-[13px] font-medium text-ink">Remove link only</span>
+              <span className="text-[11px] text-mute">Detach from this task. The file stays in Google Drive.</span>
+            </button>
+            <button
+              onClick={() => onConfirm('drive')}
+              disabled={busy}
+              className="flex flex-col items-start gap-0.5 rounded-lg border border-line px-4 py-2.5 text-left hover:border-red-400 hover:bg-red-500/[0.05] transition-colors disabled:opacity-50"
+            >
+              <span className="text-[13px] font-medium text-red-500">Delete from Drive completely</span>
+              <span className="text-[11px] text-mute">Permanently delete the file from Google Drive. Cannot be undone.</span>
+            </button>
+          </div>
+          {busy && <p className="text-[11px] text-mute">Working…</p>}
+          {error && <p className="text-[11px] text-red-400">{error}</p>}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export function DriveAttachments({ task }) {
+  const [dragging, setDragging] = useState(false)
+  const [uploading, setUploading] = useState(false)
+  const [error, setError] = useState(null)
+  const [localFiles, setLocalFiles] = useState([])
+  const [removedIds, setRemovedIds] = useState(() => new Set())
+  const [pendingDelete, setPendingDelete] = useState(null)
+  const [deleting, setDeleting] = useState(false)
+  const [deleteError, setDeleteError] = useState(null)
+  const inputRef = useRef(null)
+
+  const persisted = task.output?.drive_files ?? []
+  const allFiles = [...persisted, ...localFiles.filter(lf => !persisted.some(p => p.file_id === lf.file_id))]
+    .filter(f => !removedIds.has(f.file_id))
+
+  async function handleFiles(files) {
+    if (!files.length) return
+    setUploading(true)
+    setError(null)
+    try {
+      for (const file of files) {
+        const result = await uploadFileToDrive(file, task.id)
+        setLocalFiles(prev => [...prev, { file_id: result.file_id, filename: result.filename, uploaded_at: new Date().toISOString() }])
+      }
+    } catch (e) {
+      setError(e.message)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function confirmDelete(mode) {
+    if (!pendingDelete) return
+    setDeleting(true)
+    setDeleteError(null)
+    try {
+      await deleteDriveFile(task.id, pendingDelete.file_id, mode)
+      setRemovedIds(prev => new Set(prev).add(pendingDelete.file_id))
+      setLocalFiles(prev => prev.filter(f => f.file_id !== pendingDelete.file_id))
+      if (task.output) task.output.drive_files = (task.output.drive_files ?? []).filter(f => f.file_id !== pendingDelete.file_id)
+      setPendingDelete(null)
+    } catch (e) {
+      setDeleteError(e.message)
+    } finally {
+      setDeleting(false)
+    }
+  }
+
+  return (
+    <Field label="Drive files">
+      {allFiles.length > 0 && (
+        <div className="flex flex-col gap-1">
+          {allFiles.map(f => (
+            <div
+              key={f.file_id}
+              className="flex items-center gap-2 rounded-md border border-line-2 bg-surf-2 px-3 py-2 text-[12px] text-ink-2 group"
+            >
+              <a
+                href={driveFileUrl(f.file_id)}
+                target="_blank"
+                rel="noreferrer"
+                className="flex flex-1 min-w-0 items-center gap-2 hover:text-accent transition-colors"
+              >
+                <HardDrive className="h-3 w-3 shrink-0 text-mute group-hover:text-accent transition-colors" />
+                <span className="flex-1 truncate">{f.filename}</span>
+                <span className="shrink-0 text-mute text-[10px]">↗</span>
+              </a>
+              <button
+                onClick={() => { setDeleteError(null); setPendingDelete(f) }}
+                title="Remove file"
+                className="shrink-0 rounded p-0.5 text-mute hover:text-red-500 hover:bg-red-500/10 transition-colors"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {pendingDelete && (
+        <DeleteFileDialog
+          file={pendingDelete}
+          busy={deleting}
+          error={deleteError}
+          onCancel={() => setPendingDelete(null)}
+          onConfirm={confirmDelete}
+        />
+      )}
+      <div
+        onDragOver={(e) => { e.preventDefault(); setDragging(true) }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => { e.preventDefault(); setDragging(false); handleFiles([...e.dataTransfer.files]) }}
+        onClick={() => inputRef.current?.click()}
+        className={clsx(
+          'flex cursor-pointer items-center justify-center gap-1.5 rounded-md border border-dashed px-3 py-3 text-[12px] transition-colors',
+          dragging ? 'border-accent bg-accent/[0.04] text-accent' : 'border-line text-mute hover:border-accent hover:text-accent',
+        )}
+      >
+        <HardDrive className="h-3 w-3 shrink-0" />
+        {uploading ? 'Uploading…' : 'Drop files or click to upload to Drive'}
+      </div>
+      <input ref={inputRef} type="file" multiple className="hidden" onChange={(e) => handleFiles([...e.target.files])} />
+      {error && <p className="text-[11px] text-red-400">{error}</p>}
+    </Field>
   )
 }
 
@@ -491,6 +639,8 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
               )}
             </form>
           </Field>
+
+          <DriveAttachments task={task} />
 
           {/* ── AI Agent ── */}
           <Field label="AI Agent">

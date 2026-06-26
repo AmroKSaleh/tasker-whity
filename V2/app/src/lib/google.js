@@ -58,7 +58,7 @@ export async function connectGoogle(scopes, returnPath = '/settings') {
 export async function loadGoogleConnection(userId) {
   const { data } = await supabase
     .from('user_settings')
-    .select('google_access_token, google_connected_scopes, google_token_expiry')
+    .select('google_access_token, google_connected_scopes, google_token_expiry, google_email')
     .eq('user_id', userId)
     .maybeSingle()
   if (!data?.google_access_token) return null
@@ -69,6 +69,7 @@ export async function loadGoogleConnection(userId) {
     // not the raw accumulated grant.
     scopes: (data.google_connected_scopes ?? '').split(' ').filter(Boolean),
     expiry: data.google_token_expiry,
+    email: data.google_email ?? null,
   }
 }
 

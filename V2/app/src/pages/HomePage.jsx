@@ -12,6 +12,7 @@ import { useAllProjectTasks } from '../hooks/useAllProjectTasks'
 import { useDefaultProject } from '../hooks/useDefaultProject'
 import ProjectCard from '../components/home/ProjectCard'
 import NewProjectModal from '../components/layout/NewProjectModal'
+import TransferModal from '../components/board/TransferModal'
 import AppShell from '../components/editorial/AppShell'
 import { Kicker } from '../components/editorial/atoms'
 
@@ -20,6 +21,7 @@ export default function HomePage() {
   const { tasksByProject } = useAllProjectTasks()
   const { defaultProjectId, setDefault } = useDefaultProject()
   const [showNewProject, setShowNewProject] = useState(false)
+  const [showTransfer, setShowTransfer] = useState(false)
   const navigate = useNavigate()
 
   const sensors = useSensors(
@@ -45,7 +47,10 @@ export default function HomePage() {
               <Kicker count={projects.length} className="mb-2">ALL PROJECTS</Kicker>
               <h1 className="text-h1 m-0">Projects.</h1>
             </div>
-            <button onClick={() => setShowNewProject(true)} className="btn-primary btn-sm">+ New Project</button>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setShowNewProject(true)} className="btn-primary btn-sm">Create a New Project</button>
+              <button onClick={() => setShowTransfer(true)} className="btn btn-sm">Export / Import</button>
+            </div>
           </header>
 
           {isLoading && projects.length === 0 ? (
@@ -57,7 +62,7 @@ export default function HomePage() {
               <p className="text-[40px] mb-4 opacity-30">◎</p>
               <p className="text-[17px] font-semibold text-ink mb-2">No projects yet</p>
               <p className="text-[13px] text-mute mb-6">Create your first project to get started.</p>
-              <button onClick={() => setShowNewProject(true)} className="btn-primary">+ New Project</button>
+              <button onClick={() => setShowNewProject(true)} className="btn-primary">Create a New Project</button>
             </div>
           ) : (
             <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
@@ -86,6 +91,14 @@ export default function HomePage() {
             setShowNewProject(false)
             if (project?.slug) navigate(`/dashboard/${project.slug}`)
           }}
+        />
+      )}
+
+      {showTransfer && (
+        <TransferModal
+          projects={projects}
+          onClose={() => setShowTransfer(false)}
+          onGoToProject={proj => { setShowTransfer(false); if (proj?.slug) navigate(`/dashboard/${proj.slug}`) }}
         />
       )}
     </>

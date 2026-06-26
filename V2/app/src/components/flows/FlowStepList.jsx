@@ -1,8 +1,25 @@
 import { useState } from 'react'
 import clsx from 'clsx'
-import { ChevronRight, ShieldCheck, AlertTriangle } from 'lucide-react'
+import { ChevronRight, ShieldCheck, AlertTriangle, Bot, User, Link } from 'lucide-react'
 import { Kicker } from '../editorial/atoms'
 import { inputEdges, outputRules, isConfirmed, lintRule } from '../../lib/flowGraph'
+
+const EXECUTOR_CONFIG = {
+  agent:    { Icon: Bot,  label: 'AGENT',    cls: 'text-mute-2 border-mute-2/40' },
+  user:     { Icon: User, label: 'USER',     cls: 'text-accent border-accent/50' },
+  external: { Icon: Link, label: 'EXTERNAL', cls: 'text-[#c08030] border-[#c08030]/50' },
+}
+
+function ExecutorBadge({ executor }) {
+  const cfg = EXECUTOR_CONFIG[executor] || EXECUTOR_CONFIG.agent
+  const { Icon, label, cls } = cfg
+  return (
+    <span className={clsx('inline-flex items-center gap-1 font-mono text-[9px] font-semibold px-1.5 py-px rounded border shrink-0', cls)}>
+      <Icon size={9} />
+      {label}
+    </span>
+  )
+}
 
 function RuleRow({ rule }) {
   const warn = rule.severity === 'warning'
@@ -79,6 +96,9 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
               >
                 <span className="font-mono text-[10px] text-mute-2 shrink-0 w-5">{String(step).padStart(2, '0')}</span>
                 <span className="flex-1 text-[13px] font-medium text-ink truncate">{task.text}</span>
+                {(task.executor === 'user' || task.executor === 'external') && (
+                  <ExecutorBadge executor={task.executor} />
+                )}
                 {prefix && task.short_id != null && (
                   <span className="font-mono text-[10px] text-mute shrink-0">{prefix}-{task.short_id}</span>
                 )}
@@ -92,6 +112,12 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
 
             {isOpen && (
               <div className="pl-[34px] pr-2 pb-3.5 flex flex-col gap-3">
+                {task.human_guidance && (
+                  <div>
+                    <Kicker className="mb-1">GUIDE INSTRUCTIONS · {(task.executor || 'user').toUpperCase()}</Kicker>
+                    <p className="text-[11.5px] text-ink-2 leading-snug whitespace-pre-wrap">{task.human_guidance}</p>
+                  </div>
+                )}
                 {edges.map((e, i) => {
                   const srcStep = stepByTaskId.get(e.source_task_id)
                   const rules = e.contract?.rules ?? []

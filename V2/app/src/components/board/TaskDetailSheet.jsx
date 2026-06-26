@@ -5,7 +5,7 @@ import { useTaskStore } from '../../store/useTaskStore'
 import { updateTaskFields } from '../../hooks/useTasks'
 import { useSheetDrag } from './hooks/useSheetDrag'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
-import { StatusSegmented, PrioritySegmented } from './TaskDetailPanel'
+import { StatusSegmented, PrioritySegmented, DriveAttachments } from './TaskDetailPanel'
 import CustomStatusField from './CustomStatusField'
 import FlowBlockedDialog from './DependencyWarningDialog'
 
@@ -57,6 +57,12 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
   const [milestoneInput, setMilestoneInput] = useState('')
   const [dependencyWarning, setDependencyWarning] = useState(null)
   const [pendingUpdates, setPendingUpdates] = useState(null)
+  const [copiedId, setCopiedId] = useState(false)
+  function copyShortId() {
+    navigator.clipboard?.writeText(`${project.prefix}-${task.short_id}`)
+    setCopiedId(true)
+    setTimeout(() => setCopiedId(false), 1200)
+  }
 
   useEffect(() => {
     function onKey(e) { if (e.key === 'Escape') handleClose() }
@@ -160,7 +166,16 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
           {/* Header row */}
           <div className="flex items-center justify-between gap-2">
             <div className="font-mono text-[10px] uppercase tracking-[0.08em] text-mute truncate">
-              {project?.prefix && task.short_id != null && <span className="text-mute-2">{project.prefix}-{task.short_id} · </span>}
+              {project?.prefix && task.short_id != null && (
+                <button
+                  onClick={copyShortId}
+                  title="Click to copy task ID"
+                  className={clsx('rounded px-1 -ml-1 transition-colors hover:bg-surf-2 hover:text-ink', copiedId ? 'text-accent' : 'text-mute-2')}
+                >
+                  {copiedId ? 'Copied!' : `${project.prefix}-${task.short_id}`}
+                </button>
+              )}
+              {project?.prefix && task.short_id != null && <span className="text-mute-2"> · </span>}
               <span className="font-medium text-ink-2">{section?.name}</span>
               {group?.name && <>{' · '}{group.name}</>}
             </div>
@@ -281,6 +296,8 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
               )}
             </form>
           </Field>
+
+          <DriveAttachments task={task} />
 
         </div>
       </div>

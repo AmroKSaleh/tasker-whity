@@ -1,7 +1,8 @@
 import { supabase } from './supabase'
 
 const CLIENT_ID = import.meta.env.VITE_GOOGLE_CLIENT_ID
-const SCOPE = 'https://www.googleapis.com/auth/calendar'
+// 'openid email' so we can resolve the connected account's email (shown in Settings).
+const SCOPE = 'https://www.googleapis.com/auth/calendar openid email'
 const API = 'https://www.googleapis.com/calendar/v3'
 
 function loadGIS() {
@@ -25,12 +26,21 @@ export async function connectGoogleCalendar(userId) {
       callback: async (res) => {
         if (res.error) { reject(new Error(res.error)); return }
         const expiry = new Date(Date.now() + res.expires_in * 1000).toISOString()
+        // Resolve the connected account's email (the 'email' scope grants userinfo access).
+        let email = null
+        try {
+          const ui = await fetch('https://www.googleapis.com/oauth2/v3/userinfo', {
+            headers: { Authorization: `Bearer ${res.access_token}` },
+          })
+          if (ui.ok) email = (await ui.json()).email ?? null
+        } catch { /* email is best-effort */ }
         await supabase.from('user_settings').upsert({
           user_id: userId,
           gcal_access_token: res.access_token,
           gcal_token_expiry: expiry,
+          gcal_email: email,
         })
-        resolve({ token: res.access_token, expiry })
+        resolve({ token: res.access_token, expiry, email })
       },
     })
     client.requestAccessToken({ prompt: '' })
@@ -57,11 +67,11 @@ export async function disconnectGoogleCalendar(userId) {
 export async function loadCalendarConnection(userId) {
   const { data } = await supabase
     .from('user_settings')
-    .select('gcal_access_token, gcal_token_expiry')
+    .select('gcal_access_token, gcal_token_expiry, gcal_email')
     .eq('user_id', userId)
     .single()
   if (!data?.gcal_access_token) return null
-  return { token: data.gcal_access_token, expiry: data.gcal_token_expiry }
+  return { token: data.gcal_access_token, expiry: data.gcal_token_expiry, email: data.gcal_email ?? null }
 }
 
 async function calendarFetch(token, path, options = {}) {

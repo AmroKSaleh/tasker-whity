@@ -28,6 +28,12 @@ export async function validateGitHubToken(token) {
   return githubFetch(token, '/user')
 }
 
+// The connected account's handle (and email if public) — shown in Settings → Connectors.
+export async function fetchGitHubAccount(token) {
+  const u = await githubFetch(token, '/user')
+  return { login: u.login, email: u.email ?? null }
+}
+
 export async function fetchRepoIssues(token, repo) {
   const data = await githubFetch(token, `/repos/${repo}/issues?state=open&per_page=100`)
   return data.filter(i => !i.pull_request)

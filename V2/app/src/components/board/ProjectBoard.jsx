@@ -1,6 +1,6 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react'
 import clsx from 'clsx'
-import { Crosshair, Sparkles, Download, Star, Play, Clock, X, GripVertical, MoreHorizontal, AlertTriangle, Network } from 'lucide-react'
+import { Crosshair, Sparkles, Download, Star, Play, Clock, X, GripVertical, MoreHorizontal, AlertTriangle, Network, Trash2 } from 'lucide-react'
 import {
   DndContext, DragOverlay, PointerSensor, KeyboardSensor,
   closestCenter, useSensor, useSensors, useDroppable,
@@ -11,7 +11,6 @@ import { useProjectMilestones } from '../../hooks/useProjectMilestones'
 import { useTasks } from '../../hooks/useTasks'
 import { useToggleInProgressWithWarning } from '../../hooks/useToggleInProgressWithWarning'
 import FlowBlockedDialog from './DependencyWarningDialog'
-import { exportProjectAsXLSX } from '../../lib/exportUtils'
 import { scanProjectFlags } from '../../lib/gemini'
 import { useIsDesktop } from './hooks/useMediaQuery'
 import { useTaskPanelState } from './hooks/useTaskPanelState'
@@ -50,6 +49,13 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
   const ip = task.status === 'in_progress'
   const seed = task.kind === 'seed'
   const prio = task.priority === 'medium' ? 'med' : task.priority
+  const [copiedId, setCopiedId] = useState(false)
+  const copyShortId = e => {
+    e.stopPropagation()
+    navigator.clipboard?.writeText(`${prefix}-${task.short_id}`)
+    setCopiedId(true)
+    setTimeout(() => setCopiedId(false), 1200)
+  }
   return (
     <div
       onClick={() => onOpen(task.id)}
@@ -101,7 +107,15 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
         </div>
       </div>
       <div className="flex items-center gap-2 mt-2 font-mono text-[9.5px] text-mute tracking-[0.06em]">
-        {prefix && task.short_id != null && <span className="text-mute-2">{prefix}-{task.short_id}</span>}
+        {prefix && task.short_id != null && (
+          <button
+            onClick={copyShortId}
+            title="Click to copy task ID"
+            className={clsx('rounded px-1 -mx-1 transition-colors hover:bg-surf-2 hover:text-ink', copiedId ? 'text-accent' : 'text-mute-2')}
+          >
+            {copiedId ? 'Copied!' : `${prefix}-${task.short_id}`}
+          </button>
+        )}
         {task.priority && <span className={`dot dot-${prio}`} />}
         {task.priority && <span className="uppercase">{task.priority}</span>}
         {task.due_date && <><span className="text-mute-2">·</span><span>{dueLabel(task.due_date)}</span></>}
@@ -160,11 +174,12 @@ function DroppableList({ sectionId, groupId, items, children }) {
   )
 }
 
-function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection }) {
+function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection, onDeleteSection }) {
   const dim = /done|complete/i.test(section.name)
   const ungrouped = section.ungroupedTasks.filter(t => matchFilter(t, statusFilter, priorityFilter))
   const groups = section.groups.map(g => ({ ...g, tasks: g.tasks.filter(t => matchFilter(t, statusFilter, priorityFilter)) }))
   const [menuOpen, setMenuOpen] = useState(false)
+  const [confirmDelete, setConfirmDelete] = useState(false)
   const [addingGroup, setAddingGroup] = useState(false)
   const [groupName, setGroupName] = useState('')
   function commitGroup() {
@@ -198,8 +213,44 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
               >
                 Add group
               </button>
+              <button
+                onClick={() => { setMenuOpen(false); setConfirmDelete(true) }}
+                className="w-full flex items-center gap-1.5 text-left px-3 py-1.5 text-[12px] text-red-500 hover:bg-red-500/10"
+              >
+                <Trash2 size={11} /> Delete section
+              </button>
             </div>
           </>
+        )}
+        {confirmDelete && (
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black bg-opacity-40"
+            onClick={e => { if (e.target === e.currentTarget) setConfirmDelete(false) }}
+          >
+            <div className="bg-paper rounded-2xl w-full max-w-sm mx-4 shadow-xl flex flex-col">
+              <div className="flex items-center justify-between px-6 pt-6 pb-0">
+                <p className="text-[15px] font-semibold text-ink">Delete section</p>
+                <button onClick={() => setConfirmDelete(false)} className="text-mute hover:text-ink text-lg leading-none transition-colors">×</button>
+              </div>
+              <div className="flex flex-col gap-4 px-6 pt-3 pb-6">
+                <p className="text-[13px] text-ink-2 leading-snug">
+                  Delete <span className="font-medium text-ink">{section.name}</span>?
+                  {section.totalCount > 0
+                    ? <> This permanently deletes the section and its <span className="font-medium text-ink">{section.totalCount} task{section.totalCount !== 1 ? 's' : ''}</span> (and any groups). This cannot be undone.</>
+                    : <> The section is empty. This cannot be undone.</>}
+                </p>
+                <div className="flex justify-end gap-2">
+                  <button onClick={() => setConfirmDelete(false)} className="rounded-lg border border-line px-4 py-1.5 text-[13px] text-ink-2 hover:bg-surf-2 transition-colors">Cancel</button>
+                  <button
+                    onClick={() => { setConfirmDelete(false); onDeleteSection?.(section.id) }}
+                    className="flex items-center gap-1.5 rounded-lg bg-red-500 px-4 py-1.5 text-[13px] font-medium text-white hover:bg-red-600 transition-colors"
+                  >
+                    <Trash2 size={13} /> Delete
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
         )}
       </div>
       <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 flex flex-col gap-1.5 col-body">
@@ -271,7 +322,7 @@ export default function ProjectBoard({ project }) {
   const {
     tasks, sections, groups,
     toggleDone, toggleInProgress: originalToggleInProgress, pinTask,
-    createTask, createSection, createGroup, deleteTask,
+    createTask, createSection, createGroup, deleteTask, deleteSection,
     reorderTasks, moveTask, reorderSections,
   } = useTasks(project.id)
 
@@ -565,7 +616,7 @@ export default function ProjectBoard({ project }) {
                       <h1 className="text-h1 m-0 cursor-text truncate" title="Click to rename" onClick={() => { setNameDraft(project.name); setEditingName(true) }}>{project.name}</h1>
                     )}
                     <span className="font-mono text-[11px] text-mute tracking-[0.06em] shrink-0">
-                      <span className="text-ink font-bold">{tasks.length}</span> tasks · <span className="text-ink font-bold">{pct}%</span> complete
+                      <span className="text-ink font-bold">{doneCount}/{tasks.length}</span> tasks · <span className="text-ink font-bold">{pct}%</span> complete
                     </span>
                   </>
                 )}
@@ -577,8 +628,6 @@ export default function ProjectBoard({ project }) {
                     <button onClick={() => setShowContext(true)} className="btn btn-sm btn-ghost text-mute"><Sparkles size={12} className="text-accent" /> Context</button>
                     <button onClick={() => setShowKB(true)} className="btn btn-sm btn-ghost text-mute">KB</button>
                     <button onClick={() => setShowIS(true)} className="btn btn-sm btn-ghost text-mute">IS</button>
-                    <span className="w-px h-[18px] bg-line-2 mx-1" />
-                    <button onClick={() => exportProjectAsXLSX(project, sections, groups, tasks)} className="btn btn-sm btn-ghost text-mute"><Download size={12} /> Export</button>
                     <span className="w-px h-[18px] bg-line-2 mx-1" />
                   </>
                 )}
@@ -697,6 +746,7 @@ export default function ProjectBoard({ project }) {
                       key={s.id} section={s} statusFilter={statusFilter} priorityFilter={priorityFilter} prefix={project.prefix}
                       onAddTask={createTask} onAddDetailed={createAndOpen} onAddGroup={createGroup} onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning}
                       onFocus={openFocusForTask} onPin={pinTask} onDelete={handleDeleteTask} onFocusSection={setFocusedSectionId}
+                      onDeleteSection={deleteSection}
                     />
                   ))
                 )}

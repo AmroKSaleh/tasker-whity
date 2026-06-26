@@ -8,7 +8,7 @@ import { CONNECTORS } from '../../lib/connectors'
 const BTN = 'w-full px-4 py-2 rounded-lg border border-line bg-paper text-[12px] text-ink hover:bg-surf-2 transition-colors disabled:opacity-40'
 
 // Shared card chrome. `action` renders on the right of the header; `children` below it.
-function Row({ icon: Icon, label, slice, connected, badge, action, children }) {
+function Row({ icon: Icon, label, slice, connected, badge, account, action, children }) {
   return (
     <div className="rounded-xl border border-line bg-surf-2 px-4 py-3">
       <div className="flex items-center justify-between gap-3">
@@ -20,7 +20,9 @@ function Row({ icon: Icon, label, slice, connected, badge, action, children }) {
               {connected && <span className="text-[10px] text-green-600">●</span>}
               {badge && <span className="text-[9px] font-mono text-mute-2 uppercase tracking-wide">{badge}</span>}
             </div>
-            <p className="text-[11px] text-mute-2 truncate">{slice}</p>
+            {connected && account
+              ? <p className="text-[11px] text-ink-2 truncate" title={account}>{account}</p>
+              : <p className="text-[11px] text-mute-2 truncate">{slice}</p>}
           </div>
         </div>
         {action}
@@ -96,6 +98,7 @@ export default function ConnectorsSection() {
       const connected = gh.isConnected
       return (
         <Row {...common} connected={connected}
+          account={gh.account?.login ? `@${gh.account.login}` : null}
           action={connected && <DisconnectBtn onClick={gh.disconnect} />}>
           {gh.loading && <p className="mt-2 text-[12px] text-mute">Checking connection…</p>}
           {!gh.loading && !connected && (gh.isOAuthUser ? (
@@ -127,6 +130,7 @@ export default function ConnectorsSection() {
       const connected = cal.isConnected
       return (
         <Row {...common} connected={connected} badge={cal.isExpired ? 'expired' : null}
+          account={cal.email}
           action={connected && <DisconnectBtn onClick={cal.disconnect} />}>
           {cal.loading && <p className="mt-2 text-[12px] text-mute">Checking connection…</p>}
           {!cal.loading && !connected && (
@@ -143,6 +147,7 @@ export default function ConnectorsSection() {
       const connected = !!googleConn && hasGoogleScope(googleConn, c.scope)
       return (
         <Row {...common} connected={connected}
+          account={googleConn?.email}
           action={connected && <DisconnectBtn onClick={() => disconnectGoogleService(c.scope)} />}>
           {googleLoading && <p className="mt-2 text-[12px] text-mute">Checking connection…</p>}
           {!googleLoading && !connected && (

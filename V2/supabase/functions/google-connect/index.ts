@@ -60,11 +60,16 @@ Deno.serve(async (req) => {
     const payload = `${user.id}|${exp}|${returnPath}|${scopes.join(' ')}`
     const state = `${b64url(enc.encode(payload))}.${b64url(await hmac(stateKey, payload))}`
 
+    // Add identity scopes so the token response carries an id_token with the user's email
+    // (shown in Settings → Connectors). These are NOT echoed into the signed state, so the
+    // per-service connection tracking (which lights up Drive/Gmail/Tasks) stays unaffected.
+    const authScopes = Array.from(new Set([...scopes, 'openid', 'email'])).join(' ')
+
     const url = new URL('https://accounts.google.com/o/oauth2/v2/auth')
     url.searchParams.set('client_id', clientId)
     url.searchParams.set('redirect_uri', redirectUri)
     url.searchParams.set('response_type', 'code')
-    url.searchParams.set('scope', scopes.join(' '))
+    url.searchParams.set('scope', authScopes)
     url.searchParams.set('access_type', 'offline')        // ask for a refresh token
     url.searchParams.set('prompt', 'consent')             // ensure refresh token is returned
     url.searchParams.set('include_granted_scopes', 'true') // incremental auth — keep prior scopes

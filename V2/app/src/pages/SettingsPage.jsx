@@ -8,6 +8,7 @@ import { testAIConnection } from '../lib/gemini'
 import { useTheme } from '../hooks/useTheme'
 import TaskStatusSettings from '../components/settings/TaskStatusSettings'
 import ConnectorsSection from '../components/settings/ConnectorsSection'
+import DefaultInstructionsSection from '../components/settings/DefaultInstructionsSection'
 
 const THEME_OPTIONS = [
   { id: 'light',  label: 'Light' },
@@ -767,6 +768,10 @@ export default function SettingsPage() {
             <div className="border-t border-line-2 my-8" />
 
             <ConnectorsSection />
+
+            <div className="border-t border-line-2 my-8" />
+
+            <DefaultInstructionsSection />
 
             <div className="border-t border-line-2 my-8" />
 
