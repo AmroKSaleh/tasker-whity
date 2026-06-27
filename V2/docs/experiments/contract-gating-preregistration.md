@@ -68,3 +68,12 @@ Rationale: objective ground truth (tests, no judge needed for the headline numbe
 - *Determinism hides consistency* → run at production temperature > 0.
 - *Validator is itself an LLM* → intentional: we test the product as-built; the validator is Tasker's actual config.
 - *Single-task generalization* → round 1 is one task; round 2 adds a second coding task + a subjective content task (Waqtak) before any external/marketing claim is made.
+
+## Execution deviation (2026-06-27, recorded BEFORE the run)
+API access is unavailable (company account, no API calls), so round 1 is executed via **Claude Code subagents (a workflow)** rather than `runner.py` + the Anthropic API. Documented deviations from the locked protocol:
+- **Execution path:** subagents generate the candidates; candidates are returned as text and **scored locally** against the same hidden oracle (`test_parse_duration.py`). Scoring stays deterministic and identical to the API path.
+- **Model:** pinned to Sonnet 4.6 via the workflow — this MATCHES the pre-registered model `claude-sonnet-4-6`.
+- **Temperature:** subagent default (not explicitly set). Variance across fresh agent instances still gives a consistency (SD) read, though less controlled than a fixed API temperature.
+- **Effort:** producers `low`, validator `medium` (budget control).
+- **Secondary blind-judge dimensions** (readability / idiomatic / error-handling) are **deferred** for round 1 to conserve budget; round 1 reports only the objective oracle metrics (pass-rate, SD, defects, revision counts). The objective pass-rate is the headline evidence and needs no judge.
+Unchanged: the 3 arms, N=5, the task, the oracle, and the decision bar.
