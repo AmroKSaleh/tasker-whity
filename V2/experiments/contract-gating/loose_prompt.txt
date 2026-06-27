@@ -1,0 +1,1 @@
+Write a Python function parse_duration(s) that parses duration strings like "1h30m" and returns the total number of seconds.
