@@ -1,0 +1,107 @@
+[
+  {
+    "arm": "A",
+    "trial": 1,
+    "revisions": 0,
+    "passed": 18,
+    "pass_rate": 66.7
+  },
+  {
+    "arm": "A",
+    "trial": 2,
+    "revisions": 0,
+    "passed": 19,
+    "pass_rate": 70.4
+  },
+  {
+    "arm": "A",
+    "trial": 3,
+    "revisions": 0,
+    "passed": 19,
+    "pass_rate": 70.4
+  },
+  {
+    "arm": "A",
+    "trial": 4,
+    "revisions": 0,
+    "passed": 20,
+    "pass_rate": 74.1
+  },
+  {
+    "arm": "A",
+    "trial": 5,
+    "revisions": 0,
+    "passed": 20,
+    "pass_rate": 74.1
+  },
+  {
+    "arm": "C",
+    "trial": 1,
+    "revisions": 0,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "C",
+    "trial": 2,
+    "revisions": 0,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "C",
+    "trial": 3,
+    "revisions": 0,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "C",
+    "trial": 4,
+    "revisions": 0,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "C",
+    "trial": 5,
+    "revisions": 0,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "B",
+    "trial": 1,
+    "revisions": 1,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "B",
+    "trial": 2,
+    "revisions": 3,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "B",
+    "trial": 3,
+    "revisions": 3,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "B",
+    "trial": 4,
+    "revisions": 3,
+    "passed": 27,
+    "pass_rate": 100.0
+  },
+  {
+    "arm": "B",
+    "trial": 5,
+    "revisions": 3,
+    "passed": 27,
+    "pass_rate": 100.0
+  }
+]

@@ -77,3 +77,19 @@ API access is unavailable (company account, no API calls), so round 1 is execute
 - **Effort:** producers `low`, validator `medium` (budget control).
 - **Secondary blind-judge dimensions** (readability / idiomatic / error-handling) are **deferred** for round 1 to conserve budget; round 1 reports only the objective oracle metrics (pass-rate, SD, defects, revision counts). The objective pass-rate is the headline evidence and needs no judge.
 Unchanged: the 3 arms, N=5, the task, the oracle, and the decision bar.
+
+## Round 1 results (2026-06-27, Sonnet 4.6, N=5/arm)
+| Arm | mean pass-rate | SD | revisions |
+|---|---|---|---|
+| A (bare) | 71.1% | 2.8 | 0 |
+| C (spec-only) | 100% | 0.0 | 0 |
+| B (full) | 100% | 0.0 | 2.6 |
+
+**B−A = +28.9pp · B−C = +0.0pp → verdict: JUST CLARITY** (per the pre-registered bar).
+
+Findings:
+- The contract/definition-of-done is a large, consistent win (71→100%, zero variance). Evidence-backed.
+- Independent validation added **zero** quality over spec-only, at a cost of ~2.6 revision rounds.
+- The validator was **mis-calibrated**: 4/5 Arm-B trials hit the 3-revision cap, flagging "issues" on code already passing all 27 tests (false positives). Actionable validator bug.
+- **Confound — ceiling effect:** Arm C already hit 100%, so the validator had no real defects to catch. This pilot did NOT fairly test validation's value. The defensible conclusion is narrow: *when a clear contract alone yields perfect output, independent validation is pure cost.*
+- **Next:** Round 2 must use a HARDER task where spec-only (C) lands well below 100%, so the validator gets a fair chance to prove (or disprove) value (B vs C). Strategic stakes: if B≈C on hard tasks too, the verification moat is largely decorative.
