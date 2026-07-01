@@ -503,6 +503,7 @@ const ASSISTANT_DIRECTIVES = [
   'RUN FLOW: When the user asks you to run, execute, or start a flow — call run_flow first (with flow_id or any task_id in the flow). Read the playbook it returns. Then self-sequence through every step in order: execute → store_artifact → complete_task → validate → handle action. Do NOT prompt the user between steps unless action=ask_human. The flow runs to completion (or human intervention) in one session.',
   'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. Submit two fields: (1) observed_value — the raw datum from running it: exact word count ("1,542 words"), command output ("exit 0: All 24 tests passed"), file path ("/src/index.ts found"), pattern match ("keyword \'auth\' found at line 47"). Submitting without observed_value is REJECTED by the server. (2) note — interpretation of the observed_value against the rule (e.g. "1,542 words — exceeds the 1,000-word minimum"). How to produce observed_value: word/char count → run `echo "..." | wc -w` via Bash; command check → run it via Bash, capture stdout + exit code; file existence → Glob/Read, record the path; pattern → Grep/Read and record the match. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) ALSO requires a note — the specific deficiency. This applies to the validator subagent too.',
   'SELF-CONTAINED TASK CONTEXT: When creating any task — via create_task, resolve_seed, or as flow tasks — write the detail field so a cold reader (no access to this chat, session memory, or external notes) can pick it up and act. Include: the goal/why of this specific task, any key decisions or open questions, pointers to load-bearing context (relevant files, KB entries, prior decisions), and the obvious next step. Not a transcript dump — the minimum a cold reader needs to act. Applies to ALL creation paths: direct create_task calls, bootstrap_project populate phase, flow task creation, and resolve_seed outputs.',
+  'RELAY MODE: When the user says they want to RELAY / HAND OFF / SHARE a task with someone else (a teammate, another agent), enter relay mode. (1) Announce "[Recording context for the task]" so the user knows you are now capturing hand-off context, then keep working with them to surface the WHY behind the task. (2) Pass relay_context on create_task (or update_task for an existing task) — a CURATED rationale layer, NOT a transcript dump and NOT a duplicate of detail. detail = the distilled what/how-to-act (self-contained, as always); relay_context = the hand-off layer that removes the assignee\'s need to come back and ask: who it is going to (free text, e.g. "to: Sara (backend)"), the key decision(s) and WHY, approaches considered and rejected and why-not, intent / how to treat the task, open questions, watch-outs. Distill it the same way you distill detail — capture the reasoning, drop the chatter. The recipient is free text for now (no team-member directory yet); auto-routing to real members is a deferred follow-up.',
 ]
 
 // ── Shared schema: a single contract rule (TDE-137) ──────────
@@ -727,6 +728,7 @@ const TOOLS = [
         milestones:     { type: 'array', items: { type: 'string' }, description: 'Ordered milestone texts added in one call (no separate add_milestone needed). On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind="prerequisite" checklist items that soft-gate resolve_seed / build_new_flow. On a normal task they are plain milestones.' },
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent (default) = AI runs it; user = human executes, AI coaches; external = third party (web admin, client, etc.). A single flow can mix executor types.' },
         human_guidance: { type: 'string', description: 'For user/external steps only: the human-facing step instructions shown in guide mode. Distinct from detail (which is AI-facing context). Write as a clear action directive: what the person must do, where, and how to verify it worked.' },
+        relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set this only when the user wants to relay/hand off this task to someone else. A CURATED rationale layer that lets the assignee act without coming back to ask — NOT a transcript dump. Distill from your discussion: who it is going to (free text, e.g. "to: Sara (backend)"), the key decision(s) and WHY, approaches considered and rejected and why-not, intent / how to treat it, open questions, and watch-outs. Setting this marks the task as a relay. Leave unset for normal tasks.' },
       },
       required: ['project_id', 'text'],
     },
@@ -773,6 +775,7 @@ const TOOLS = [
         pinned:         { type: 'boolean', description: 'Pin or unpin the task' },
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent = AI; user = human (AI coaches); external = third party.' },
         human_guidance: { type: 'string', description: 'Human-facing step instructions for guide mode (user/external steps). Replaces existing.' },
+        relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set/replace the curated relay rationale layer on an EXISTING task (e.g. when the user decides to hand off a task already created). Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump. Setting it marks the task as a relay.' },
       },
       required: ['task_id'],
     },
@@ -2513,7 +2516,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case 'create_task': {
-      const { project_id, section_id, text, detail, priority, due_date, kind, seed_target, open_questions, milestones, executor, human_guidance } = args
+      const { project_id, section_id, text, detail, priority, due_date, kind, seed_target, open_questions, milestones, executor, human_guidance, relay_context } = args
       const project = await resolveProject(sb, userId, project_id)
       if (!project) return `Project "${project_id}" not found.`
       const isSeed = kind === 'seed'
@@ -2541,6 +2544,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         seed_open_questions: null,
         executor: resolvedExecutor,
         human_guidance: human_guidance ?? null,
+        relay_context: (typeof relay_context === 'string' && relay_context.trim()) ? relay_context.trim() : null,
       }).select().single()
       if (error) throw new Error(error.message)
       const clean = (xs: any) => (Array.isArray(xs) ? xs : []).map((x: any) => String(x).trim()).filter(Boolean)
@@ -2565,7 +2569,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       for (const m of clean(milestones)) {
         await sb.rpc('append_milestone', { p_task_id: data.id, p_user_id: userId, p_text: m })
       }
-      return `Created task "${text}"\nid: ${data.id}`
+      const relayNote = data.relay_context ? `\n[Recording context for the task] — relay context captured; the assignee will see it on get_task.` : ''
+      return `Created task "${text}"\nid: ${data.id}${relayNote}`
     }
 
     case 'resolve_seed': {
@@ -2621,7 +2626,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context']
       const patch: Record<string, any> = {}
       for (const k of allowed) if (k === 'group_id' ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
       const task = await resolveTask(sb, userId, task_id)
@@ -2787,6 +2792,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `ID: ${shortRef} | Project: ${full.project?.name ?? '—'} | Section: ${full.section?.name ?? 'Ungrouped'}`,
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
       ]
+      // Relay (TDE-324): a handed-off task carries a curated rationale layer authored by the
+      // person who relayed it. Surface it LOUD and FIRST — its whole point is that the assignee
+      // (you) can act without a follow-up round-trip to the creator. Distinct from detail/Context.
+      if (full.relay_context) {
+        lines.push(`\n[Recording context for the task]`)
+        lines.push(`This task was RELAYED to you. The relay context below is the creator's curated hand-off — treat it as authoritative intent; act on it without going back to ask:`)
+        lines.push(full.relay_context)
+      }
       // Seeds: make it loud — this is a placeholder to RESOLVE, not work to do.
       const steps: any[] = disc?.steps ?? []
       const checked: boolean[] = disc?.checked_steps ?? []

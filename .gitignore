@@ -39,3 +39,4 @@ Thumbs.db
 # ── Supabase CLI local state (machine-specific; not source) ──
 V2/supabase/.temp/
 V2/supabase/supabase/
+supabase/.temp/
