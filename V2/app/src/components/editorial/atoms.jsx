@@ -8,9 +8,9 @@ export function Kicker({ children, count, total, className = '', accent = false 
     <span className={clsx('kicker', className)} style={accent ? { color: 'var(--color-priority-rush)' } : undefined}>
       <span>{children}</span>
       {total != null ? (
-        <span className="ml-1.5 font-medium text-mute-2">{count ?? 0}/{total}</span>
+        <span className="ml-1.5 font-medium text-mute" title="Completed / total tasks">{count ?? 0}/{total}</span>
       ) : count != null && (
-        <span className="ml-1.5 font-medium text-mute-2">{String(count).padStart(2, '0')}</span>
+        <span className="ml-1.5 font-medium text-mute">{String(count).padStart(2, '0')}</span>
       )}
     </span>
   )
@@ -50,7 +50,7 @@ export function Pill({ active, count, onClick, children }) {
     >
       <span>{children}</span>
       {count != null && (
-        <span className={active ? 'text-line' : 'text-mute-2'}>{String(count).padStart(2, '0')}</span>
+        <span className={active ? 'text-line' : 'text-mute'}>{String(count).padStart(2, '0')}</span>
       )}
     </button>
   )

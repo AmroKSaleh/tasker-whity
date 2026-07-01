@@ -1,6 +1,6 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react'
 import clsx from 'clsx'
-import { Crosshair, Sparkles, Download, Star, Play, Clock, X, GripVertical, MoreHorizontal, AlertTriangle, Network, Trash2 } from 'lucide-react'
+import { Sparkles, Star, Play, Pause, X, GripVertical, MoreHorizontal, AlertTriangle, Network, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
 import {
   DndContext, DragOverlay, PointerSensor, KeyboardSensor,
   closestCenter, useSensor, useSensors, useDroppable,
@@ -19,11 +19,12 @@ import { updateProject } from '../../hooks/useProjects'
 import { useGoogleCalendar } from '../../hooks/useGoogleCalendar'
 import { useGitHub } from '../../hooks/useGitHub'
 import AppShell from '../editorial/AppShell'
-import { Kicker, Chip, Pill } from '../editorial/atoms'
+import { Kicker, Pill } from '../editorial/atoms'
+import { detectFlows } from '../../lib/flowGraph'
 import AddTaskInline from './AddTaskInline'
 import TaskDetailSheet from './TaskDetailSheet'
 import TaskDetailPanel from './TaskDetailPanel'
-import FocusOverlay from '../focus/FocusOverlay'
+// import FocusOverlay from '../focus/FocusOverlay' — DISABLED 2026-07-02 (TDE-351)
 import KnowledgeBaseModal from '../kb/KnowledgeBaseModal'
 import InstructionSetModal from '../is/InstructionSetModal'
 import ProjectContextPanel from './ProjectContextPanel'
@@ -49,6 +50,13 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
   const ip = task.status === 'in_progress'
   const seed = task.kind === 'seed'
   const prio = task.priority === 'medium' ? 'med' : task.priority
+  // Terminal "AI gave up, needs you" state (TDE-348): the task-level judge escalated
+  // to a human after exhausting its self-revision budget. A non-escalated fail is just
+  // the AI retrying (status in_progress) and is NOT surfaced loud.
+  const needsReview = !!task.review_verdict?.escalated
+  const reviewReason = needsReview
+    ? (task.review_verdict.results?.find(r => r.status === 'fail')?.note || task.review_verdict.critique || null)
+    : null
   const [copiedId, setCopiedId] = useState(false)
   const copyShortId = e => {
     e.stopPropagation()
@@ -61,10 +69,18 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
       onClick={() => onOpen(task.id)}
       className={clsx(
         'group relative rounded-lg border px-2.5 py-2 cursor-pointer transition-colors',
-        seed ? 'border-dashed border-accent/50 bg-accent/[0.03] hover:border-accent' : done ? 'border-line-2 bg-paper opacity-55' : 'border-line-2 bg-paper hover:border-line',
+        needsReview ? 'border-review/40 bg-review-soft hover:border-review' : seed ? 'border-dashed border-accent/50 bg-accent/[0.03] hover:border-accent' : done ? 'border-line-2 bg-paper opacity-55' : 'border-line-2 bg-paper hover:border-line',
       )}
     >
-      {ip && <span className="absolute left-[-1px] top-2 bottom-2 w-0.5 bg-accent rounded-sm" />}
+      {needsReview
+        ? <span className="absolute left-[-1px] top-1.5 bottom-1.5 w-[3px] bg-review rounded-sm" />
+        : ip && <span className="absolute left-[-1px] top-2 bottom-2 w-0.5 bg-accent rounded-sm" />}
+      {needsReview && (
+        <div className="mb-1.5 flex items-center gap-1.5">
+          <span className="inline-flex items-center gap-1 rounded bg-review text-white text-[9px] font-bold uppercase tracking-[0.06em] px-1.5 py-0.5">◆ Needs review</span>
+          <span className="font-mono text-[9px] text-mute uppercase tracking-[0.08em]">AI</span>
+        </div>
+      )}
       {seed && (
         <div className="mb-1.5">
           <span className="inline-flex items-center gap-1 rounded bg-accent/10 text-accent text-[9px] font-bold uppercase tracking-[0.06em] px-1.5 py-0.5">
@@ -106,6 +122,9 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
           </button>
         </div>
       </div>
+      {needsReview && reviewReason && (
+        <div className="mt-1.5 text-[11px] leading-snug text-ink-2 bg-review-soft rounded px-2 py-1 line-clamp-2">{reviewReason}</div>
+      )}
       <div className="flex items-center gap-2 mt-2 font-mono text-[9.5px] text-mute tracking-[0.06em]">
         {prefix && task.short_id != null && (
           <button
@@ -116,8 +135,8 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
             {copiedId ? 'Copied!' : `${prefix}-${task.short_id}`}
           </button>
         )}
-        {task.priority && <span className={`dot dot-${prio}`} />}
-        {task.priority && <span className="uppercase">{task.priority}</span>}
+        {task.priority && task.priority !== 'medium' && <span className={`dot dot-${prio}`} />}
+        {task.priority && task.priority !== 'medium' && <span className="uppercase">{task.priority}</span>}
         {task.due_date && <><span className="text-mute-2">·</span><span>{dueLabel(task.due_date)}</span></>}
         <span className="flex-1" />
         {!done && (
@@ -129,6 +148,7 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
             <Play size={10} fill={ip ? 'currentColor' : 'none'} />
           </button>
         )}
+        {/* FOCUS button disabled 2026-07-02
         {!done && (
           <button
             onClick={e => { e.stopPropagation(); onFocus(task.id) }}
@@ -137,6 +157,7 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
             <Crosshair size={9} /> FOCUS
           </button>
         )}
+        */}
       </div>
     </div>
   )
@@ -192,6 +213,7 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
   return (
     <div
       ref={setNodeRef}
+      data-col={section.id}
       style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
       className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0"
     >
@@ -297,27 +319,6 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
   )
 }
 
-// ── Right-rail in-progress card ──
-function InProgressCard({ task, prefix, onOpen, onFocus, onPause }) {
-  return (
-    <div onClick={() => onOpen(task.id)} className="relative overflow-hidden rounded-xl border border-line-2 bg-paper p-3 cursor-pointer">
-      <span className="absolute left-0 top-0 bottom-0 w-[3px] bg-accent" />
-      <Kicker className="mb-1.5">{prefix ? `${prefix} · ` : ''}▶ IN FLIGHT</Kicker>
-      <div className="text-[13px] font-semibold leading-[18px] text-ink mb-2.5">{task.text}</div>
-      <div className="flex items-center gap-1.5">
-        {task.priority && <Chip level={task.priority} />}
-        <span className="flex-1" />
-        <button onClick={e => { e.stopPropagation(); onFocus(task.id) }} className="btn-focus btn-sm h-[22px] px-2 text-[10px]">
-          <Play size={10} /> Resume
-        </button>
-        <button onClick={e => { e.stopPropagation(); onPause(task) }} className="btn btn-sm h-[22px] px-2 text-[10px]">
-          <Clock size={10} /> Pause
-        </button>
-      </div>
-    </div>
-  )
-}
-
 export default function ProjectBoard({ project }) {
   const {
     tasks, sections, groups,
@@ -337,8 +338,8 @@ export default function ProjectBoard({ project }) {
   const [showKB, setShowKB] = useState(false)
   const [showIS, setShowIS] = useState(false)
   const [showContext, setShowContext] = useState(false)
-  const [showFocus, setShowFocus] = useState(false)
-  const [focusTaskId, setFocusTaskId] = useState(null)
+  // const [showFocus, setShowFocus] = useState(false) — DISABLED
+  // const [focusTaskId, setFocusTaskId] = useState(null) — DISABLED
   const [panelRefreshKey, setPanelRefreshKey] = useState(0)
   const [projectFlags, setProjectFlags] = useState([])
   const [editingName, setEditingName] = useState(false)
@@ -352,6 +353,20 @@ export default function ProjectBoard({ project }) {
   const { selectedTaskId, openTask, closeTask } = useTaskPanelState()
   const scrollerRef = useRef(null)
   useHorizontalWheelScroll(scrollerRef)
+
+  // Section-strip minimap state: which columns are in view ("you are here"), and
+  // whether the strip itself overflows — hidden sections must never be silently invisible.
+  const stripRef = useRef(null)
+  const [visibleCols, setVisibleCols] = useState(() => new Set())
+  const [stripOverflow, setStripOverflow] = useState({ left: false, right: false })
+  const updateStripOverflow = useCallback(() => {
+    const el = stripRef.current
+    if (!el) return
+    setStripOverflow(prev => {
+      const next = { left: el.scrollLeft > 2, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 2 }
+      return prev.left === next.left && prev.right === next.right ? prev : next
+    })
+  }, [])
 
   // Auto-show sidebar when entering section focus mode
   useEffect(() => {
@@ -377,7 +392,7 @@ export default function ProjectBoard({ project }) {
   const taskIds = useMemo(() => tasks.map(t => t.id), [tasks])
   const { refreshOne } = useProjectMilestones(taskIds)
 
-  function openFocusForTask(taskId) { setFocusTaskId(taskId); setShowFocus(true) }
+  // function openFocusForTask(taskId) { setFocusTaskId(taskId); setShowFocus(true) } — DISABLED
   async function createAndOpen(sectionId, text, groupId) {
     const t = await createTask(sectionId, text, groupId)
     if (t) openTask(t.id)
@@ -419,7 +434,7 @@ export default function ProjectBoard({ project }) {
     if (fromSection === toSection && fromGroup === toGroup) {
       // Same list: reorder. If we didn't land on a sibling card, leave order as-is.
       if (!overIsTask || over.id === active.id) return
-      const peers = tasks
+      const peers = boardTasks
         .filter(t => t.section_id === toSection && (t.group_id ?? null) === toGroup)
         .sort((x, y) => (x.sort_order ?? 0) - (y.sort_order ?? 0))
       const oldIdx = peers.findIndex(t => t.id === active.id)
@@ -427,9 +442,9 @@ export default function ProjectBoard({ project }) {
       if (oldIdx >= 0 && newIdx >= 0) reorderTasks(arrayMove(peers, oldIdx, newIdx))
     } else {
       // Cross-list: move into target section/group, inserted at the drop position.
-      const moved = tasks.find(t => t.id === active.id)
+      const moved = boardTasks.find(t => t.id === active.id)
       if (!moved) return
-      const targetPeers = tasks
+      const targetPeers = boardTasks
         .filter(t => t.section_id === toSection && (t.group_id ?? null) === toGroup && t.id !== active.id)
         .sort((x, y) => (x.sort_order ?? 0) - (y.sort_order ?? 0))
       let insertIdx = targetPeers.length
@@ -490,10 +505,20 @@ export default function ProjectBoard({ project }) {
     }
   }
 
+  // Flow tasks are not project-board citizens (decision 2026-07-01: flows and their
+  // tasks live entirely on the Flows page). They leave every denominator here —
+  // columns, Pulse %, filter counts, section x/y, Now Band — not merely the cards.
+  const flowTaskIds = useMemo(() => {
+    const ids = new Set()
+    detectFlows(tasks).forEach(f => f.taskIds.forEach(id => ids.add(id)))
+    return ids
+  }, [tasks])
+  const boardTasks = useMemo(() => tasks.filter(t => !flowTaskIds.has(t.id)), [tasks, flowTaskIds])
+
   const enrichedSections = useMemo(() =>
     sections.map(section => {
       const sectionGroups = groups.filter(g => g.section_id === section.id).sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
-      const sectionTasks = tasks.filter(t => t.section_id === section.id)
+      const sectionTasks = boardTasks.filter(t => t.section_id === section.id)
       // A task whose group_id points to a group not in this section (stale/foreign group_id)
       // would otherwise match neither the ungrouped bucket nor any group here, and vanish.
       const groupIds = new Set(sectionGroups.map(g => g.id))
@@ -504,53 +529,51 @@ export default function ProjectBoard({ project }) {
       }))
       const completedCount = sectionTasks.filter(t => t.status === 'done').length
       return { ...section, ungroupedTasks, groups: enrichedGroups, totalCount: sectionTasks.length, completedCount }
-    }), [tasks, sections, groups])
+    }), [boardTasks, sections, groups])
 
   const filterCounts = useMemo(() => ({
-    all: tasks.length,
-    pending: tasks.filter(t => t.status !== 'done').length,
-    done: tasks.filter(t => t.status === 'done').length,
-    rush: tasks.filter(t => t.priority === 'rush' && t.status !== 'done').length,
-    high: tasks.filter(t => t.priority === 'high' && t.status !== 'done').length,
-    medium: tasks.filter(t => t.priority === 'medium' && t.status !== 'done').length,
-  }), [tasks])
+    all: boardTasks.length,
+    pending: boardTasks.filter(t => t.status !== 'done').length,
+    done: boardTasks.filter(t => t.status === 'done').length,
+    rush: boardTasks.filter(t => t.priority === 'rush' && t.status !== 'done').length,
+    high: boardTasks.filter(t => t.priority === 'high' && t.status !== 'done').length,
+    medium: boardTasks.filter(t => t.priority === 'medium' && t.status !== 'done').length,
+  }), [boardTasks])
 
-  const inProgressTasks = useMemo(() => tasks.filter(t => t.status === 'in_progress'), [tasks])
-  const doneCount = tasks.filter(t => t.status === 'done').length
-  const pct = tasks.length ? Math.round((doneCount / tasks.length) * 100) : 0
+  const inProgressTasks = useMemo(() => boardTasks.filter(t => t.status === 'in_progress'), [boardTasks])
+  const needsYou = useMemo(() => boardTasks.filter(t => t.review_verdict?.escalated), [boardTasks])
+  const scrollToSection = useCallback((sid) => {
+    scrollerRef.current?.querySelector(`[data-col="${sid}"]`)?.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' })
+  }, [])
+  const doneCount = boardTasks.filter(t => t.status === 'done').length
+  const pct = boardTasks.length ? Math.round((doneCount / boardTasks.length) * 100) : 0
 
-  const rightRail = (
-    <aside className="w-[296px] shrink-0 border-l border-line-2 bg-paper px-5 py-6 overflow-auto no-scrollbar flex flex-col gap-6">
-      <div>
-        <div className="flex items-center gap-2 mb-3">
-          <span className="dot bg-accent" />
-          <Kicker className="text-accent" count={inProgressTasks.length}>IN PROGRESS</Kicker>
-        </div>
-        {inProgressTasks.length === 0 ? (
-          <p className="text-[12px] text-mute-2">Nothing in flight.</p>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {inProgressTasks.map(t => (
-              <InProgressCard key={t.id} task={t} prefix={project.prefix} onOpen={openTask} onFocus={openFocusForTask} onPause={toggleInProgressWithWarning} />
-            ))}
-          </div>
-        )}
-      </div>
+  // "You are here" for the section minimap: track which columns are ≥ half visible
+  // inside the horizontal scroller.
+  useEffect(() => {
+    if (blueprintMode || focusedSectionId) return
+    const root = scrollerRef.current
+    if (!root) return
+    const io = new IntersectionObserver(entries => {
+      setVisibleCols(prev => {
+        const next = new Set(prev)
+        for (const e of entries) {
+          const id = e.target.getAttribute('data-col')
+          if (!id) continue
+          if (e.intersectionRatio >= 0.5) next.add(id); else next.delete(id)
+        }
+        return next
+      })
+    }, { root, threshold: 0.5 })
+    root.querySelectorAll('[data-col]').forEach(el => io.observe(el))
+    return () => io.disconnect()
+  }, [blueprintMode, focusedSectionId, enrichedSections.length])
 
-      <div>
-        <Kicker className="mb-2.5">PROJECT META</Kicker>
-        <div className="grid grid-cols-[auto_1fr] gap-x-3.5 gap-y-1.5 text-[11.5px]">
-          <span className="font-mono text-mute tracking-[0.06em]">SECTIONS</span><span>{sections.length}</span>
-          <span className="font-mono text-mute tracking-[0.06em]">GROUPS</span><span>{groups.length}</span>
-          <span className="font-mono text-mute tracking-[0.06em]">OPEN</span><span>{tasks.length - doneCount} tasks</span>
-          <span className="font-mono text-mute tracking-[0.06em]">DONE</span><span>{doneCount} tasks</span>
-          {project.created_at && (
-            <><span className="font-mono text-mute tracking-[0.06em]">CREATED</span><span>{new Date(project.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}</span></>
-          )}
-        </div>
-      </div>
-    </aside>
-  )
+  useEffect(() => {
+    updateStripOverflow()
+    window.addEventListener('resize', updateStripOverflow)
+    return () => window.removeEventListener('resize', updateStripOverflow)
+  }, [updateStripOverflow, enrichedSections.length, blueprintMode, focusedSectionId])
 
   const focusedSection = focusedSectionId ? enrichedSections.find(s => s.id === focusedSectionId) : null
 
@@ -561,19 +584,15 @@ export default function ProjectBoard({ project }) {
       <AppShell
         active="projects"
         rightRail={
-          blueprintMode ? null : (
-            focusedSectionId && showSectionContext && focusedSection ? (
-              <SectionContextSidebar
-                section={focusedSection}
-                groups={focusedSection.groups}
-                tasks={tasks}
-                project={project}
-                onClose={() => setShowSectionContext(false)}
-              />
-            ) : (
-              isDesktop && !focusedSectionId ? rightRail : null
-            )
-          )
+          !blueprintMode && focusedSectionId && showSectionContext && focusedSection ? (
+            <SectionContextSidebar
+              section={focusedSection}
+              groups={focusedSection.groups}
+              tasks={boardTasks}
+              project={project}
+              onClose={() => setShowSectionContext(false)}
+            />
+          ) : null
         }
         hideSidebar={!!focusedSectionId || blueprintMode}
       >
@@ -615,8 +634,10 @@ export default function ProjectBoard({ project }) {
                     ) : (
                       <h1 className="text-h1 m-0 cursor-text truncate" title="Click to rename" onClick={() => { setNameDraft(project.name); setEditingName(true) }}>{project.name}</h1>
                     )}
-                    <span className="font-mono text-[11px] text-mute tracking-[0.06em] shrink-0">
-                      <span className="text-ink font-bold">{doneCount}/{tasks.length}</span> tasks · <span className="text-ink font-bold">{pct}%</span> complete
+                    <span className="inline-flex items-center gap-2 shrink-0" title={`${doneCount} of ${boardTasks.length} tasks complete`}>
+                      <span className="text-[19px] font-extrabold text-ink tabular-nums leading-none tracking-tight">{pct}%</span>
+                      <span className="inline-block h-1.5 w-20 rounded-full bg-surf overflow-hidden"><span className="block h-full bg-ink rounded-full" style={{ width: `${pct}%` }} /></span>
+                      <span className="font-mono text-[10.5px] text-mute tracking-[0.04em]">{doneCount}/{boardTasks.length}</span>
                     </span>
                   </>
                 )}
@@ -625,9 +646,9 @@ export default function ProjectBoard({ project }) {
               <div className="flex items-center gap-1.5 shrink-0">
                 {!focusedSectionId && (
                   <>
-                    <button onClick={() => setShowContext(true)} className="btn btn-sm btn-ghost text-mute"><Sparkles size={12} className="text-accent" /> Context</button>
-                    <button onClick={() => setShowKB(true)} className="btn btn-sm btn-ghost text-mute">KB</button>
-                    <button onClick={() => setShowIS(true)} className="btn btn-sm btn-ghost text-mute">IS</button>
+                    <button onClick={() => setShowContext(true)} title="Project context the AI is grounded in" className="btn btn-sm btn-ghost text-mute"><Sparkles size={12} className="text-accent" /> Context</button>
+                    <button onClick={() => setShowKB(true)} title="Knowledge Base — persistent project knowledge the AI accumulates" className="btn btn-sm btn-ghost text-mute">KB</button>
+                    <button onClick={() => setShowIS(true)} title="Instruction Set — per-project rules that shape AI behavior" className="btn btn-sm btn-ghost text-mute">IS</button>
                     <span className="w-px h-[18px] bg-line-2 mx-1" />
                   </>
                 )}
@@ -637,12 +658,7 @@ export default function ProjectBoard({ project }) {
                 >
                   <Network size={12} /> Blueprint
                 </button>
-                {!focusedSectionId && (
-                  <>
-                    <span className="w-px h-[18px] bg-line-2 mx-1" />
-                    <button onClick={() => setShowFocus(true)} className="btn btn-sm btn-focus"><Crosshair size={12} /> Focus</button>
-                  </>
-                )}
+                {/* <button onClick={() => setShowFocus(true)} className="btn btn-sm btn-focus"><Crosshair size={12} /> Focus</button> — DISABLED */}
               </div>
             </div>
 
@@ -660,6 +676,46 @@ export default function ProjectBoard({ project }) {
               </div>
             </div>
           </header>}
+
+          {/* Now Band — steering essentials, promoted out of the (dissolved) right rail.
+              Collapses entirely when nothing is in flight and nothing needs the human. */}
+          {!blueprintMode && !focusedSectionId && (inProgressTasks.length > 0 || needsYou.length > 0) && (
+            <div className="shrink-0 flex items-center gap-3 px-7 py-2 border-b border-line-2 bg-paper">
+              <Kicker className="text-accent" count={inProgressTasks.length}>IN PROGRESS</Kicker>
+              <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-1">
+                {inProgressTasks.map(t => (
+                  <div key={t.id} className="shrink-0 inline-flex items-center h-6 pl-2.5 pr-1 rounded-pill border border-line bg-paper text-[11.5px] text-ink-2 hover:border-accent transition-colors">
+                    <button onClick={() => openTask(t.id)} className="inline-flex items-center gap-1.5 min-w-0">
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
+                      {project.prefix && t.short_id != null && (
+                        <span className="font-mono text-[9.5px] text-mute tracking-[0.04em] shrink-0">{project.prefix}-{t.short_id}</span>
+                      )}
+                      <span className="max-w-[210px] truncate">{t.text}</span>
+                    </button>
+                    <span className="inline-flex items-center gap-0 ml-1 pl-1 border-l border-line-2">
+                      {/* Focus button disabled 2026-07-02
+                      <button onClick={() => openFocusForTask(t.id)} title="Resume in Focus" className="w-5 h-5 inline-flex items-center justify-center rounded-full text-accent hover:bg-accent hover:text-white transition-colors">
+                        <Play size={9} fill="currentColor" />
+                      </button>
+                      */}
+                      <button onClick={() => toggleInProgressWithWarning(t)} title="Pause — clear in-progress" className="w-5 h-5 inline-flex items-center justify-center rounded-full text-mute hover:bg-surf-2 hover:text-ink transition-colors">
+                        <Pause size={9} />
+                      </button>
+                    </span>
+                  </div>
+                ))}
+              </div>
+              {needsYou.length > 0 && (
+                <button
+                  onClick={() => openTask(needsYou[0].id)}
+                  title={`The AI escalated after failed self-revision — your call needed on: ${needsYou.map(t => `${project.prefix}-${t.short_id}`).join(', ')}`}
+                  className="shrink-0 inline-flex items-center gap-1.5 h-6 px-2.5 rounded-pill bg-review text-white text-[11px] font-bold tracking-[0.04em]"
+                >
+                  ◆ {needsYou.length} need{needsYou.length === 1 ? 's' : ''} you
+                </button>
+              )}
+            </div>
+          )}
 
           {/* Banners */}
           {!blueprintMode && projectFlags.length > 0 && (
@@ -691,6 +747,50 @@ export default function ProjectBoard({ project }) {
             </div>
           )}
 
+          {/* Section minimap — all-sections density + teleport + "you are here" (Zone 3).
+              Tabs on the board surface, not pills: navigation must not impersonate the
+              Now Band's task chips (different behavior → different look). */}
+          {!blueprintMode && !focusedSectionId && enrichedSections.length > 0 && (
+            <div className="shrink-0 flex items-center gap-2 pl-7 pr-3 border-b border-line-2 bg-surf-2">
+              <Kicker count={enrichedSections.length}>SECTIONS</Kicker>
+              <div className="relative flex-1 min-w-0 flex items-center">
+                <div ref={stripRef} onScroll={updateStripOverflow} className="flex items-center flex-1 overflow-x-auto no-scrollbar">
+                  {enrichedSections.map(s => {
+                    const inView = visibleCols.has(s.id)
+                    return (
+                      <button
+                        key={s.id}
+                        onClick={() => scrollToSection(s.id)}
+                        title={`${s.completedCount}/${s.totalCount} done — jump to ${s.name}`}
+                        className={clsx(
+                          'shrink-0 inline-flex items-center gap-1.5 h-8 px-2.5 border-b-2 -mb-px text-[11px] transition-colors',
+                          inView ? 'border-ink text-ink' : 'border-transparent text-mute hover:text-ink',
+                        )}
+                      >
+                        <span className="font-medium max-w-[120px] truncate">{s.name}</span>
+                        <span className="font-mono text-[10px] text-mute tabular-nums">{s.completedCount}/{s.totalCount}</span>
+                      </button>
+                    )
+                  })}
+                </div>
+                {stripOverflow.left && (
+                  <div className="absolute left-0 inset-y-0 flex items-center pr-5 bg-gradient-to-r from-surf-2 via-surf-2/80 to-transparent">
+                    <button onClick={() => stripRef.current?.scrollBy({ left: -280, behavior: 'smooth' })} title="More sections" className="w-6 h-6 inline-flex items-center justify-center rounded-full border border-line bg-paper text-mute hover:text-ink shadow-sm transition-colors">
+                      <ChevronLeft size={12} />
+                    </button>
+                  </div>
+                )}
+                {stripOverflow.right && (
+                  <div className="absolute right-0 inset-y-0 flex items-center pl-5 bg-gradient-to-l from-surf-2 via-surf-2/80 to-transparent">
+                    <button onClick={() => stripRef.current?.scrollBy({ left: 280, behavior: 'smooth' })} title="More sections" className="w-6 h-6 inline-flex items-center justify-center rounded-full border border-line bg-paper text-mute hover:text-ink shadow-sm transition-colors">
+                      <ChevronRight size={12} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
           {/* Swimlane columns */}
           <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
             <div ref={scrollerRef} className={clsx('cols-scroll flex-1 min-h-0 overflow-x-auto overflow-y-hidden flex bg-surf-2', blueprintMode && 'hidden')}>
@@ -707,7 +807,7 @@ export default function ProjectBoard({ project }) {
                           <DroppableList sectionId={focusedSectionId} groupId={null} items={focusedUngrouped.map(t => t.id)}>
                             {focusedUngrouped.map(t => (
                               <SortableCard key={t.id} task={t} sectionId={focusedSectionId} groupId={null} prefix={project.prefix}
-                                onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning} onFocus={openFocusForTask} onPin={pinTask} onDelete={handleDeleteTask} />
+                                onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning} onFocus={() => {}} /* DISABLED */ onPin={pinTask} onDelete={handleDeleteTask} />
                             ))}
                           </DroppableList>
                         </div>
@@ -728,7 +828,7 @@ export default function ProjectBoard({ project }) {
                             <DroppableList sectionId={focusedSectionId} groupId={group.id} items={filteredTasks.map(t => t.id)}>
                               {filteredTasks.map(t => (
                                 <SortableCard key={t.id} task={t} sectionId={focusedSectionId} groupId={group.id} prefix={project.prefix}
-                                  onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning} onFocus={openFocusForTask} onPin={pinTask} onDelete={handleDeleteTask} />
+                                  onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning} onFocus={() => {}} /* DISABLED */ onPin={pinTask} onDelete={handleDeleteTask} />
                               ))}
                             </DroppableList>
                           </div>
@@ -745,7 +845,7 @@ export default function ProjectBoard({ project }) {
                     <SectionColumn
                       key={s.id} section={s} statusFilter={statusFilter} priorityFilter={priorityFilter} prefix={project.prefix}
                       onAddTask={createTask} onAddDetailed={createAndOpen} onAddGroup={createGroup} onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning}
-                      onFocus={openFocusForTask} onPin={pinTask} onDelete={handleDeleteTask} onFocusSection={setFocusedSectionId}
+                      onFocus={() => {}} /* DISABLED */ onPin={pinTask} onDelete={handleDeleteTask} onFocusSection={setFocusedSectionId}
                       onDeleteSection={deleteSection}
                     />
                   ))
@@ -770,17 +870,18 @@ export default function ProjectBoard({ project }) {
 
       {selectedTaskId && (
         blueprintMode
-          ? <TaskDetailPanel taskId={selectedTaskId} onClose={closeTask} onFocus={openFocusForTask} onMilestoneChange={refreshOne} refreshKey={panelRefreshKey} project={project} onContextUpdate={handleContextUpdate} sidebarCollapsed noBackdrop />
-          : <TaskDetailSheet taskId={selectedTaskId} onClose={closeTask} onFocus={openFocusForTask} onMilestoneChange={refreshOne} refreshKey={panelRefreshKey} project={project} onContextUpdate={handleContextUpdate} compact={isDesktop} />
+          ? <TaskDetailPanel taskId={selectedTaskId} onClose={closeTask} onFocus={() => {}} /* DISABLED */ onMilestoneChange={refreshOne} refreshKey={panelRefreshKey} project={project} onContextUpdate={handleContextUpdate} sidebarCollapsed noBackdrop />
+          : <TaskDetailSheet taskId={selectedTaskId} onClose={closeTask} onFocus={() => {}} /* DISABLED */ onMilestoneChange={refreshOne} refreshKey={panelRefreshKey} project={project} onContextUpdate={handleContextUpdate} compact={isDesktop} />
       )}
 
       {showKB && <KnowledgeBaseModal projectId={project.id} onClose={() => setShowKB(false)} />}
       {showIS && <InstructionSetModal projectId={project.id} onClose={() => setShowIS(false)} />}
       {showContext && <ProjectContextPanel project={project} onClose={() => setShowContext(false)} onContextUpdate={handleContextUpdate} />}
 
+      {/* FocusOverlay DISABLED 2026-07-02 (TDE-351)
       {showFocus && (
         <FocusOverlay
-          tasks={tasks} project={project}
+          tasks={boardTasks} project={project}
           onClose={() => { setShowFocus(false); setFocusTaskId(null); if (selectedTaskId) setPanelRefreshKey(k => k + 1) }}
           onContextUpdate={handleContextUpdate}
           onPinTask={pinTask}
@@ -789,6 +890,7 @@ export default function ProjectBoard({ project }) {
           initialTaskId={focusTaskId}
         />
       )}
+      */}
 
       <FlowBlockedDialog
         dependency={dependencyWarning}

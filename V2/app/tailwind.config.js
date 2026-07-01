@@ -24,6 +24,10 @@ export default {
           DEFAULT: 'var(--color-star)',
           soft:    'var(--color-star-soft)',
         },
+        review: {
+          DEFAULT: 'var(--color-review)',
+          soft:    'var(--color-review-soft)',
+        },
         priority: {
           rush: 'var(--color-priority-rush)',
           high: 'var(--color-priority-high)',

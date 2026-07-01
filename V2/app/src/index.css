@@ -23,6 +23,11 @@
   --color-star:         #FACC15;
   --color-star-soft:    rgba(250,204,21,0.14);
 
+  /* Needs-review signal (TDE-348) — a cool hue reserved for "AI escalated, needs you";
+     distinct from the warm accent, and NOT red (red is quarantined for systemic failure). */
+  --color-review:       #4B57D8;
+  --color-review-soft:  rgba(75,87,216,0.09);
+
   --color-priority-rush: #C0432D;
   --color-priority-high: #D97757;
   --color-priority-med:  #8C8055;
@@ -48,6 +53,9 @@
   --color-accent-2:    rgba(217,119,87,0.18);
   --color-accent-soft: rgba(217,119,87,0.14);
 
+  --color-review:      #8B93F0;
+  --color-review-soft: rgba(139,147,240,0.16);
+
   --shadow-card:  0 1px 3px rgba(0,0,0,0.4);
   --scroll-thumb: #38353F;
   --scroll-thumb-hover: #6B6867;
@@ -65,6 +73,8 @@
   --color-mute:    #8a8a8a;
   --color-ink-2:   #c7c4bd;
   --color-ink:     #f0efec;
+  --color-review:      #8B93F0;
+  --color-review-soft: rgba(139,147,240,0.16);
 }
 
 @layer base {
