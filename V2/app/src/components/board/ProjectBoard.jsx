@@ -554,7 +554,7 @@ export default function ProjectBoard({ project }) {
 
   const focusedSection = focusedSectionId ? enrichedSections.find(s => s.id === focusedSectionId) : null
 
-  const focusedUngrouped = focusedSection ? focusedSection.ungroupedTasks.filter(t => matchFilter(t, filter)) : []
+  const focusedUngrouped = focusedSection ? focusedSection.ungroupedTasks.filter(t => matchFilter(t, statusFilter, priorityFilter)) : []
 
   return (
     <>
@@ -718,7 +718,7 @@ export default function ProjectBoard({ project }) {
                     )}
                     {/* Group columns */}
                     {(focusedSection?.groups ?? []).map(group => {
-                      const filteredTasks = group.tasks.filter(t => matchFilter(t, filter))
+                      const filteredTasks = group.tasks.filter(t => matchFilter(t, statusFilter, priorityFilter))
                       return (
                         <div key={group.id} className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0">
                           <div className="relative h-11 px-3.5 flex items-center justify-between border-b border-line-2 bg-surf-2 sticky top-0 z-[2]">
