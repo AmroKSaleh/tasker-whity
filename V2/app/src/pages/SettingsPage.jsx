@@ -6,15 +6,10 @@ import { Kicker } from '../components/editorial/atoms'
 import { getAISettings, saveAISettings, PROVIDERS } from '../lib/aiSettings'
 import { testAIConnection } from '../lib/gemini'
 import { useTheme } from '../hooks/useTheme'
+import ThemeToggle from '../components/editorial/ThemeToggle'
 import TaskStatusSettings from '../components/settings/TaskStatusSettings'
 import ConnectorsSection from '../components/settings/ConnectorsSection'
 import DefaultInstructionsSection from '../components/settings/DefaultInstructionsSection'
-
-const THEME_OPTIONS = [
-  { id: 'light',  label: 'Light' },
-  { id: 'dark',   label: 'Dark' },
-  { id: 'system', label: 'System' },
-]
 
 const PROVIDER_KEYS = Object.keys(PROVIDERS)
 const MCP_URL = 'https://smarttasksxdd.netlify.app/api/mcp'
@@ -521,7 +516,7 @@ export default function SettingsPage() {
   const [userEmail, setUserEmail] = useState('')
   const [activeTab, setActiveTab] = useState('claude-code')
   const [taskerKey, setTaskerKey] = useState(null)
-  const { preference: themePref, setPreference: setThemePref } = useTheme()
+  const { preference: themePref, setPreference: setThemePref, resolved: themeResolved } = useTheme()
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -613,23 +608,17 @@ export default function SettingsPage() {
               <label className="block font-mono text-[9px] font-bold tracking-widest text-mute-2 uppercase mb-3">
                 Appearance
               </label>
-              <div className="flex gap-2 flex-wrap">
-                {THEME_OPTIONS.map(opt => (
-                  <button
-                    key={opt.id}
-                    onClick={() => setThemePref(opt.id)}
-                    className={`px-4 py-2 rounded-lg text-[13px] font-medium transition-colors border ${
-                      themePref === opt.id
-                        ? 'bg-ink text-paper border-ink'
-                        : 'bg-paper text-ink-2 border-line hover:bg-surf-2'
-                    }`}
-                  >
-                    {opt.label}
-                  </button>
-                ))}
+              <div className="flex items-center gap-4">
+                <ThemeToggle
+                  dark={themeResolved === 'dark'}
+                  onChange={next => setThemePref(next ? 'dark' : 'light')}
+                />
+                <span className="text-[13px] font-medium text-ink">{themeResolved === 'dark' ? 'Dark' : 'Light'}</span>
               </div>
-              <p className="text-[11px] text-mute-2 mt-1.5">
-                {themePref === 'system' ? 'Follows your operating system preference.' : `Always ${themePref}.`}
+              <p className="text-[11px] text-mute-2 mt-2">
+                {themePref === 'system'
+                  ? 'Following your operating system.'
+                  : <>Always {themePref}. <button onClick={() => setThemePref('system')} className="text-accent hover:underline">Match system instead</button></>}
               </p>
             </section>
 

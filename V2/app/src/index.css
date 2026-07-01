@@ -281,6 +281,73 @@
 .pill-active { border-color: var(--color-ink); background: var(--color-ink); color: var(--color-paper); }
 .pill-active:hover { background: var(--color-ink-2); border-color: var(--color-ink-2); }
 
+/* ── Theme toggle: sun → crescent-moon morph ──
+   Fixed warm/cool colors (not theme tokens) — this control IS the light/dark
+   indicator, so it must look the same regardless of the app's current theme.
+   Every property shares one duration/easing with zero delay, so the icon
+   morphs continuously WHILE the knob slides — it arrives fully-formed at
+   the far side rather than morphing in place then sliding as a bare disc. */
+.theme-toggle {
+  display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; border: none; background: none; cursor: pointer; line-height: 0;
+  --tt-duration: 420ms;
+  --tt-ease: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+.theme-toggle:focus-visible { outline: 2px solid var(--color-accent); outline-offset: 3px; border-radius: 14px; }
+
+.theme-toggle .tt-track {
+  fill: none; stroke-width: 2.5px;
+  stroke: #FACC15;
+  transition: stroke var(--tt-duration) var(--tt-ease);
+}
+.theme-toggle[data-state="dark"] .tt-track { stroke: #8A8886; }
+
+/* Core disc: small solid sun in light (scaled down), full-size moon body in
+   dark (scale 1 → the crescent geometry is untouched from the version you
+   approved). transform-origin center via fill-box = the disc's own centre. */
+.theme-toggle .tt-core {
+  fill: #FACC15;
+  transform-box: fill-box; transform-origin: center;
+  transform: scale(0.55);
+  transition: fill var(--tt-duration) var(--tt-ease), transform var(--tt-duration) var(--tt-ease);
+}
+.theme-toggle[data-state="dark"] .tt-core { fill: #9A9896; transform: scale(1); }
+
+.theme-toggle .tt-knob {
+  transform: translateX(0);
+  transition: transform var(--tt-duration) var(--tt-ease);
+}
+.theme-toggle[data-state="dark"] .tt-knob { transform: translateX(28px); }
+
+/* 8 rays radiating around the sun. The <line> only ever gets scale+opacity;
+   its angle comes from the parent <g rotate> so all 8 stay spread out. */
+.theme-toggle .tt-ray {
+  stroke: #FACC15; stroke-width: 2px; stroke-linecap: round;
+  transform-box: fill-box; transform-origin: center;
+  opacity: 1; transform: scale(1);
+  transition: opacity var(--tt-duration) var(--tt-ease), transform var(--tt-duration) var(--tt-ease), stroke var(--tt-duration) var(--tt-ease);
+}
+.theme-toggle[data-state="dark"] .tt-ray { opacity: 0; transform: scale(0.2); }
+
+/* Eraser bites the crescent. Absent in light (scaled to nothing → solid sun
+   disc); grows + slides in for the moon. Same transform-function list in both
+   states so it interpolates cleanly. */
+.theme-toggle .tt-eraser {
+  fill: #000;
+  transform-box: fill-box; transform-origin: center;
+  transform: translate(0px, 0px) scale(0);
+  transition: transform var(--tt-duration) var(--tt-ease);
+}
+.theme-toggle[data-state="dark"] .tt-eraser { transform: translate(-5px, -5px) scale(1); }
+
+@media (prefers-reduced-motion: reduce) {
+  .theme-toggle .tt-track,
+  .theme-toggle .tt-core,
+  .theme-toggle .tt-knob,
+  .theme-toggle .tt-ray,
+  .theme-toggle .tt-eraser { transition: none !important; }
+}
+
 /* ── Kbd hint ── */
 .kbd {
   display: inline-block; border-radius: 3px; border: 1px solid var(--color-line);
