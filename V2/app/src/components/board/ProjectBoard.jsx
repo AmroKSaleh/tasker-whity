@@ -1,6 +1,6 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react'
 import clsx from 'clsx'
-import { Sparkles, Star, Play, Pause, X, GripVertical, MoreHorizontal, AlertTriangle, Network, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Star, Play, Pause, X, GripVertical, MoreHorizontal, AlertTriangle, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
 import {
   DndContext, DragOverlay, PointerSensor, KeyboardSensor,
   closestCenter, useSensor, useSensors, useDroppable,
@@ -29,6 +29,7 @@ import KnowledgeBaseModal from '../kb/KnowledgeBaseModal'
 import InstructionSetModal from '../is/InstructionSetModal'
 import ProjectContextPanel from './ProjectContextPanel'
 import SectionContextSidebar from './SectionContextSidebar'
+import FrontPage, { MastheadSky } from './FrontPage'
 import BlueprintView from './BlueprintView'
 
 function matchFilter(t, statusFilter, priorityFilter) {
@@ -68,8 +69,8 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
     <div
       onClick={() => onOpen(task.id)}
       className={clsx(
-        'group relative rounded-lg border px-2.5 py-2 cursor-pointer transition-colors',
-        needsReview ? 'border-review/40 bg-review-soft hover:border-review' : seed ? 'border-dashed border-accent/50 bg-accent/[0.03] hover:border-accent' : done ? 'border-line-2 bg-paper opacity-55' : 'border-line-2 bg-paper hover:border-line',
+        'group relative rounded-xl border px-3 py-2.5 cursor-pointer transition-all duration-150',
+        needsReview ? 'border-review/40 bg-review-soft hover:border-review' : seed ? 'border-dashed border-accent/50 bg-accent/[0.03] hover:border-accent' : done ? 'border-line-2 bg-paper opacity-55' : 'border-line-2 bg-paper shadow-sm hover:border-line hover:shadow-card hover:-translate-y-[1px]',
       )}
     >
       {needsReview
@@ -354,6 +355,21 @@ export default function ProjectBoard({ project }) {
   const scrollerRef = useRef(null)
   useHorizontalWheelScroll(scrollerRef)
 
+  // Pulse bar fills from zero on mount — one quiet moment of arrival.
+  const [pulseIn, setPulseIn] = useState(false)
+  useEffect(() => {
+    const t = setTimeout(() => setPulseIn(true), 80)
+    return () => clearTimeout(t)
+  }, [])
+
+  // Board view: attention-first Front Page (landing) vs The Stacks (full kanban).
+  const [view, setView] = useState(() => {
+    try { return localStorage.getItem('tasker_board_view') || 'front' } catch { return 'front' }
+  })
+  useEffect(() => {
+    try { localStorage.setItem('tasker_board_view', view) } catch { /* private mode */ }
+  }, [view])
+
   // Section-strip minimap state: which columns are in view ("you are here"), and
   // whether the strip itself overflows — hidden sections must never be silently invisible.
   const stripRef = useRef(null)
@@ -548,10 +564,27 @@ export default function ProjectBoard({ project }) {
   const doneCount = boardTasks.filter(t => t.status === 'done').length
   const pct = boardTasks.length ? Math.round((doneCount / boardTasks.length) * 100) : 0
 
+  // Masthead dateline + one-sentence lede: the whole project in one breath.
+  const dateline = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+  const shippedWeek = useMemo(() =>
+    boardTasks.filter(t => t.status === 'done' && t.completed_at && (Date.now() - new Date(t.completed_at).getTime()) < 7 * 86400000).length,
+    [boardTasks])
+  const flying = useMemo(() => inProgressTasks.filter(t => !t.review_verdict?.escalated), [inProgressTasks])
+  const lede = (flying.length === 0 && needsYou.length === 0 && shippedWeek === 0)
+    ? 'All quiet — nothing in flight right now.'
+    : (
+      <>
+        Right now: <b className="text-ink font-semibold">{flying.length} in flight</b>
+        {shippedWeek > 0 && <>, <b className="text-ink font-semibold">{shippedWeek} shipped</b> this week</>}
+        {needsYou.length > 0 && <>, and <b className="text-review font-semibold">{needsYou.length === 1 ? 'one needs' : `${needsYou.length} need`} your judgment</b></>}
+        .
+      </>
+    )
+
   // "You are here" for the section minimap: track which columns are ≥ half visible
   // inside the horizontal scroller.
   useEffect(() => {
-    if (blueprintMode || focusedSectionId) return
+    if (blueprintMode || focusedSectionId || view !== 'stacks') return
     const root = scrollerRef.current
     if (!root) return
     const io = new IntersectionObserver(entries => {
@@ -567,13 +600,13 @@ export default function ProjectBoard({ project }) {
     }, { root, threshold: 0.5 })
     root.querySelectorAll('[data-col]').forEach(el => io.observe(el))
     return () => io.disconnect()
-  }, [blueprintMode, focusedSectionId, enrichedSections.length])
+  }, [blueprintMode, focusedSectionId, view, enrichedSections.length])
 
   useEffect(() => {
     updateStripOverflow()
     window.addEventListener('resize', updateStripOverflow)
     return () => window.removeEventListener('resize', updateStripOverflow)
-  }, [updateStripOverflow, enrichedSections.length, blueprintMode, focusedSectionId])
+  }, [updateStripOverflow, enrichedSections.length, blueprintMode, focusedSectionId, view])
 
   const focusedSection = focusedSectionId ? enrichedSections.find(s => s.id === focusedSectionId) : null
 
@@ -596,97 +629,136 @@ export default function ProjectBoard({ project }) {
         }
         hideSidebar={!!focusedSectionId || blueprintMode}
       >
-        <div className="h-full flex flex-col">
-          {/* Project header */}
-          {!blueprintMode && <header className="px-7 pt-6 pb-4 border-b border-line-2 bg-paper shrink-0">
-            {!focusedSectionId && (
-              <div className="flex items-center gap-2 mb-2.5">
-                <Kicker>PROJECTS</Kicker>
-                <span className="text-mute-2">›</span>
-                <Kicker className="text-ink">{project.prefix}</Kicker>
-                <span className="flex-1" />
-                {ghConnected && project.github_repo && (
-                  <button onClick={handleSyncIssues} disabled={ghSyncing} className="font-mono text-[9.5px] text-mute tracking-[0.1em] inline-flex items-center gap-1.5">
-                    <span className="dot dot-done" />{ghSyncing ? 'SYNCING…' : 'SYNC ISSUES'}
+        <div className="h-full flex flex-col board-surface">
+          {/* Section-focus header (unchanged surface, own chrome) */}
+          {!blueprintMode && focusedSectionId && (
+            <header className="px-7 pt-6 pb-4 border-b border-line-2 bg-paper shrink-0">
+              <div className="flex items-baseline justify-between gap-6">
+                <div className="flex items-center gap-2 min-w-0">
+                  <button onClick={() => setFocusedSectionId(null)} title="Back to board (Esc)" className="btn btn-sm mr-2 text-ink-2">
+                    <ChevronLeft size={14} /> Back
                   </button>
-                )}
+                  <h1 className="font-display font-semibold text-[26px] leading-[32px] tracking-[-0.01em] m-0">{enrichedSections.find(s => s.id === focusedSectionId)?.name}</h1>
+                  <span className="font-mono text-[11px] text-mute tracking-[0.06em] shrink-0 ml-2">· {project.prefix}</span>
+                </div>
               </div>
-            )}
+              <div className="flex items-center gap-3 mt-4">
+                <div className="flex gap-1.5">
+                  <Pill active={statusFilter === 'pending'} count={filterCounts.pending} onClick={() => setStatusFilter('pending')}>Pending</Pill>
+                  <Pill active={statusFilter === 'all'} count={filterCounts.all} onClick={() => setStatusFilter('all')}>All</Pill>
+                  <Pill active={statusFilter === 'done'} count={filterCounts.done} onClick={() => setStatusFilter('done')}>Done</Pill>
+                  <span className="w-px h-[18px] bg-line-2 mx-1 self-center" />
+                  <Pill active={priorityFilter === 'rush'} count={filterCounts.rush} onClick={() => setPriorityFilter(f => f === 'rush' ? null : 'rush')}>Rush</Pill>
+                  <Pill active={priorityFilter === 'high'} count={filterCounts.high} onClick={() => setPriorityFilter(f => f === 'high' ? null : 'high')}>High</Pill>
+                  <Pill active={priorityFilter === 'medium'} count={filterCounts.medium} onClick={() => setPriorityFilter(f => f === 'medium' ? null : 'medium')}>Med</Pill>
+                </div>
+              </div>
+            </header>
+          )}
 
-            <div className="flex items-baseline justify-between gap-6">
-              <div className="flex items-baseline gap-3 min-w-0">
-                {focusedSectionId ? (
-                  <div className="flex items-baseline gap-2">
-                    <button onClick={() => setFocusedSectionId(null)} className="text-mute hover:text-ink mr-2">←</button>
-                    <h1 className="text-h1 m-0">{enrichedSections.find(s => s.id === focusedSectionId)?.name}</h1>
-                    <span className="font-mono text-[11px] text-mute tracking-[0.06em] shrink-0 ml-2">· {project.prefix}</span>
-                  </div>
-                ) : (
-                  <>
+          {/* Masthead — the living front of the project. Constellation behind,
+              dateline + lede, serif title, serif Pulse, view tabs. */}
+          {!blueprintMode && !focusedSectionId && (
+            <header className="relative border-b border-line-2 shrink-0 overflow-hidden masthead">
+              <MastheadSky tasks={boardTasks} />
+              <div className="relative z-[2] px-7 pt-5">
+                <div className="flex items-center gap-2">
+                  <Kicker>PROJECTS</Kicker>
+                  <span className="text-mute-2">›</span>
+                  <Kicker className="text-ink">{project.prefix}</Kicker>
+                  <span className="font-mono text-[9.5px] tracking-[0.12em] text-mute-2 uppercase ml-1.5">· {dateline}</span>
+                  <span className="flex-1" />
+                  {ghConnected && project.github_repo && (
+                    <button onClick={handleSyncIssues} disabled={ghSyncing} className="font-mono text-[9.5px] text-mute tracking-[0.1em] inline-flex items-center gap-1.5 mr-2">
+                      <span className="dot dot-done" />{ghSyncing ? 'SYNCING…' : 'SYNC ISSUES'}
+                    </button>
+                  )}
+                  <button
+                    onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))}
+                    title="Search everything"
+                    className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink"
+                  >⌘K</button>
+                  <button onClick={() => setShowKB(true)} title="Knowledge Base — persistent project knowledge the AI accumulates" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">KB</button>
+                  <button onClick={() => setShowIS(true)} title="Instruction Set — per-project rules that shape AI behavior" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">IS</button>
+                </div>
+
+                <div className="flex items-end justify-between gap-10 pt-5 pb-4">
+                  <div className="min-w-0">
                     {editingName ? (
                       <input
                         autoFocus value={nameDraft}
                         onChange={e => setNameDraft(e.target.value)}
                         onBlur={commitName}
                         onKeyDown={e => { if (e.key === 'Enter') commitName(); if (e.key === 'Escape') { setNameDraft(project.name); setEditingName(false) } }}
-                        className="text-h1 bg-transparent border border-line rounded-md px-2 py-0.5 outline-none focus:border-accent text-ink"
+                        className="font-display font-semibold text-[38px] leading-[1.05] tracking-[-0.02em] bg-transparent border border-line rounded-md px-2 py-0.5 outline-none focus:border-accent text-ink w-full max-w-[560px]"
                       />
                     ) : (
-                      <h1 className="text-h1 m-0 cursor-text truncate" title="Click to rename" onClick={() => { setNameDraft(project.name); setEditingName(true) }}>{project.name}</h1>
+                      <h1
+                        className="font-display font-semibold text-[38px] leading-[1.05] tracking-[-0.02em] m-0 cursor-text truncate"
+                        style={{ textWrap: 'balance' }}
+                        title="Click to rename"
+                        onClick={() => { setNameDraft(project.name); setEditingName(true) }}
+                      >{project.name}</h1>
                     )}
-                    <span className="inline-flex items-center gap-2 shrink-0" title={`${doneCount} of ${boardTasks.length} tasks complete`}>
-                      <span className="text-[19px] font-extrabold text-ink tabular-nums leading-none tracking-tight">{pct}%</span>
-                      <span className="inline-block h-1.5 w-20 rounded-full bg-surf overflow-hidden"><span className="block h-full bg-ink rounded-full" style={{ width: `${pct}%` }} /></span>
-                      <span className="font-mono text-[10.5px] text-mute tracking-[0.04em]">{doneCount}/{boardTasks.length}</span>
+                    <p className="m-0 mt-2 text-[13px] text-ink-2 max-w-[62ch]">{lede}</p>
+                  </div>
+                  <div className="text-right shrink-0 pb-0.5" title={`${doneCount} of ${boardTasks.length} standalone tasks complete`}>
+                    <div className="font-display font-semibold text-[36px] leading-none tracking-[-0.02em] tabular-nums">{pct}%</div>
+                    <span className="inline-block h-[5px] w-44 rounded-full bg-surf overflow-hidden mt-2.5 mb-1.5">
+                      <span
+                        className="block h-full bg-ink rounded-full transition-[width] duration-1000 ease-out"
+                        style={{ width: pulseIn ? `${pct}%` : '0%' }}
+                      />
                     </span>
-                  </>
-                )}
-              </div>
+                    <div className="font-mono text-[9.5px] text-mute tracking-[0.08em]">{doneCount} / {boardTasks.length} STANDALONE TASKS</div>
+                  </div>
+                </div>
 
-              <div className="flex items-center gap-1.5 shrink-0">
-                {!focusedSectionId && (
-                  <>
-                    <button onClick={() => setShowContext(true)} title="Project context the AI is grounded in" className="btn btn-sm btn-ghost text-mute"><Sparkles size={12} className="text-accent" /> Context</button>
-                    <button onClick={() => setShowKB(true)} title="Knowledge Base — persistent project knowledge the AI accumulates" className="btn btn-sm btn-ghost text-mute">KB</button>
-                    <button onClick={() => setShowIS(true)} title="Instruction Set — per-project rules that shape AI behavior" className="btn btn-sm btn-ghost text-mute">IS</button>
-                    <span className="w-px h-[18px] bg-line-2 mx-1" />
-                  </>
-                )}
-                <button
-                  onClick={() => setBlueprintMode(b => !b)}
-                  className={clsx('btn btn-sm btn-ghost', blueprintMode ? 'text-accent border-accent' : 'text-mute')}
-                >
-                  <Network size={12} /> Blueprint
-                </button>
-                {/* <button onClick={() => setShowFocus(true)} className="btn btn-sm btn-focus"><Crosshair size={12} /> Focus</button> — DISABLED */}
+                <nav className="flex gap-7" aria-label="Board views">
+                  <button
+                    onClick={() => setView('front')}
+                    className={clsx(
+                      'appearance-none bg-transparent border-0 border-b-2 -mb-px cursor-pointer px-0.5 pt-1 pb-3 font-mono text-[10px] tracking-[0.16em] transition-colors',
+                      view === 'front' ? 'text-ink border-ink' : 'text-mute border-transparent hover:text-ink-2',
+                    )}
+                    style={{ borderBottomStyle: 'solid' }}
+                  >FRONT PAGE</button>
+                  <button
+                    onClick={() => setView('stacks')}
+                    className={clsx(
+                      'appearance-none bg-transparent border-0 border-b-2 -mb-px cursor-pointer px-0.5 pt-1 pb-3 font-mono text-[10px] tracking-[0.16em] transition-colors',
+                      view === 'stacks' ? 'text-ink border-ink' : 'text-mute border-transparent hover:text-ink-2',
+                    )}
+                    style={{ borderBottomStyle: 'solid' }}
+                  >THE STACKS — FULL BOARD</button>
+                </nav>
               </div>
+            </header>
+          )}
+
+          {/* Stacks-only filter strip (filters live with the board they filter) */}
+          {!blueprintMode && !focusedSectionId && view === 'stacks' && (
+            <div className="shrink-0 flex items-center gap-1.5 px-7 py-2.5 border-b border-line-2 bg-paper">
+              <Pill active={statusFilter === 'pending'} count={filterCounts.pending} onClick={() => setStatusFilter('pending')}>Pending</Pill>
+              <Pill active={statusFilter === 'all'} count={filterCounts.all} onClick={() => setStatusFilter('all')}>All</Pill>
+              <Pill active={statusFilter === 'done'} count={filterCounts.done} onClick={() => setStatusFilter('done')}>Done</Pill>
+              <span className="w-px h-[18px] bg-line-2 mx-1 self-center" />
+              <Pill active={priorityFilter === 'rush'} count={filterCounts.rush} onClick={() => setPriorityFilter(f => f === 'rush' ? null : 'rush')}>Rush</Pill>
+              <Pill active={priorityFilter === 'high'} count={filterCounts.high} onClick={() => setPriorityFilter(f => f === 'high' ? null : 'high')}>High</Pill>
+              <Pill active={priorityFilter === 'medium'} count={filterCounts.medium} onClick={() => setPriorityFilter(f => f === 'medium' ? null : 'medium')}>Med</Pill>
             </div>
+          )}
 
-            {/* Filter pills */}
-            <div className="flex items-center gap-3 mt-4">
-              <Kicker>FILTER</Kicker>
-              <div className="flex gap-1.5">
-                <Pill active={statusFilter === 'pending'} count={filterCounts.pending} onClick={() => setStatusFilter('pending')}>Pending</Pill>
-                <Pill active={statusFilter === 'all'} count={filterCounts.all} onClick={() => setStatusFilter('all')}>All</Pill>
-                <Pill active={statusFilter === 'done'} count={filterCounts.done} onClick={() => setStatusFilter('done')}>Done</Pill>
-                <span className="w-px h-[18px] bg-line-2 mx-1 self-center" />
-                <Pill active={priorityFilter === 'rush'} count={filterCounts.rush} onClick={() => setPriorityFilter(f => f === 'rush' ? null : 'rush')}>Rush</Pill>
-                <Pill active={priorityFilter === 'high'} count={filterCounts.high} onClick={() => setPriorityFilter(f => f === 'high' ? null : 'high')}>High</Pill>
-                <Pill active={priorityFilter === 'medium'} count={filterCounts.medium} onClick={() => setPriorityFilter(f => f === 'medium' ? null : 'medium')}>Med</Pill>
-              </div>
-            </div>
-          </header>}
-
-          {/* Now Band — steering essentials, promoted out of the (dissolved) right rail.
+          {/* Now Band — stacks-only (the Front Page's Happening Now covers this on landing).
               Collapses entirely when nothing is in flight and nothing needs the human. */}
-          {!blueprintMode && !focusedSectionId && (inProgressTasks.length > 0 || needsYou.length > 0) && (
+          {!blueprintMode && !focusedSectionId && view === 'stacks' && (inProgressTasks.length > 0 || needsYou.length > 0) && (
             <div className="shrink-0 flex items-center gap-3 px-7 py-2 border-b border-line-2 bg-paper">
               <Kicker className="text-accent" count={inProgressTasks.length}>IN PROGRESS</Kicker>
               <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar flex-1">
                 {inProgressTasks.map(t => (
                   <div key={t.id} className="shrink-0 inline-flex items-center h-6 pl-2.5 pr-1 rounded-pill border border-line bg-paper text-[11.5px] text-ink-2 hover:border-accent transition-colors">
                     <button onClick={() => openTask(t.id)} className="inline-flex items-center gap-1.5 min-w-0">
-                      <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0" />
+                      <span className="w-1.5 h-1.5 rounded-full bg-accent shrink-0 dot-live" />
                       {project.prefix && t.short_id != null && (
                         <span className="font-mono text-[9.5px] text-mute tracking-[0.04em] shrink-0">{project.prefix}-{t.short_id}</span>
                       )}
@@ -747,10 +819,8 @@ export default function ProjectBoard({ project }) {
             </div>
           )}
 
-          {/* Section minimap — all-sections density + teleport + "you are here" (Zone 3).
-              Tabs on the board surface, not pills: navigation must not impersonate the
-              Now Band's task chips (different behavior → different look). */}
-          {!blueprintMode && !focusedSectionId && enrichedSections.length > 0 && (
+          {/* Section minimap — stacks-only: all-sections density + teleport + "you are here". */}
+          {!blueprintMode && !focusedSectionId && view === 'stacks' && enrichedSections.length > 0 && (
             <div className="shrink-0 flex items-center gap-2 pl-7 pr-3 border-b border-line-2 bg-surf-2">
               <Kicker count={enrichedSections.length}>SECTIONS</Kicker>
               <div className="relative flex-1 min-w-0 flex items-center">
@@ -763,7 +833,7 @@ export default function ProjectBoard({ project }) {
                         onClick={() => scrollToSection(s.id)}
                         title={`${s.completedCount}/${s.totalCount} done — jump to ${s.name}`}
                         className={clsx(
-                          'shrink-0 inline-flex items-center gap-1.5 h-8 px-2.5 border-b-2 -mb-px text-[11px] transition-colors',
+                          'shrink-0 inline-flex items-center gap-1.5 h-9 px-2.5 border-b-2 -mb-px text-[11.5px] transition-colors',
                           inView ? 'border-ink text-ink' : 'border-transparent text-mute hover:text-ink',
                         )}
                       >
@@ -791,8 +861,20 @@ export default function ProjectBoard({ project }) {
             </div>
           )}
 
-          {/* Swimlane columns */}
-          <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
+          {/* Front Page — the attention-first landing view */}
+          {!blueprintMode && !focusedSectionId && view === 'front' && (
+            <FrontPage
+              project={project}
+              tasks={boardTasks}
+              sections={enrichedSections}
+              onOpenTask={openTask}
+              onPause={toggleInProgressWithWarning}
+              onFocusSection={setFocusedSectionId}
+            />
+          )}
+
+          {/* Swimlane columns — The Stacks (and section focus) */}
+          {(focusedSectionId || view === 'stacks') && <DndContext sensors={sensors} collisionDetection={closestCenter} onDragStart={handleDragStart} onDragEnd={handleDragEnd}>
             <div ref={scrollerRef} className={clsx('cols-scroll flex-1 min-h-0 overflow-x-auto overflow-y-hidden flex bg-surf-2', blueprintMode && 'hidden')}>
               <SortableContext items={focusedSectionId ? enrichedSections.find(s => s.id === focusedSectionId)?.groups?.map(g => g.id) || [] : enrichedSections.map(s => s.id)} strategy={horizontalListSortingStrategy}>
                 {focusedSectionId ? (
@@ -864,7 +946,7 @@ export default function ProjectBoard({ project }) {
                 </div>
               )}
             </DragOverlay>
-          </DndContext>
+          </DndContext>}
         </div>
       </AppShell>
 

@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&display=swap');
 
 @tailwind base;
 @tailwind components;
@@ -37,6 +37,7 @@
   --shadow-card:  0 1px 3px rgba(26,25,22,0.06);
   --scroll-thumb: #D4D0C8;
   --scroll-thumb-hover: #9A9896;
+  --grain-opacity: 0.05;
 }
 
 [data-theme="dark"] {
@@ -59,6 +60,7 @@
   --shadow-card:  0 1px 3px rgba(0,0,0,0.4);
   --scroll-thumb: #38353F;
   --scroll-thumb-hover: #6B6867;
+  --grain-opacity: 0.035;
 }
 
 /* Focus mode — always-dark, regardless of light/dark theme.
@@ -138,6 +140,39 @@
 /* ── Board: hide columns scrollbar ── */
 .cols-scroll { scrollbar-width: none; }
 .cols-scroll::-webkit-scrollbar { height: 0; display: none; }
+
+/* ── Editorial materiality ──
+   Paper grain: a fixed feTurbulence texture laid over the whole board surface.
+   Sits above content (uniform, like printed stock) but is pointer-transparent
+   and faint enough (~4-5%) to never touch legibility. */
+.board-surface { position: relative; }
+.board-surface::after {
+  content: '';
+  position: absolute; inset: 0;
+  z-index: 30; pointer-events: none;
+  opacity: var(--grain-opacity, 0.05);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>");
+  background-size: 180px 180px;
+}
+
+/* Masthead: a warm bloom rising from the top-right of the header —
+   the paper catches light where the chrome used to be. */
+.masthead {
+  background:
+    radial-gradient(90% 170% at 88% -50%, var(--color-accent-soft), transparent 58%),
+    var(--color-paper);
+}
+
+/* In-flight dots breathe — the only motion on the board that loops,
+   reserved for "the AI is working right now". */
+@keyframes breathe {
+  0%, 100% { opacity: 1;    transform: scale(1); }
+  50%      { opacity: 0.45; transform: scale(0.8); }
+}
+.dot-live { animation: breathe 2.4s ease-in-out infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .dot-live { animation: none; }
+}
 
 /* ── Column body: slim scrollbar ── */
 .col-body::-webkit-scrollbar { width: 6px; }
