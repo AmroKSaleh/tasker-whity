@@ -8,6 +8,7 @@ import FlowsPage from './pages/FlowsPage'
 import DocsPage from './pages/DocsPage'
 import DocsV2Page from './pages/DocsV2Page'
 import SettingsPage from './pages/SettingsPage'
+import EnvironmentsPage from './pages/EnvironmentsPage'
 import GmailPanelPage from './pages/GmailPanelPage'
 import GoogleTasksPage from './pages/GoogleTasksPage'
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
@@ -20,6 +21,7 @@ export default function App() {
         <Route path="/today" element={<Navigate to="/home" replace />} />
         <Route path="/home" element={<AuthGuard><TodayPage /></AuthGuard>} />
         <Route path="/projects" element={<AuthGuard><HomePage /></AuthGuard>} />
+        <Route path="/environments" element={<AuthGuard><EnvironmentsPage /></AuthGuard>} />
         <Route path="/flows" element={<AuthGuard><FlowsPage /></AuthGuard>} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/docs/*" element={<DocsPage />} />

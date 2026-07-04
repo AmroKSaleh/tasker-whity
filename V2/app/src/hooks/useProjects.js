@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useProjectStore } from '../store/useProjectStore'
+import { useEnvironmentStore } from '../store/useEnvironmentStore'
 
 export function derivePrefix(name) {
   const words = name.trim().toUpperCase().replace(/[^A-Z0-9 ]/g, '').split(/\s+/).filter(Boolean)
@@ -17,12 +18,14 @@ export async function createProject(displayName, customPrefix) {
   const slug = displayName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'project'
   const prefix = customPrefix ? customPrefix.toUpperCase().slice(0, 3) : derivePrefix(displayName)
   const { data: { user } } = await supabase.auth.getUser()
+  const environment_id = useEnvironmentStore.getState().activeEnvironmentId
   const { data: proj } = await supabase.from('projects').insert({
     name: displayName,
     slug,
     description: displayName,
     user_id: user.id,
     prefix,
+    environment_id,
   }).select().single()
   if (proj) {
     addProject(proj)
@@ -66,7 +69,7 @@ export function useProjects() {
 
   useEffect(() => {
     async function fetchProjects() {
-      const { data } = await supabase.from('projects').select('id, name, slug, sort_order, created_at, context, description, prefix').order('sort_order').order('created_at')
+      const { data } = await supabase.from('projects').select('id, name, slug, sort_order, created_at, context, description, prefix, environment_id').order('sort_order').order('created_at')
       if (data) setProjects(data)
       setIsLoading(false)
     }

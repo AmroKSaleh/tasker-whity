@@ -7,6 +7,7 @@ import ContextPoints from '../projects/ContextPoints'
 import { supabase } from '../../lib/supabase'
 import { useGitHub } from '../../hooks/useGitHub'
 import { useProjectStore } from '../../store/useProjectStore'
+import { useEnvironmentStore } from '../../store/useEnvironmentStore'
 const EXAMPLE_TRIGGERS = ['example', 'demo', 'sample', 'tutorial', 'show me how', 'how to use', 'onboard', 'learn from', 'how does this work', 'how do i use']
 
 const MAGIC_PROMPT = `Describe your project in the space below, then send this entire message to your AI:
@@ -531,6 +532,7 @@ export default function NewProjectModal({ onClose, onCreated }) {
         context,
         github_repo: githubRepo.trim(),
         prefix: derivePrefix(displayName),
+        environment_id: useEnvironmentStore.getState().activeEnvironmentId,
       }).select().single()
       if (!proj) throw new Error('Failed to create project')
 

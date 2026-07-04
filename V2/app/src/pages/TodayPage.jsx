@@ -3,6 +3,8 @@ import { Link } from 'react-router-dom'
 import clsx from 'clsx'
 import { Crosshair, ChevronDown } from 'lucide-react'
 import { useAllTasks } from '../hooks/useAllTasks'
+import { useEnvironments } from '../hooks/useEnvironments'
+import { envColor } from '../lib/envColor'
 import { useGoogleCalendar } from '../hooks/useGoogleCalendar'
 import { rankTasks } from '../lib/scoring'
 import AppShell from '../components/editorial/AppShell'
@@ -26,7 +28,7 @@ function dateKicker(d) {
 }
 
 // ── Bucket: editorial kicker + hairline + rows ──
-function Bucket({ kicker, accent, tasks, onToggleDone, onToggleInProgress, onOpenTask, onStar }) {
+function Bucket({ kicker, accent, tasks, onToggleDone, onToggleInProgress, onOpenTask, onStar, getEnvBadge }) {
   if (!tasks.length) return null
   return (
     <section className="mb-6">
@@ -36,7 +38,7 @@ function Bucket({ kicker, accent, tasks, onToggleDone, onToggleInProgress, onOpe
       </div>
       <div className="flex flex-col gap-px">
         {tasks.map(t => (
-          <TaskRow key={t.id} task={t} onToggle={onToggleDone} onToggleInProgress={onToggleInProgress} onOpen={onOpenTask} onStar={onStar} />
+          <TaskRow key={t.id} task={t} onToggle={onToggleDone} onToggleInProgress={onToggleInProgress} onOpen={onOpenTask} onStar={onStar} envBadge={getEnvBadge?.(t)} />
         ))}
       </div>
     </section>
@@ -44,7 +46,7 @@ function Bucket({ kicker, accent, tasks, onToggleDone, onToggleInProgress, onOpe
 }
 
 // ── Today's Focus hero card ──
-function FocusCard({ task, rank, total, onBeginFocus, onMarkDone, onSkip }) {
+function FocusCard({ task, rank, total, onBeginFocus, onMarkDone, onSkip, envName }) {
   if (!task) return null
   const why = task.detail
     ? task.detail.slice(0, 180)
@@ -53,7 +55,7 @@ function FocusCard({ task, rank, total, onBeginFocus, onMarkDone, onSkip }) {
     <section className="relative overflow-hidden border border-line rounded-2xl bg-paper p-[18px] mb-7">
       <div className="absolute top-0 left-0 w-[3px] h-full bg-accent" />
       <div className="flex justify-between items-start mb-2.5">
-        <Kicker>TODAY'S FOCUS{task.project?.prefix ? ` · ${task.project.prefix}` : ''}</Kicker>
+        <Kicker>TODAY'S FOCUS{task.project?.prefix ? ` · ${task.project.prefix}` : ''}{envName ? ` · ${envName}` : ''}</Kicker>
         <span className="font-mono text-[9.5px] text-mute tracking-[0.1em]">
           RANKED · {String(rank).padStart(2, '0')} OF {String(total).padStart(2, '0')}
         </span>
@@ -84,7 +86,7 @@ function meetingIsLive(e) {
   return new Date(e.start.dateTime) <= n && n <= new Date(e.end.dateTime)
 }
 
-function ActivitySection({ doneToday, onToggleDone, onOpenTask, onStar }) {
+function ActivitySection({ doneToday, onToggleDone, onOpenTask, onStar, getEnvBadge }) {
   const [open, setOpen] = useState(false)
   if (!doneToday.length) return null
   return (
@@ -96,7 +98,7 @@ function ActivitySection({ doneToday, onToggleDone, onOpenTask, onStar }) {
       {open && (
         <div className="flex flex-col gap-px pl-4">
           {doneToday.map(t => (
-            <TaskRow key={t.id} task={t} onToggle={onToggleDone} onOpen={onOpenTask} onStar={onStar} />
+            <TaskRow key={t.id} task={t} onToggle={onToggleDone} onOpen={onOpenTask} onStar={onStar} envBadge={getEnvBadge?.(t)} />
           ))}
         </div>
       )}
@@ -106,7 +108,18 @@ function ActivitySection({ doneToday, onToggleDone, onOpenTask, onStar }) {
 
 export default function TodayPage() {
   const { tasks, projects, toggleDone, toggleInProgress, setFocusDate, setPinned, loading } = useAllTasks()
+  const { environments } = useEnvironments()
   const { isConnected, fetchEvents } = useGoogleCalendar()
+
+  // Today deliberately spans ALL Environments (the exception to exclusive switching). Only
+  // badge each item when there's more than one Environment — otherwise it's pure noise.
+  const multiEnv = environments.length > 1
+  const envById = Object.fromEntries(environments.map(e => [e.id, e]))
+  const getEnvBadge = (t) => {
+    if (!multiEnv) return null
+    const env = envById[t.project?.environment_id]
+    return env ? { name: env.name, color: envColor(env) } : null
+  }
   const [calEvents, setCalEvents] = useState([])
 
   const [selectedTaskId, setSelectedTaskId] = useState(null)
@@ -284,6 +297,7 @@ export default function TodayPage() {
                 onBeginFocus={t => openFocus(t.id)}
                 onMarkDone={handleToggleDone}
                 onSkip={t => setSkippedIds(prev => new Set(prev).add(t.id))}
+                envName={topFocus && multiEnv ? envById[topFocus.project?.environment_id]?.name : undefined}
               />
 
               {/* Project filter pills */}
@@ -297,15 +311,15 @@ export default function TodayPage() {
               </div>
 
               {/* Buckets */}
-              <Bucket kicker="OVERDUE" accent tasks={pf(overdueTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
-              <Bucket kicker="CARRIED FROM YESTERDAY" tasks={pf(carriedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
-              <Bucket kicker="DUE TODAY" tasks={pf(dueTodayTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
-              <Bucket kicker="IN PROGRESS" tasks={pf(inProgressTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
-              <Bucket kicker="PINNED" tasks={pf(pinnedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
-              <Bucket kicker="ADDED TO TODAY" tasks={pf(addedTodayTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
-              <Bucket kicker="QUEUED" tasks={pf(queuedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
+              <Bucket kicker="OVERDUE" accent tasks={pf(overdueTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
+              <Bucket kicker="CARRIED FROM YESTERDAY" tasks={pf(carriedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
+              <Bucket kicker="DUE TODAY" tasks={pf(dueTodayTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
+              <Bucket kicker="IN PROGRESS" tasks={pf(inProgressTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
+              <Bucket kicker="PINNED" tasks={pf(pinnedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
+              <Bucket kicker="ADDED TO TODAY" tasks={pf(addedTodayTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
+              <Bucket kicker="QUEUED" tasks={pf(queuedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
 
-              <ActivitySection doneToday={doneToday} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} />
+              <ActivitySection doneToday={doneToday} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
             </>
           )}
         </div>

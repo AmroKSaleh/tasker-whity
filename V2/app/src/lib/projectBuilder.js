@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { useProjectStore } from '../store/useProjectStore'
+import { useEnvironmentStore } from '../store/useEnvironmentStore'
 
 async function seedTaskDiscussion(taskId, userId, focus) {
   await supabase.from('task_discussions').insert({
@@ -25,6 +26,7 @@ export async function createProjectWithStructure(structure) {
     description: displayName,
     user_id: user.id,
     context: structure.context ?? null,
+    environment_id: useEnvironmentStore.getState().activeEnvironmentId,
   }).select().single()
 
   if (!proj) throw new Error('Failed to create project')

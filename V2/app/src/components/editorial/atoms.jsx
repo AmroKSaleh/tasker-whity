@@ -65,7 +65,7 @@ function formatDue(task) {
   return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).toUpperCase()
 }
 
-export function TaskRow({ task, onToggle, onToggleInProgress, onOpen, onStar, dense = false, showProject = true }) {
+export function TaskRow({ task, onToggle, onToggleInProgress, onOpen, onStar, dense = false, showProject = true, envBadge = null }) {
   const done = task.status === 'done'
   const ip = task.status === 'in_progress'
   const due = formatDue(task)
@@ -90,6 +90,15 @@ export function TaskRow({ task, onToggle, onToggleInProgress, onOpen, onStar, de
           'flex-1 min-w-0 truncate text-[13px] font-medium',
           done ? 'text-mute-2 line-through' : 'text-ink',
         )}>{task.text}</span>
+        {envBadge && (
+          <span
+            className="inline-flex items-center gap-1 shrink-0 font-mono text-[9px] tracking-[0.04em] text-mute uppercase"
+            title={`Environment: ${envBadge.name}`}
+          >
+            <span className="w-1.5 h-1.5 rounded-full shrink-0" style={{ background: envBadge.color }} />
+            {envBadge.name}
+          </span>
+        )}
         {showProject && projectLabel && (
           <span className="font-mono text-[10px] tracking-[0.04em] text-mute shrink-0">{projectLabel}</span>
         )}

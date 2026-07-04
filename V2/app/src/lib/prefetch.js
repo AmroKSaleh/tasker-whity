@@ -32,7 +32,7 @@ export async function prefetchToday() {
   inFlight.add(key)
   try {
     const [{ data: projs }, { data: tsks }] = await Promise.all([
-      supabase.from('projects').select('id, name, slug, prefix').order('created_at'),
+      supabase.from('projects').select('id, name, slug, prefix, environment_id').order('created_at'),
       supabase.from('tasks')
         .select('id, project_id, section_id, text, status, priority, due_date, sort_order, pinned, skip_count, completed_at, created_at, focus_date, short_id')
         .order('sort_order'),

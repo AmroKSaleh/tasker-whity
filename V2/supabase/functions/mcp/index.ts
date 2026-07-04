@@ -531,8 +531,8 @@ const CONTRACT_SCHEMA = {
 const TOOLS = [
   {
     name: 'list_projects',
-    description: 'List all projects with name, slug, progress stats, and context (goal, why, scope). If you have not yet called __init_tasker_session this session, call it first — it returns the user\'s preferences and the playbook for using Tasker correctly (task lifecycle, flows, dependency rules).',
-    inputSchema: { type: 'object', properties: {}, required: [] },
+    description: 'List all projects with name, slug, progress stats, and context (goal, why, scope), grouped by Environment (the active one is marked). Defaults to ALL projects across every Environment — pass environment_id to show only one. If you have not yet called __init_tasker_session this session, call it first — it returns the user\'s preferences and the playbook for using Tasker correctly (task lifecycle, flows, dependency rules).',
+    inputSchema: { type: 'object', properties: { environment_id: { type: 'string', description: 'Optional: show only projects in this Environment (UUID from list_environments). Omit to see every Environment.' } }, required: [] },
   },
   {
     name: 'get_project',
@@ -586,8 +586,48 @@ const TOOLS = [
       properties: {
         name: { type: 'string' },
         context: { type: 'object', description: 'The Foundation. Core: { goal, why, scope, definition_of_done, failure, quality_bar, assumptions }. Extended: { audience, success_metrics, constraints, risks, ai_behavior }. Plus any flexible keys that fit the project type.' },
+        environment_id: { type: 'string', description: 'Optional Environment (UUID) to create the project in. Defaults to the active Environment reported by __init_tasker_session; if none resolves and the user has more than one Environment, this is required.' },
       },
       required: ['name'],
+    },
+  },
+  {
+    name: 'list_environments',
+    description: 'List the user\'s Environments — the single-user context partition that sits ABOVE projects (e.g. Personal / Work / Learning) — with each one\'s project count and which is currently active.',
+    inputSchema: { type: 'object', properties: {}, required: [] },
+  },
+  {
+    name: 'create_environment',
+    description: 'Create a new Environment (a context partition that holds projects). Returns its id. Does NOT change the active Environment — the web app owns that pointer.',
+    inputSchema: {
+      type: 'object',
+      properties: { name: { type: 'string', description: 'Environment name, e.g. "Work".' } },
+      required: ['name'],
+    },
+  },
+  {
+    name: 'rename_environment',
+    description: 'Rename an Environment. Non-destructive — its projects stay attached.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        environment_id: { type: 'string', description: 'Environment UUID (from list_environments).' },
+        name: { type: 'string', description: 'New name.' },
+      },
+      required: ['environment_id', 'name'],
+    },
+  },
+  {
+    name: 'delete_environment',
+    description: 'Delete an Environment. Its projects are first reassigned to another Environment (reassign_to_id, else one named "Default", else the next Environment) — projects are NEVER deleted. Refuses to delete the last remaining Environment. Requires confirmed: true.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        environment_id: { type: 'string', description: 'Environment UUID to delete.' },
+        reassign_to_id: { type: 'string', description: 'Optional Environment UUID to move this one\'s projects into. Defaults to a "Default" Environment, else the next one.' },
+        confirmed: { type: 'boolean', description: 'Must be true — deletion is permanent (projects are preserved and moved).' },
+      },
+      required: ['environment_id'],
     },
   },
   {
@@ -2159,18 +2199,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
   switch (name) {
 
     case 'list_projects': {
-      const [{ data: projects }, { data: tasks }] = await Promise.all([
-        sb.from('projects').select('id, name, slug, prefix, context').eq('user_id', userId).order('sort_order'),
+      const envFilter = args.environment_id || null
+      let projQuery = sb.from('projects').select('id, name, slug, prefix, context, environment_id').eq('user_id', userId).order('sort_order')
+      if (envFilter) projQuery = projQuery.eq('environment_id', envFilter)
+      const [{ data: projects }, { data: tasks }, { data: envRows }, { data: us }] = await Promise.all([
+        projQuery,
         sb.from('tasks').select('project_id, status').eq('user_id', userId),
+        sb.from('environments').select('id, name, sort_order').eq('user_id', userId).order('sort_order'),
+        sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle(),
       ])
-      if (!projects?.length) return 'No projects found.'
+      if (!projects?.length) return envFilter ? 'No projects in that Environment.' : 'No projects found.'
       const counts: Record<string, { total: number; done: number }> = {}
       for (const t of (tasks ?? [])) {
         if (!counts[t.project_id]) counts[t.project_id] = { total: 0, done: 0 }
         counts[t.project_id].total++
         if (t.status === 'done') counts[t.project_id].done++
       }
-      return projects.map((p: any) => {
+      const activeEnvId = us?.active_environment_id ?? null
+      const renderProject = (p: any) => {
         const c = counts[p.id] ?? { total: 0, done: 0 }
         const pct = c.total > 0 ? Math.round((c.done / c.total) * 100) : 0
         const ctx = p.context ?? {}
@@ -2180,7 +2226,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           ctx.goal ? `Goal: ${ctx.goal}` : null,
           ctx.why  ? `Why:  ${ctx.why}`  : null,
         ].filter(Boolean).join('\n')
-      }).join('\n\n')
+      }
+      // Bucket projects by Environment. A project whose environment_id is null/unknown
+      // falls into "(unassigned)" (the app treats that as Default). When everything sits
+      // in a single Environment, render flat — no group headers — to stay uncluttered.
+      const envList = envRows ?? []
+      const buckets: Record<string, any[]> = {}
+      for (const e of envList) buckets[e.id] = []
+      const unassigned: any[] = []
+      for (const p of projects) {
+        if (p.environment_id && buckets[p.environment_id]) buckets[p.environment_id].push(p)
+        else unassigned.push(p)
+      }
+      const populatedGroups = envList.filter((e: any) => buckets[e.id].length).length + (unassigned.length ? 1 : 0)
+      if (populatedGroups <= 1) return projects.map(renderProject).join('\n\n')
+      const blocks: string[] = []
+      for (const e of envList) {
+        if (!buckets[e.id].length) continue
+        const active = e.id === activeEnvId ? '  ● active' : ''
+        blocks.push(`# ▸ Environment: ${e.name}${active}  (id: ${e.id})\n\n` + buckets[e.id].map(renderProject).join('\n\n'))
+      }
+      if (unassigned.length) blocks.push(`# ▸ Environment: (unassigned)\n\n` + unassigned.map(renderProject).join('\n\n'))
+      return blocks.join('\n\n')
     }
 
     case 'get_project': {
@@ -2338,24 +2405,106 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'create_project': {
       const { name, context } = args
+      // Resolve the Environment: explicit arg → active pointer → the sole Environment → error.
+      // The AI never silently inherits the active pointer for anything but this default (TDE-308).
+      let environmentId = args.environment_id || null
+      if (environmentId) {
+        const { data: env } = await sb.from('environments').select('id').eq('id', environmentId).eq('user_id', userId).maybeSingle()
+        if (!env) return `Environment "${environmentId}" not found. Call list_environments to see valid ids.`
+      } else {
+        const { data: usEnv } = await sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle()
+        environmentId = usEnv?.active_environment_id ?? null
+        if (!environmentId) {
+          const { data: envs } = await sb.from('environments').select('id').eq('user_id', userId).order('sort_order')
+          if (!envs?.length) return 'No Environment exists yet. Create one with create_environment, then retry.'
+          if (envs.length === 1) environmentId = envs[0].id
+          else return 'No active Environment is set and you have more than one. Pass environment_id explicitly (see list_environments).'
+        }
+      }
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
         + '-' + Date.now().toString(36)
       // Auto-assign a short-ID handle (prefix) so tasks get usable IDs (e.g. WMP-3)
       // from the start. Caller can rename it later via update_project.
       const prefix = await deriveProjectPrefix(sb, userId, name)
       const { data, error } = await sb.from('projects')
-        .insert({ name, slug, user_id: userId, context: context ?? {}, ...(prefix ? { prefix } : {}) })
+        .insert({ name, slug, user_id: userId, context: context ?? {}, environment_id: environmentId, ...(prefix ? { prefix } : {}) })
         .select().single()
       if (error) throw new Error(error.message)
       await getOrCreateBacklog(sb, data.id)
 
+      const { data: envRow } = await sb.from('environments').select('name').eq('id', environmentId).maybeSingle()
+
       // A baseline Instruction Set (task hygiene + working preferences) is seeded
       // automatically by an AFTER INSERT trigger on `projects` (TDE-193), so it applies
       // to every creation path. Here we just nudge the assistant to tailor it.
-      return `Created project "${name}"\nprefix: ${data.prefix || '(none — set one via update_project)'} | slug: ${data.slug} | id: ${data.id}` +
+      return `Created project "${name}"\nprefix: ${data.prefix || '(none — set one via update_project)'} | slug: ${data.slug} | id: ${data.id}${envRow ? ` | environment: ${envRow.name}` : ''}` +
         `\n\nA baseline Instruction Set (task hygiene + working preferences) was applied automatically.` +
         `\n\nNEXT — tailor it: from what you know about this project (stack, language, conventions, workflow, output/commit style), propose 2–4 specific IS additions and ask the user to confirm before adding them via create_is_entry. Set universal:true for rules that must hold even inside flows (e.g. code style, deploy rules). Don't assume — propose, then add only what's confirmed.` +
         `\n\nTHEN, to go from grounding to action, offer to build the first concrete chunk of work as a flow (build_new_flow).`
+    }
+
+    case 'list_environments': {
+      const [{ data: envs }, { data: projs }, { data: us }] = await Promise.all([
+        sb.from('environments').select('id, name, sort_order').eq('user_id', userId).order('sort_order'),
+        sb.from('projects').select('environment_id').eq('user_id', userId),
+        sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle(),
+      ])
+      if (!envs?.length) return 'No Environments yet. Create one with create_environment.'
+      const pc: Record<string, number> = {}
+      for (const p of (projs ?? [])) { if (p.environment_id) pc[p.environment_id] = (pc[p.environment_id] ?? 0) + 1 }
+      const activeId = us?.active_environment_id ?? null
+      return envs.map((e: any) => {
+        const n = pc[e.id] ?? 0
+        return `${e.id === activeId ? '● ' : '  '}${e.name}  (${n} project${n === 1 ? '' : 's'} | id: ${e.id})${e.id === activeId ? '  — active' : ''}`
+      }).join('\n')
+    }
+
+    case 'create_environment': {
+      if (!args.name?.trim()) return 'name is required.'
+      const { data: last } = await sb.from('environments')
+        .select('sort_order').eq('user_id', userId).order('sort_order', { ascending: false }).limit(1).maybeSingle()
+      const sortOrder = (last?.sort_order ?? -1) + 1
+      const { data, error } = await sb.from('environments')
+        .insert({ user_id: userId, name: args.name.trim(), sort_order: sortOrder }).select().single()
+      if (error) throw new Error(error.message)
+      return `Created Environment "${data.name}"\nid: ${data.id}\n\nThe active Environment is unchanged — switch it in the web app.`
+    }
+
+    case 'rename_environment': {
+      if (!args.environment_id || !args.name?.trim()) return 'environment_id and name are required.'
+      const { data: env } = await sb.from('environments').select('id, name').eq('id', args.environment_id).eq('user_id', userId).maybeSingle()
+      if (!env) return `Environment "${args.environment_id}" not found.`
+      await sb.from('environments').update({ name: args.name.trim() }).eq('id', env.id)
+      return `Renamed Environment "${env.name}" → "${args.name.trim()}".`
+    }
+
+    case 'delete_environment': {
+      if (!args.environment_id) return 'environment_id is required.'
+      if (!args.confirmed) return 'You must set confirmed: true to delete an Environment. Its projects are preserved and moved to another Environment.'
+      const { data: env } = await sb.from('environments').select('id, name').eq('id', args.environment_id).eq('user_id', userId).maybeSingle()
+      if (!env) return `Environment "${args.environment_id}" not found.`
+      const { data: allEnvs } = await sb.from('environments').select('id, name').eq('user_id', userId).order('sort_order')
+      if ((allEnvs?.length ?? 0) <= 1) return 'Cannot delete the last Environment — every project must live in one. Create another first, or just rename this one.'
+      // Resolve the reassignment target: explicit arg → an Environment named "Default" → the next one.
+      const others = (allEnvs ?? []).filter((e: any) => e.id !== env.id)
+      let target: any = null
+      if (args.reassign_to_id) {
+        target = others.find((e: any) => e.id === args.reassign_to_id) ?? null
+        if (!target) return `reassign_to_id "${args.reassign_to_id}" is not another Environment of yours.`
+      } else {
+        target = others.find((e: any) => e.name === 'Default') ?? others[0]
+      }
+      // Move projects FIRST (never orphan/delete them), then delete the Environment.
+      const { data: moved } = await sb.from('projects')
+        .update({ environment_id: target.id }).eq('environment_id', env.id).eq('user_id', userId).select('id')
+      // If the deleted Environment was the active pointer, repoint it to the target.
+      const { data: us } = await sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle()
+      if (us?.active_environment_id === env.id) {
+        await sb.from('user_settings').update({ active_environment_id: target.id }).eq('user_id', userId)
+      }
+      await sb.from('environments').delete().eq('id', env.id)
+      const n = moved?.length ?? 0
+      return `Deleted Environment "${env.name}". Moved ${n} project${n === 1 ? '' : 's'} to "${target.name}".`
     }
 
     case 'export_project': {
@@ -3790,9 +3939,13 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case '__init_tasker_session': {
-      const { data: settings } = await sb.from('user_settings').select('ai_instructions').eq('user_id', userId).maybeSingle()
+      const { data: settings } = await sb.from('user_settings').select('ai_instructions, active_environment_id').eq('user_id', userId).maybeSingle()
       const instructions = settings?.ai_instructions
       const { show_questionnaire } = args
+
+      const { data: envRows } = await sb.from('environments').select('id, name, sort_order').eq('user_id', userId).order('sort_order')
+      const environments = (envRows ?? []).map((e: any) => ({ id: e.id, name: e.name }))
+      const active_environment_id = settings?.active_environment_id ?? null
 
       if (instructions && !show_questionnaire) {
         const settings_summary = {
@@ -3808,6 +3961,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           status: 'ready',
           instructions,
           settings_summary,
+          environments,
+          active_environment_id,
+          environment_note: environments.length
+            ? 'Environments partition the user\'s projects (single-user; Personal / Work / Learning …). The active one is the DEFAULT for create_project when environment_id is omitted — you may still pass environment_id explicitly. Do NOT silently scope reads to it: list_projects shows every Environment unless the caller filters. The web app owns switching the active Environment (MCP only reads it).'
+            : undefined,
           presentation: 'Begin your FIRST response of this session with exactly ONE compact line summarizing the current settings (from settings_summary), ending with — say "change settings" to adjust. Put this line at the very TOP, before anything else, then immediately carry on with whatever the user asked for. Format it as a single line, e.g.: `⚙ Tasker: plain-text lists · done hidden · sorting order · detailed · collaborative — say "change settings" to adjust`. Do NOT put it at the bottom, do NOT use multiple bullets, and do NOT render the questionnaire. Only show this once, on the first response. When the user later asks to change/review settings, call __init_tasker_session again with show_questionnaire: true to get the review questionnaire with their current choices marked.',
           directives: ASSISTANT_DIRECTIVES,
         })
