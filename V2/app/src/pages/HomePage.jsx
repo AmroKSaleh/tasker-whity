@@ -22,7 +22,7 @@ export default function HomePage() {
   const { projects, isLoading } = useProjects()
   const { tasksByProject } = useAllProjectTasks()
   const { defaultProjectId, setDefault } = useDefaultProject()
-  const { environments, activeEnvironmentId, setActiveEnvironment } = useEnvironments()
+  const { environments, organizations, activeEnvironmentId, setActiveEnvironment } = useEnvironments()
   const [showNewProject, setShowNewProject] = useState(false)
   const [showTransfer, setShowTransfer] = useState(false)
   const navigate = useNavigate()
@@ -59,6 +59,7 @@ export default function HomePage() {
             <div className="flex items-center gap-2">
               <EnvironmentSwitcher
                 environments={environments}
+                organizations={organizations}
                 activeEnvironmentId={activeEnvironmentId}
                 onSelect={setActiveEnvironment}
               />

@@ -10,10 +10,13 @@ import { Kicker } from '../components/editorial/atoms'
 import EnvRow from '../components/environments/EnvRow'
 
 export default function EnvironmentsPage() {
-  const { environments, activeEnvironmentId } = useEnvironments()
+  const { environments, organizations, activeEnvironmentId } = useEnvironments()
   const { projects } = useProjects()
   const [newName, setNewName] = useState('')
   const [newColor, setNewColor] = useState(ENV_COLORS[0])
+
+  // This page manages PERSONAL environments; org environments live on the Organizations page.
+  const personalEnvs = environments.filter(e => !e.org_id)
 
   const projectCounts = {}
   projects.forEach(p => { if (p.environment_id) projectCounts[p.environment_id] = (projectCounts[p.environment_id] || 0) + 1 })
@@ -21,10 +24,10 @@ export default function EnvironmentsPage() {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 5 } }))
   function handleDragEnd({ active, over }) {
     if (!over || active.id === over.id) return
-    const oldIdx = environments.findIndex(e => e.id === active.id)
-    const newIdx = environments.findIndex(e => e.id === over.id)
+    const oldIdx = personalEnvs.findIndex(e => e.id === active.id)
+    const newIdx = personalEnvs.findIndex(e => e.id === over.id)
     if (oldIdx === -1 || newIdx === -1) return
-    reorderEnvironments(arrayMove(environments, oldIdx, newIdx))
+    reorderEnvironments(arrayMove(personalEnvs, oldIdx, newIdx))
   }
 
   async function handleCreate(e) {
@@ -36,7 +39,7 @@ export default function EnvironmentsPage() {
   }
 
   async function handleDelete(env) {
-    if (environments.length <= 1) { window.alert('Cannot delete the last Environment — every project must live in one.'); return }
+    if (personalEnvs.length <= 1) { window.alert('Cannot delete your last personal Environment — every personal project must live in one.'); return }
     const count = projectCounts[env.id] ?? 0
     const msg = count > 0
       ? `Delete "${env.name}"? Its ${count} project${count === 1 ? '' : 's'} will move to another environment (never deleted).`
@@ -49,10 +52,10 @@ export default function EnvironmentsPage() {
     <AppShell active="projects">
       <div className="max-w-3xl mx-auto px-7 pt-8 pb-16">
         <header className="mb-7">
-          <Kicker count={environments.length} className="mb-2">ENVIRONMENTS</Kicker>
+          <Kicker count={personalEnvs.length} className="mb-2">PERSONAL ENVIRONMENTS</Kicker>
           <h1 className="text-h1 m-0">Environments.</h1>
           <p className="text-[13px] text-mute mt-2 max-w-xl">
-            Environments partition your projects into separate contexts. Switching to one on the Projects page hides the others; Today always shows every environment, tagged by color.
+            Environments partition your projects into separate contexts. Switching to one on the Projects page hides the others; Today always shows every environment, tagged by color. Shared organization environments live on the Organizations page.
           </p>
         </header>
 
@@ -79,8 +82,8 @@ export default function EnvironmentsPage() {
 
         {/* List */}
         <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
-          <SortableContext items={environments.map(e => e.id)} strategy={verticalListSortingStrategy}>
-            {environments.map(env => (
+          <SortableContext items={personalEnvs.map(e => e.id)} strategy={verticalListSortingStrategy}>
+            {personalEnvs.map(env => (
               <EnvRow
                 key={env.id}
                 env={env}
@@ -109,7 +112,18 @@ export default function EnvironmentsPage() {
                   className="text-[12px] border border-line rounded-md px-2 py-1 bg-paper text-ink-2 outline-none focus:border-ink"
                 >
                   {!p.environment_id && <option value="">— unassigned —</option>}
-                  {environments.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
+                  <optgroup label="Personal">
+                    {personalEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
+                  </optgroup>
+                  {organizations.map(org => {
+                    const oEnvs = environments.filter(e => e.org_id === org.id)
+                    if (!oEnvs.length) return null
+                    return (
+                      <optgroup key={org.id} label={org.name}>
+                        {oEnvs.map(env => <option key={env.id} value={env.id}>{env.name}</option>)}
+                      </optgroup>
+                    )
+                  })}
                 </select>
               </div>
             ))}

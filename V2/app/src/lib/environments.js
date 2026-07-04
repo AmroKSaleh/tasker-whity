@@ -7,20 +7,21 @@ import { useProjectStore } from '../store/useProjectStore'
 // refreshes the Environment store so the switcher + badges reflect changes immediately.
 
 async function refreshEnvironments() {
-  const { data: { user } } = await supabase.auth.getUser()
-  if (!user) return
+  // No user_id filter: RLS returns personal + accessible org envs.
   const { data } = await supabase
-    .from('environments').select('id, name, sort_order, color')
-    .eq('user_id', user.id).order('sort_order')
+    .from('environments').select('id, name, sort_order, color, org_id')
+    .order('sort_order')
   useEnvironmentStore.getState().setEnvironments(data ?? [])
 }
 
-export async function createEnvironment(name, color) {
+// orgId null → personal environment; set → org-owned (shared, access-controlled). The creator
+// is recorded as user_id either way (satisfies the not-null column + owner-path access).
+export async function createEnvironment(name, color, orgId = null) {
   const { data: { user } } = await supabase.auth.getUser()
   const envs = useEnvironmentStore.getState().environments
   const sortOrder = envs.reduce((m, e) => Math.max(m, e.sort_order ?? 0), -1) + 1
   const { data, error } = await supabase.from('environments')
-    .insert({ user_id: user.id, name: name.trim(), color: color ?? null, sort_order: sortOrder })
+    .insert({ user_id: user.id, name: name.trim(), color: color ?? null, sort_order: sortOrder, org_id: orgId })
     .select().single()
   if (error) throw new Error(error.message)
   await refreshEnvironments()
@@ -33,8 +34,10 @@ export async function updateEnvironment(id, updates) {
 }
 
 export async function reorderEnvironments(ordered) {
-  useEnvironmentStore.getState().setEnvironments(ordered)
+  // Persist the new order, then refetch ALL envs (personal + org) so we never clobber the store
+  // with a partial list when reordering only one group.
   await Promise.all(ordered.map((e, i) => supabase.from('environments').update({ sort_order: i }).eq('id', e.id)))
+  await refreshEnvironments()
 }
 
 // Never orphan projects: move them to a target Environment first (explicit → a "Default" →
@@ -62,6 +65,16 @@ export async function deleteEnvironment(id, reassignToId) {
 
   await refreshEnvironments()
   return target
+}
+
+// For org environments: delete only when empty (no "reassign to Default" fallback like personal
+// envs have — an org can simply have zero environments). Caller moves projects out first.
+export async function deleteEmptyEnvironment(envId) {
+  const { count } = await supabase.from('projects')
+    .select('id', { count: 'exact', head: true }).eq('environment_id', envId)
+  if (count && count > 0) throw new Error("Move this environment's projects out before deleting it.")
+  await supabase.from('environments').delete().eq('id', envId)
+  await refreshEnvironments()
 }
 
 export async function moveProjectToEnvironment(projectId, environmentId) {

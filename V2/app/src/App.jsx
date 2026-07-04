@@ -9,6 +9,7 @@ import DocsPage from './pages/DocsPage'
 import DocsV2Page from './pages/DocsV2Page'
 import SettingsPage from './pages/SettingsPage'
 import EnvironmentsPage from './pages/EnvironmentsPage'
+import OrganizationsPage from './pages/OrganizationsPage'
 import GmailPanelPage from './pages/GmailPanelPage'
 import GoogleTasksPage from './pages/GoogleTasksPage'
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
@@ -22,6 +23,7 @@ export default function App() {
         <Route path="/home" element={<AuthGuard><TodayPage /></AuthGuard>} />
         <Route path="/projects" element={<AuthGuard><HomePage /></AuthGuard>} />
         <Route path="/environments" element={<AuthGuard><EnvironmentsPage /></AuthGuard>} />
+        <Route path="/organizations" element={<AuthGuard><OrganizationsPage /></AuthGuard>} />
         <Route path="/flows" element={<AuthGuard><FlowsPage /></AuthGuard>} />
         <Route path="/login" element={<LoginPage />} />
         <Route path="/docs/*" element={<DocsPage />} />

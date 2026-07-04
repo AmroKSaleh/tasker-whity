@@ -8,8 +8,10 @@ export const useEnvironmentStore = create(
   persist(
     set => ({
       environments: [],
+      organizations: [],
       activeEnvironmentId: null,
       setEnvironments: environments => set({ environments }),
+      setOrganizations: organizations => set({ organizations }),
       setActiveEnvironmentId: activeEnvironmentId => set({ activeEnvironmentId }),
     }),
     { name: 'tasker-environments' }
