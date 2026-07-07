@@ -81,3 +81,13 @@ export async function moveProjectToEnvironment(projectId, environmentId) {
   useProjectStore.getState().updateProject(projectId, { environment_id: environmentId })
   await supabase.from('projects').update({ environment_id: environmentId }).eq('id', projectId)
 }
+
+// Move an environment to a different owner: an org (orgId) or back to Personal (orgId null).
+// Grants are CLEARED on move (decided TDE-360) — the destination org re-grants fresh, so nobody
+// from the previous owner keeps access via a stale grant. Projects follow the env automatically
+// (they reference it), so they move with it.
+export async function moveEnvironmentToOrg(envId, orgId) {
+  await supabase.from('environment_grants').delete().eq('environment_id', envId)
+  await supabase.from('environments').update({ org_id: orgId }).eq('id', envId)
+  await refreshEnvironments()
+}

@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
-import { Home, Folder, Workflow, Calendar, Search, BookOpen, Settings } from 'lucide-react'
+import { Home, Folder, Layers, Building2, Workflow, Calendar, Search, BookOpen, Settings } from 'lucide-react'
 import { useSidebarStore } from '../../store/useSidebarStore'
 import { useConnectedProviders } from '../../hooks/useConnectedProviders'
 import { useParkedCounts } from '../../hooks/useParkedCounts'
@@ -34,7 +34,7 @@ function RailButton({ icon: Icon, label, active, expanded, onClick, badge }) {
 // expands to 200px on hover (as an overlay, so it doesn't reflow content).
 // Expanded state is held in a shared store so it persists across navigation
 // (the rail remounts on route change, which would otherwise reset CSS :hover).
-// `active` ∈ 'today' | 'projects' | 'calendar' | 'search' | 'inbox' | 'settings'
+// `active` ∈ 'today' | 'projects' | 'environments' | 'organizations' | 'flows' | 'calendar' | 'search' | 'inbox' | 'settings'
 export default function AppShell({ active, rightRail, children, hideSidebar }) {
   const navigate = useNavigate()
   const expanded = useSidebarStore(s => s.expanded)
@@ -71,8 +71,10 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
           >
             <div className="flex flex-col gap-0.5">
             <RailButton icon={Home}     label="Today"    active={active === 'today'}    expanded={expanded} onClick={() => navigate('/home')} />
-            <RailButton icon={Folder}   label="Projects" active={active === 'projects'} expanded={expanded} onClick={() => navigate('/projects')} />
-            <RailButton icon={Workflow} label="Flows"    active={active === 'flows'}    expanded={expanded} onClick={() => navigate('/flows')} />
+            <RailButton icon={Folder}    label="Projects"      active={active === 'projects'}      expanded={expanded} onClick={() => navigate('/projects')} />
+            <RailButton icon={Layers}    label="Environments"  active={active === 'environments'}  expanded={expanded} onClick={() => navigate('/environments')} />
+            <RailButton icon={Building2} label="Organizations" active={active === 'organizations'} expanded={expanded} onClick={() => navigate('/organizations')} />
+            <RailButton icon={Workflow}  label="Flows"         active={active === 'flows'}         expanded={expanded} onClick={() => navigate('/flows')} />
             <RailButton icon={Calendar} label="Calendar" active={active === 'calendar'} expanded={expanded} />
             <RailButton icon={Search}   label="Search"   active={active === 'search'}   expanded={expanded} onClick={() => setSearchOpen(true)} />
           </div>
