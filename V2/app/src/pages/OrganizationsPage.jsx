@@ -32,7 +32,7 @@ export default function OrganizationsPage() {
   }
 
   return (
-    <AppShell active="projects">
+    <AppShell active="organizations">
       <div className="max-w-3xl mx-auto px-7 pt-8 pb-16">
         <header className="mb-7">
           <Kicker count={organizations.length} className="mb-2">ORGANIZATIONS</Kicker>
@@ -63,6 +63,7 @@ export default function OrganizationsPage() {
             key={org.id}
             org={org}
             isOwner={org.owner_user_id === uid}
+            currentUid={uid}
             envs={environments.filter(e => e.org_id === org.id)}
             projectCounts={projectCounts}
             onRenameOrg={renameOrganization}

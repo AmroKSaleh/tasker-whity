@@ -21,6 +21,13 @@ export default function AuthGuard({ children }) {
         else {
           captureGitHubToken(session).catch(() => {})
           syncSettingsFromSupabase().catch(() => {})
+          // A pending org invite survives any login method (incl. OAuth, which lands on /dashboard).
+          const pendingInvite = localStorage.getItem('tasker.pendingInvite')
+          if (pendingInvite) {
+            localStorage.removeItem('tasker.pendingInvite')
+            navigate(`/invite/${pendingInvite}`, { replace: true })
+            return
+          }
           setChecking(false)
         }
       })

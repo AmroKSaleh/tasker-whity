@@ -1,10 +1,11 @@
 import { useState } from 'react'
 import { ENV_COLORS } from '../../lib/envColor'
 import OrgEnvRow from './OrgEnvRow'
+import OrgMembers from './OrgMembers'
 
-// One organization's card: rename the org, and manage its environments (create/rename/recolor/
-// delete-empty). Members + grants land in slice 2 (shown as a placeholder for now).
-export default function OrgCard({ org, envs, projectCounts, isOwner, onRenameOrg, onCreateEnv, onRenameEnv, onRecolorEnv, onDeleteEnv }) {
+// One organization's card: rename the org, manage its environments (create/rename/recolor/
+// delete-empty), and manage members + email invitations (TDE-361).
+export default function OrgCard({ org, envs, projectCounts, isOwner, currentUid, onRenameOrg, onCreateEnv, onRenameEnv, onRecolorEnv, onDeleteEnv }) {
   const [orgName, setOrgName] = useState(org.name)
   const [envName, setEnvName] = useState('')
   const [envColorSel, setEnvColorSel] = useState(ENV_COLORS[0])
@@ -63,9 +64,7 @@ export default function OrgCard({ org, envs, projectCounts, isOwner, onRenameOrg
         <button type="submit" disabled={!envName.trim()} className="btn btn-sm disabled:opacity-40">Add</button>
       </form>
 
-      <p className="text-[11px] text-mute-2 mt-3 pt-3 border-t border-line-2">
-        Members &amp; access grants — coming next.
-      </p>
+      <OrgMembers orgId={org.id} envs={envs} canManage={isOwner} currentUid={currentUid} />
     </div>
   )
 }

@@ -13,6 +13,7 @@ import OrganizationsPage from './pages/OrganizationsPage'
 import GmailPanelPage from './pages/GmailPanelPage'
 import GoogleTasksPage from './pages/GoogleTasksPage'
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
+import InvitePage from './pages/InvitePage'
 
 export default function App() {
   return (
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/organizations" element={<AuthGuard><OrganizationsPage /></AuthGuard>} />
         <Route path="/flows" element={<AuthGuard><FlowsPage /></AuthGuard>} />
         <Route path="/login" element={<LoginPage />} />
+        <Route path="/invite/:token" element={<InvitePage />} />
         <Route path="/docs/*" element={<DocsPage />} />
         <Route path="/docsV2/*" element={<DocsV2Page />} />
         <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} />
