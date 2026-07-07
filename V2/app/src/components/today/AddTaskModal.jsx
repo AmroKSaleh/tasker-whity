@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { supabase } from '../../lib/supabase'
 import { useProjectStore } from '../../store/useProjectStore'
+import { getOrCreateBacklogSectionId } from '../../hooks/useTasks'
 
 const PRIORITIES = [
   { value: null,     label: 'None' },
@@ -24,14 +25,15 @@ export default function AddTaskModal({ initialDueDate = '', onClose }) {
     if (!text.trim() || !projectId) return
     setSaving(true)
     const { data: { user } } = await supabase.auth.getUser()
+    const sectionId = await getOrCreateBacklogSectionId(projectId)
     const { count } = await supabase
       .from('tasks')
       .select('id', { count: 'exact', head: true })
       .eq('project_id', projectId)
-      .is('section_id', null)
+      .eq('section_id', sectionId)
     await supabase.from('tasks').insert({
       project_id: projectId,
-      section_id: null,
+      section_id: sectionId,
       user_id: user.id,
       text: text.trim(),
       detail: detail.trim() || null,

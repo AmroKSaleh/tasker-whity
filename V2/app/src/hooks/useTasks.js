@@ -64,6 +64,23 @@ export async function updateGroupName(groupId, name) {
   await supabase.from('groups').update({ name }).eq('id', groupId)
 }
 
+// Resolves a project's "Backlog" section, creating it if the project predates that convention
+// (or it was renamed/deleted) — never returns null, so callers always have a real section to
+// target instead of writing section_id: null (which the board can't render — see TDE-369).
+export async function getOrCreateBacklogSectionId(projectId) {
+  const { data: existing } = await supabase
+    .from('sections').select('id').eq('project_id', projectId).eq('name', 'Backlog')
+    .order('sort_order').limit(1).maybeSingle()
+  if (existing) return existing.id
+
+  const { count } = await supabase.from('sections')
+    .select('id', { count: 'exact', head: true }).eq('project_id', projectId)
+  const { data: created } = await supabase.from('sections')
+    .insert({ project_id: projectId, name: 'Backlog', sort_order: count ?? 0 })
+    .select().single()
+  return created?.id ?? null
+}
+
 export function useTasks(projectId) {
   const {
     tasks, sections, groups,

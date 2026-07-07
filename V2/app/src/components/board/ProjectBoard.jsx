@@ -1,6 +1,6 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react'
 import clsx from 'clsx'
-import { Star, Play, Pause, X, GripVertical, MoreHorizontal, AlertTriangle, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Star, Play, Pause, X, GripVertical, MoreHorizontal, AlertTriangle, Trash2, ChevronLeft } from 'lucide-react'
 import {
   DndContext, DragOverlay, PointerSensor, KeyboardSensor,
   closestCenter, useSensor, useSensors, useDroppable,
@@ -27,6 +27,7 @@ import TaskDetailPanel from './TaskDetailPanel'
 // import FocusOverlay from '../focus/FocusOverlay' — DISABLED 2026-07-02 (TDE-351)
 import KnowledgeBaseModal from '../kb/KnowledgeBaseModal'
 import InstructionSetModal from '../is/InstructionSetModal'
+import CreateTaskModal from './CreateTaskModal'
 import ProjectContextPanel from './ProjectContextPanel'
 import SectionContextSidebar from './SectionContextSidebar'
 import FrontPage, { MastheadSky } from './FrontPage'
@@ -214,7 +215,6 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
   return (
     <div
       ref={setNodeRef}
-      data-col={section.id}
       style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
       className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0"
     >
@@ -338,6 +338,7 @@ export default function ProjectBoard({ project }) {
   const [priorityFilter, setPriorityFilter] = useState(null)
   const [showKB, setShowKB] = useState(false)
   const [showIS, setShowIS] = useState(false)
+  const [showCreateTask, setShowCreateTask] = useState(false)
   const [showContext, setShowContext] = useState(false)
   // const [showFocus, setShowFocus] = useState(false) — DISABLED
   // const [focusTaskId, setFocusTaskId] = useState(null) — DISABLED
@@ -369,20 +370,6 @@ export default function ProjectBoard({ project }) {
   useEffect(() => {
     try { localStorage.setItem('tasker_board_view', view) } catch { /* private mode */ }
   }, [view])
-
-  // Section-strip minimap state: which columns are in view ("you are here"), and
-  // whether the strip itself overflows — hidden sections must never be silently invisible.
-  const stripRef = useRef(null)
-  const [visibleCols, setVisibleCols] = useState(() => new Set())
-  const [stripOverflow, setStripOverflow] = useState({ left: false, right: false })
-  const updateStripOverflow = useCallback(() => {
-    const el = stripRef.current
-    if (!el) return
-    setStripOverflow(prev => {
-      const next = { left: el.scrollLeft > 2, right: el.scrollLeft + el.clientWidth < el.scrollWidth - 2 }
-      return prev.left === next.left && prev.right === next.right ? prev : next
-    })
-  }, [])
 
   // Auto-show sidebar when entering section focus mode
   useEffect(() => {
@@ -558,9 +545,6 @@ export default function ProjectBoard({ project }) {
 
   const inProgressTasks = useMemo(() => boardTasks.filter(t => t.status === 'in_progress'), [boardTasks])
   const needsYou = useMemo(() => boardTasks.filter(t => t.review_verdict?.escalated), [boardTasks])
-  const scrollToSection = useCallback((sid) => {
-    scrollerRef.current?.querySelector(`[data-col="${sid}"]`)?.scrollIntoView({ behavior: 'smooth', inline: 'start', block: 'nearest' })
-  }, [])
   const doneCount = boardTasks.filter(t => t.status === 'done').length
   const pct = boardTasks.length ? Math.round((doneCount / boardTasks.length) * 100) : 0
 
@@ -581,32 +565,6 @@ export default function ProjectBoard({ project }) {
       </>
     )
 
-  // "You are here" for the section minimap: track which columns are ≥ half visible
-  // inside the horizontal scroller.
-  useEffect(() => {
-    if (blueprintMode || focusedSectionId || view !== 'stacks') return
-    const root = scrollerRef.current
-    if (!root) return
-    const io = new IntersectionObserver(entries => {
-      setVisibleCols(prev => {
-        const next = new Set(prev)
-        for (const e of entries) {
-          const id = e.target.getAttribute('data-col')
-          if (!id) continue
-          if (e.intersectionRatio >= 0.5) next.add(id); else next.delete(id)
-        }
-        return next
-      })
-    }, { root, threshold: 0.5 })
-    root.querySelectorAll('[data-col]').forEach(el => io.observe(el))
-    return () => io.disconnect()
-  }, [blueprintMode, focusedSectionId, view, enrichedSections.length])
-
-  useEffect(() => {
-    updateStripOverflow()
-    window.addEventListener('resize', updateStripOverflow)
-    return () => window.removeEventListener('resize', updateStripOverflow)
-  }, [updateStripOverflow, enrichedSections.length, blueprintMode, focusedSectionId, view])
 
   const focusedSection = focusedSectionId ? enrichedSections.find(s => s.id === focusedSectionId) : null
 
@@ -673,6 +631,11 @@ export default function ProjectBoard({ project }) {
                       <span className="dot dot-done" />{ghSyncing ? 'SYNCING…' : 'SYNC ISSUES'}
                     </button>
                   )}
+                  <button
+                    onClick={() => setShowCreateTask(true)}
+                    title="Create a task — lands in Backlog unless you pick a different section"
+                    className="btn-primary btn-sm font-mono text-[10px] tracking-[0.12em] uppercase mr-2"
+                  >+ Create Task</button>
                   <button
                     onClick={() => window.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true }))}
                     title="Search everything"
@@ -819,48 +782,6 @@ export default function ProjectBoard({ project }) {
             </div>
           )}
 
-          {/* Section minimap — stacks-only: all-sections density + teleport + "you are here". */}
-          {!blueprintMode && !focusedSectionId && view === 'stacks' && enrichedSections.length > 0 && (
-            <div className="shrink-0 flex items-center gap-2 pl-7 pr-3 border-b border-line-2 bg-surf-2">
-              <Kicker count={enrichedSections.length}>SECTIONS</Kicker>
-              <div className="relative flex-1 min-w-0 flex items-center">
-                <div ref={stripRef} onScroll={updateStripOverflow} className="flex items-center flex-1 overflow-x-auto no-scrollbar">
-                  {enrichedSections.map(s => {
-                    const inView = visibleCols.has(s.id)
-                    return (
-                      <button
-                        key={s.id}
-                        onClick={() => scrollToSection(s.id)}
-                        title={`${s.completedCount}/${s.totalCount} done — jump to ${s.name}`}
-                        className={clsx(
-                          'shrink-0 inline-flex items-center gap-1.5 h-9 px-2.5 border-b-2 -mb-px text-[11.5px] transition-colors',
-                          inView ? 'border-ink text-ink' : 'border-transparent text-mute hover:text-ink',
-                        )}
-                      >
-                        <span className="font-medium max-w-[120px] truncate">{s.name}</span>
-                        <span className="font-mono text-[10px] text-mute tabular-nums">{s.completedCount}/{s.totalCount}</span>
-                      </button>
-                    )
-                  })}
-                </div>
-                {stripOverflow.left && (
-                  <div className="absolute left-0 inset-y-0 flex items-center pr-5 bg-gradient-to-r from-surf-2 via-surf-2/80 to-transparent">
-                    <button onClick={() => stripRef.current?.scrollBy({ left: -280, behavior: 'smooth' })} title="More sections" className="w-6 h-6 inline-flex items-center justify-center rounded-full border border-line bg-paper text-mute hover:text-ink shadow-sm transition-colors">
-                      <ChevronLeft size={12} />
-                    </button>
-                  </div>
-                )}
-                {stripOverflow.right && (
-                  <div className="absolute right-0 inset-y-0 flex items-center pl-5 bg-gradient-to-l from-surf-2 via-surf-2/80 to-transparent">
-                    <button onClick={() => stripRef.current?.scrollBy({ left: 280, behavior: 'smooth' })} title="More sections" className="w-6 h-6 inline-flex items-center justify-center rounded-full border border-line bg-paper text-mute hover:text-ink shadow-sm transition-colors">
-                      <ChevronRight size={12} />
-                    </button>
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
-
           {/* Front Page — the attention-first landing view */}
           {!blueprintMode && !focusedSectionId && view === 'front' && (
             <FrontPage
@@ -958,6 +879,14 @@ export default function ProjectBoard({ project }) {
 
       {showKB && <KnowledgeBaseModal projectId={project.id} onClose={() => setShowKB(false)} />}
       {showIS && <InstructionSetModal projectId={project.id} onClose={() => setShowIS(false)} />}
+      {showCreateTask && (
+        <CreateTaskModal
+          sections={sections}
+          onCreate={createTask}
+          onCreateSection={createSection}
+          onClose={() => setShowCreateTask(false)}
+        />
+      )}
       {showContext && <ProjectContextPanel project={project} onClose={() => setShowContext(false)} onContextUpdate={handleContextUpdate} />}
 
       {/* FocusOverlay DISABLED 2026-07-02 (TDE-351)
