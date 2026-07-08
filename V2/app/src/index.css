@@ -5,13 +5,16 @@
 @tailwind utilities;
 
 :root {
+  /* TDE-353: the previous ramp (paper→surf-2→surf→line-2→line) sat within 1.05–1.5:1 contrast of
+     itself — panel/divider boundaries were nearly invisible. Re-spaced wider, same warm hue
+     family (no identity change). mute-2 darkened from 2.75:1 to a text-safe ~3.6:1 on paper. */
   --color-paper:   #FBFAF6;
-  --color-surf-2:  #F5F3ED;
-  --color-surf:    #F0EDE5;
-  --color-line-2:  #ECE9E1;
-  --color-line:    #D4D0C8;
-  --color-mute-2:  #9A9896;
-  --color-mute:    #6B6867;
+  --color-surf-2:  #F2EFE7;
+  --color-surf:    #E9E4D6;
+  --color-line-2:  #DAD3C3;
+  --color-line:    #B9B1A0;
+  --color-mute-2:  #837E77;
+  --color-mute:    #5E5A54;
   --color-ink-2:   #3D3B36;
   --color-ink:     #1A1916;
 
@@ -35,19 +38,21 @@
   --color-priority-done: #5C7A5F;
 
   --shadow-card:  0 1px 3px rgba(26,25,22,0.06);
-  --scroll-thumb: #D4D0C8;
-  --scroll-thumb-hover: #9A9896;
+  --scroll-thumb: var(--color-line);
+  --scroll-thumb-hover: var(--color-mute-2);
   --grain-opacity: 0.05;
 }
 
 [data-theme="dark"] {
+  /* Same TDE-353 re-spacing, mirrored: surfaces widen apart going up from paper, mute-2/mute
+     lightened for text-safe contrast (was 3.28:1 / fine, now a more comfortable ~4.2:1). */
   --color-paper:   #16151B;
-  --color-surf-2:  #1D1B22;
-  --color-surf:    #232128;
-  --color-line-2:  #2D2A33;
-  --color-line:    #38353F;
-  --color-mute-2:  #6B6867;
-  --color-mute:    #9A9896;
+  --color-surf-2:  #211F28;
+  --color-surf:    #2B2833;
+  --color-line-2:  #3B3745;
+  --color-line:    #524C5E;
+  --color-mute-2:  #85807A;
+  --color-mute:    #A6A29B;
   --color-ink-2:   #C7C4BD;
   --color-ink:     #F0EFEC;
 
@@ -58,8 +63,8 @@
   --color-review-soft: rgba(139,147,240,0.16);
 
   --shadow-card:  0 1px 3px rgba(0,0,0,0.4);
-  --scroll-thumb: #38353F;
-  --scroll-thumb-hover: #6B6867;
+  --scroll-thumb: var(--color-line);
+  --scroll-thumb-hover: var(--color-mute-2);
   --grain-opacity: 0.035;
 }
 
