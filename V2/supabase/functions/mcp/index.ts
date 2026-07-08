@@ -536,10 +536,13 @@ const TOOLS = [
   },
   {
     name: 'get_project',
-    description: 'Get full project details: context, all sections, and all tasks with their IDs, priorities, statuses, and notes.',
+    description: 'Get project details: Foundation, all sections, and all tasks with their IDs, priorities, and statuses. Per-task Notes (the detail field) are OMITTED by default to keep the map small on large projects — pass include_notes:true for them, or read one task in full with get_task.',
     inputSchema: {
       type: 'object',
-      properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        include_notes: { type: 'boolean', description: 'Include each task\'s Notes (detail field) inline. Default false — on a large project this can be very large. Prefer reading a specific task via get_task.' },
+      },
       required: ['project_id'],
     },
   },
@@ -867,6 +870,7 @@ const TOOLS = [
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         peek: { type: 'boolean', description: 'If true, just read the task without auto-setting it to in_progress. Use when inspecting/planning rather than starting work.' },
+        refresh_context: { type: 'boolean', description: 'Force the full project context (Foundation, Instruction Set, KB index) back inline. It is normally sent only on the first task you open in a project each session and omitted (as a short pointer) thereafter to save tokens. Pass true to re-ground after your context was compacted/cleared.' },
       },
       required: ['task_id'],
     },
@@ -2257,6 +2261,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         sb.from('sections').select('*').eq('project_id', project.id).order('sort_order'),
         sb.from('tasks').select('*').eq('project_id', project.id).order('sort_order'),
       ])
+      // TDE-319/371: Notes (task detail) are the bulk of a large project's payload and are the
+      // known context-overflow cause. Omit them by default (the IDs/titles/badges are the map);
+      // include_notes:true restores the old full dump, get_task fetches one task's detail cheaply.
+      const includeNotes = !!args.include_notes
       const foundationLines = renderFoundation(project.context)
       const lines: string[] = [
         `# ${project.name}`,
@@ -2266,28 +2274,26 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         ...(foundationLines.length ? foundationLines : ['(no Foundation set — run bootstrap_project to ground it)']),
         '',
       ]
+      if (!includeNotes) lines.push('_Task Notes omitted — pass include_notes:true, or read one task via get_task._', '')
+
+      const renderTask = (t: any) => {
+        const sid = (project.prefix && t.short_id != null) ? `${project.prefix}-${t.short_id}` : t.id
+        const badges = [t.kind === 'seed' ? `SEED→${t.seed_target}` : null, t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
+        lines.push(`- [${sid}] ${t.text}  (${badges})`)
+        if (includeNotes && t.detail) lines.push(`  Notes: ${t.detail}`)
+      }
 
       for (const s of (sections ?? [])) {
         lines.push(`## Section: ${s.name}  (id: ${s.id})`)
         const sts = (tasks ?? []).filter((t: any) => t.section_id === s.id)
         if (!sts.length) { lines.push('(empty)'); lines.push(''); continue }
-        for (const t of sts) {
-          const sid = (project.prefix && t.short_id != null) ? `${project.prefix}-${t.short_id}` : t.id
-          const badges = [t.kind === 'seed' ? `SEED→${t.seed_target}` : null, t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
-          lines.push(`- [${sid}] ${t.text}  (${badges})`)
-          if (t.detail) lines.push(`  Notes: ${t.detail}`)
-        }
+        for (const t of sts) renderTask(t)
         lines.push('')
       }
       const ungrouped = (tasks ?? []).filter((t: any) => !t.section_id)
       if (ungrouped.length) {
         lines.push('## Ungrouped Tasks')
-        for (const t of ungrouped) {
-          const sid = (project.prefix && t.short_id != null) ? `${project.prefix}-${t.short_id}` : t.id
-          const badges = [t.kind === 'seed' ? `SEED→${t.seed_target}` : null, t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
-          lines.push(`- [${sid}] ${t.text}  (${badges})`)
-          if (t.detail) lines.push(`  Notes: ${t.detail}`)
-        }
+        for (const t of ungrouped) renderTask(t)
       }
       return lines.join('\n')
     }
@@ -3010,80 +3016,107 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         if (v.critique) lines.push(`  Critique:\n${String(v.critique).split('\n').map((l: string) => '    ' + l).join('\n')}`)
       }
 
-      // Inject the project Foundation (TDE-262): every task is anchored to intent,
-      // scope, success/failure and the quality bar — not just the IS/KB. This is the
-      // grounding the bootstrap_project interview produces.
-      if (full.project_id) {
-        const { data: proj } = await sb.from('projects').select('context').eq('id', full.project_id).maybeSingle()
-        const foundationLines = renderFoundation(proj?.context)
-        if (foundationLines.length) {
-          lines.push('\n---')
-          lines.push('# Project Foundation')
-          for (const l of foundationLines) lines.push(`- ${l}`)
-        }
+      // TOKEN ECONOMY (TDE-371): the heavy per-project context below — Foundation + Instruction
+      // Set + KB index — is identical across every task in a project (~2k tokens). Re-shipping it
+      // on every get_task is pure waste once the agent has it in context. So send it FULL on the
+      // first task opened in a project each session, then a short pointer thereafter. "Session" is
+      // inferred (the MCP has no session id): a (user, project) priming row, reset by
+      // __init_tasker_session and expiring after a 3h safety window (covers agents that never init).
+      // refresh_context:true forces full — the escape hatch after a context compaction.
+      const PRIME_WINDOW_MS = 3 * 60 * 60 * 1000
+      let sendFull = !!args.refresh_context
+      if (!sendFull && full.project_id) {
+        const { data: primed } = await sb.from('mcp_context_primed')
+          .select('primed_at').eq('user_id', userId).eq('project_id', full.project_id).maybeSingle()
+        sendFull = !(primed && (Date.now() - new Date(primed.primed_at).getTime()) < PRIME_WINDOW_MS)
+      }
+      if (sendFull && full.project_id) {
+        fireAndForget(sb.from('mcp_context_primed').upsert({ user_id: userId, project_id: full.project_id, primed_at: new Date().toISOString() }))
       }
 
-      // Inject the governing Instruction Set (TDE-233 flow-level IS).
-      // - Task not in a flow → full project IS (as before).
-      // - Task in a flow that has its own IS → universal project IS + flow IS
-      //   (the project's non-universal IS is suppressed for this task).
-      // - Task in a flow with no flow IS → full project IS (safe fallback).
-      if (full.project_id) {
-        const { data: projIs } = await sb.from('project_instructions')
-          .select('title, content, universal')
-          .eq('project_id', full.project_id)
-          .order('created_at')
-        let flowIs: any[] = []
-        if (full.flow_id) {
-          const { data } = await sb.from('flow_instructions')
-            .select('title, content').eq('flow_id', full.flow_id).order('created_at')
-          flowIs = data || []
-        }
-        if (flowIs.length) {
-          const universalProj = (projIs || []).filter((e: any) => e.universal)
-          if (universalProj.length) {
+      if (sendFull) {
+        // Inject the project Foundation (TDE-262): every task is anchored to intent,
+        // scope, success/failure and the quality bar — not just the IS/KB. This is the
+        // grounding the bootstrap_project interview produces.
+        if (full.project_id) {
+          const { data: proj } = await sb.from('projects').select('context').eq('id', full.project_id).maybeSingle()
+          const foundationLines = renderFoundation(proj?.context)
+          if (foundationLines.length) {
             lines.push('\n---')
-            lines.push('# Project Instruction Set (universal)')
-            for (const entry of universalProj) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+            lines.push('# Project Foundation')
+            for (const l of foundationLines) lines.push(`- ${l}`)
           }
-          lines.push('\n---')
-          lines.push('# Flow Instruction Set (governs this flow — replaces the project\'s non-universal IS)')
-          for (const entry of flowIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
-        } else if (projIs?.length) {
-          lines.push('\n---')
-          lines.push('# Project Instruction Set')
-          for (const entry of projIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
         }
-      }
 
-      // Inject the flow's Knowledge Base on every task in the flow (TDE-233).
-      if (full.flow_id) {
-        const { data: flowKb } = await sb.from('flow_knowledge')
-          .select('title, content').eq('flow_id', full.flow_id).order('created_at')
-        if (flowKb?.length) {
-          lines.push('\n---')
-          lines.push('# Flow Knowledge Base')
-          for (const entry of flowKb) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+        // Inject the governing Instruction Set (TDE-233 flow-level IS).
+        // - Task not in a flow → full project IS (as before).
+        // - Task in a flow that has its own IS → universal project IS + flow IS
+        //   (the project's non-universal IS is suppressed for this task).
+        // - Task in a flow with no flow IS → full project IS (safe fallback).
+        if (full.project_id) {
+          const { data: projIs } = await sb.from('project_instructions')
+            .select('title, content, universal')
+            .eq('project_id', full.project_id)
+            .order('created_at')
+          let flowIs: any[] = []
+          if (full.flow_id) {
+            const { data } = await sb.from('flow_instructions')
+              .select('title, content').eq('flow_id', full.flow_id).order('created_at')
+            flowIs = data || []
+          }
+          if (flowIs.length) {
+            const universalProj = (projIs || []).filter((e: any) => e.universal)
+            if (universalProj.length) {
+              lines.push('\n---')
+              lines.push('# Project Instruction Set (universal)')
+              for (const entry of universalProj) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+            }
+            lines.push('\n---')
+            lines.push('# Flow Instruction Set (governs this flow — replaces the project\'s non-universal IS)')
+            for (const entry of flowIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+          } else if (projIs?.length) {
+            lines.push('\n---')
+            lines.push('# Project Instruction Set')
+            for (const entry of projIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+          }
         }
-      }
 
-      // TDE-254: inject a lightweight KB TITLES INDEX (not full content) so every task
-      // surfaces what project knowledge exists. The agent pulls full content for only
-      // the relevant entries via get_kb_entries — cheap reads, no whole-KB dump.
-      if (full.project_id) {
-        const { data: kbTitles } = await sb.from('project_knowledge')
-          .select('id, title, source, category')
-          .eq('project_id', full.project_id)
-          .is('archived_at', null)
-          .order('created_at')
-        if (kbTitles?.length) {
-          const cap = 60
-          lines.push('\n---')
-          lines.push(`# Project Knowledge Base — index (${kbTitles.length} entr${kbTitles.length === 1 ? 'y' : 'ies'}, titles only)`)
-          lines.push('Pull full content for the few relevant to THIS task via get_kb_entries(project_id, ids:[...]). Do NOT pull them all.')
-          for (const e of kbTitles.slice(0, cap)) lines.push(`  • [${e.id}]${e.category ? ` {${e.category}}` : ''}${e.source === 'agent' ? ' (ai)' : ''} ${e.title}`)
-          if (kbTitles.length > cap) lines.push(`  … and ${kbTitles.length - cap} more — use list_kb_entries to see all.`)
+        // Inject the flow's Knowledge Base on every task in the flow (TDE-233).
+        if (full.flow_id) {
+          const { data: flowKb } = await sb.from('flow_knowledge')
+            .select('title, content').eq('flow_id', full.flow_id).order('created_at')
+          if (flowKb?.length) {
+            lines.push('\n---')
+            lines.push('# Flow Knowledge Base')
+            for (const entry of flowKb) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+          }
         }
+
+        // TDE-254: inject a lightweight KB TITLES INDEX (not full content) so every task
+        // surfaces what project knowledge exists. The agent pulls full content for only
+        // the relevant entries via get_kb_entries — cheap reads, no whole-KB dump.
+        if (full.project_id) {
+          const { data: kbTitles } = await sb.from('project_knowledge')
+            .select('id, title, source, category')
+            .eq('project_id', full.project_id)
+            .is('archived_at', null)
+            .order('created_at')
+          if (kbTitles?.length) {
+            const cap = 60
+            lines.push('\n---')
+            lines.push(`# Project Knowledge Base — index (${kbTitles.length} entr${kbTitles.length === 1 ? 'y' : 'ies'}, titles only)`)
+            lines.push('Pull full content for the few relevant to THIS task via get_kb_entries(project_id, ids:[...]). Do NOT pull them all.')
+            for (const e of kbTitles.slice(0, cap)) lines.push(`  • [${e.id}]${e.category ? ` {${e.category}}` : ''}${e.source === 'agent' ? ' (ai)' : ''} ${e.title}`)
+            if (kbTitles.length > cap) lines.push(`  … and ${kbTitles.length - cap} more — use list_kb_entries to see all.`)
+          }
+        }
+      } else {
+        // Compact tier: the heavy context was primed earlier this session — point at it instead
+        // of re-shipping it. Name the exact on-demand read tools so re-grounding is one call.
+        const flowExtra = full.flow_id ? ' · flow IS/KB via get_flow_is / get_flow_kb' : ''
+        lines.push('\n---')
+        lines.push(`# Project context — primed earlier this session (omitted to save tokens)`)
+        lines.push(`Foundation, Instruction Set, and the KB index for "${full.project?.name ?? 'this project'}" were provided on the first task you opened here this session and are still in your context. Re-read on demand: get_project_foundation · get_project_is · list_kb_entries${flowExtra}. To force the full context back inline (e.g. after a context reset), call get_task with refresh_context: true.`)
       }
 
       // Workflow directive
@@ -3939,6 +3972,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case '__init_tasker_session': {
+      // TDE-371: a new session — forget which projects were context-primed, so the first get_task
+      // in each project this session re-ships the full Foundation/IS/KB once more.
+      fireAndForget(sb.from('mcp_context_primed').delete().eq('user_id', userId))
       const { data: settings } = await sb.from('user_settings').select('ai_instructions, active_environment_id').eq('user_id', userId).maybeSingle()
       const instructions = settings?.ai_instructions
       const { show_questionnaire } = args
