@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import clsx from 'clsx'
-import { Crosshair, ChevronDown } from 'lucide-react'
+import { Crosshair, ChevronDown, FileText } from 'lucide-react'
 import { useAllTasks } from '../hooks/useAllTasks'
 import { useEnvironments } from '../hooks/useEnvironments'
 import { envColor } from '../lib/envColor'
@@ -11,6 +11,7 @@ import AppShell from '../components/editorial/AppShell'
 import { Kicker, Chip, Pill, TaskRow, SectionHead, MiniCalendar } from '../components/editorial/atoms'
 import TaskDetailSheet from '../components/board/TaskDetailSheet'
 import FocusOverlay from '../components/focus/FocusOverlay'
+import DaySummaryModal from '../components/today/DaySummaryModal'
 
 function isoWeek(d) {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
@@ -134,6 +135,7 @@ export default function TodayPage() {
 
   const [skippedIds, setSkippedIds] = useState(() => new Set())
   const [projectFilter, setProjectFilter] = useState('all')
+  const [showDaySummary, setShowDaySummary] = useState(false)
 
   const [undoToast, setUndoToast] = useState(null)
   useEffect(() => {
@@ -274,11 +276,16 @@ export default function TodayPage() {
                 <Kicker className="mb-2.5">{dateKicker(now)}</Kicker>
                 <div className="flex items-baseline justify-between">
                   <h1 className="text-h1 m-0">Today.</h1>
-                  {topFocus && (
-                    <button className="btn btn-sm" onClick={() => openFocus(topFocus.id)}>
-                      <Crosshair size={12} /> Focus
+                  <div className="flex items-center gap-2">
+                    <button className="btn btn-sm" onClick={() => setShowDaySummary(true)}>
+                      <FileText size={12} /> Day Summary
                     </button>
-                  )}
+                    {topFocus && (
+                      <button className="btn btn-sm" onClick={() => openFocus(topFocus.id)}>
+                        <Crosshair size={12} /> Focus
+                      </button>
+                    )}
+                  </div>
                 </div>
                 <div className="mt-3.5 flex items-center gap-[22px] font-mono text-[11px] text-mute tracking-[0.06em]">
                   <span><span className="text-ink font-bold">{String(doneCount).padStart(2, '0')}</span> done today</span>
@@ -331,6 +338,10 @@ export default function TodayPage() {
 
       {focusTask && (
         <FocusOverlay tasks={tasks} project={focusTask.project} onClose={closeFocus} onToggleDone={handleToggleDone} initialTaskId={focusTask.id} />
+      )}
+
+      {showDaySummary && (
+        <DaySummaryModal tasks={tasks} projects={projects} onClose={() => setShowDaySummary(false)} />
       )}
 
       {undoToast && (
