@@ -30,6 +30,42 @@ async function findOrCreateFolder(token: string, parentId: string, name: string)
   return folder.id
 }
 
+async function getFolderLink(token: string, folderId: string): Promise<string | null> {
+  const res = await fetch(`${DRIVE}/files/${folderId}?fields=webViewLink`, { headers: { Authorization: `Bearer ${token}` } })
+  const d = await res.json().catch(() => ({}))
+  return d.webViewLink ?? null
+}
+
+// Resolve a PROJECT's Drive folder (TDE-373), enforcing access via the RLS-respecting auth client
+// (the service-role client would bypass ownership). Lazily creates + persists the folder id.
+// Returns null when the project isn't visible to the caller — the handler turns that into a 403.
+async function resolveProjectFolder(authClient: any, token: string, taskerRootId: string, projectId: string):
+  Promise<{ id: string; link: string | null } | null> {
+  const { data: proj } = await authClient.from('projects')
+    .select('id, name, google_drive_folder_id').eq('id', projectId).maybeSingle()
+  if (!proj) return null
+  let id = proj.google_drive_folder_id
+  if (!id) {
+    id = await findOrCreateFolder(token, taskerRootId, proj.name)
+    await authClient.from('projects').update({ google_drive_folder_id: id }).eq('id', projectId)
+  }
+  return { id, link: await getFolderLink(token, id) }
+}
+
+// Only WORD-PROCESSOR formats convert to an editable Google Doc (Drive convert-on-import, metadata
+// mimeType = google-apps.document) — you convert these because you otherwise can't easily view/edit
+// them. Text, Markdown, and especially HTML upload AS-IS: they're already viewable/renderable, and
+// converting HTML to a Doc destroys its styling/layout (the TDE-373 report bug). Everything not in
+// this list uploads raw.
+const DOC_EXTS = ['doc', 'docx', 'odt', 'rtf']
+const SOURCE_MIME: Record<string, string> = {
+  rtf: 'application/rtf', odt: 'application/vnd.oasis.opendocument.text',
+  doc: 'application/msword', docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+}
+function extOf(name: string): string {
+  return name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : ''
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS })
   try {
@@ -95,6 +131,36 @@ Deno.serve(async (req) => {
         await sb.from('tasks').update({ output: { ...prev, drive_files: remaining } }).eq('id', task_id)
         return json({ ok: true, files: remaining })
       }
+
+      // ── PROJECT-SCOPED actions (TDE-373) ──────────────────────────
+      // folder_link → the project's Drive folder id + shareable link (for the "Open folder" button)
+      if (body.action === 'project_folder' && body.project_id) {
+        const folder = await resolveProjectFolder(authClient, token, taskerRootId, body.project_id)
+        if (!folder) return json({ error: 'Project not found or not accessible' }, 403)
+        return json({ folder_id: folder.id, web_view_link: folder.link })
+      }
+      // list → the files living directly in the project's Drive folder (live from Drive)
+      if (body.action === 'project_list' && body.project_id) {
+        const folder = await resolveProjectFolder(authClient, token, taskerRootId, body.project_id)
+        if (!folder) return json({ error: 'Project not found or not accessible' }, 403)
+        const q = encodeURIComponent(`'${folder.id}' in parents and trashed=false and mimeType!='application/vnd.google-apps.folder'`)
+        const listRes = await fetch(`${DRIVE}/files?q=${q}&fields=files(id,name,mimeType,webViewLink,modifiedTime,size)&orderBy=modifiedTime desc&pageSize=100`,
+          { headers: { Authorization: `Bearer ${token}` } })
+        const list = await listRes.json()
+        if (!listRes.ok) return json({ error: list.error?.message ?? 'Drive list failed' }, 502)
+        return json({ folder_id: folder.id, web_view_link: folder.link, files: list.files ?? [] })
+      }
+      // delete → remove a file from the project's Drive folder (actual Drive delete)
+      if (body.action === 'project_delete' && body.project_id && body.file_id) {
+        const folder = await resolveProjectFolder(authClient, token, taskerRootId, body.project_id)
+        if (!folder) return json({ error: 'Project not found or not accessible' }, 403)
+        const delRes = await fetch(`${DRIVE}/files/${body.file_id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } })
+        if (!delRes.ok && delRes.status !== 404) {
+          const err = await delRes.json().catch(() => ({}))
+          return json({ error: err.error?.message ?? `Drive delete failed (${delRes.status})` }, 502)
+        }
+        return json({ ok: true })
+      }
       return json({ error: 'Unknown action' }, 400)
     }
 
@@ -102,13 +168,22 @@ Deno.serve(async (req) => {
     const form = await req.formData()
     const file = form.get('file') as File | null
     const taskId = form.get('task_id') as string | null
+    const projectId = form.get('project_id') as string | null
     if (!file) return json({ error: 'file is required' }, 400)
 
     // Resolve folder context from task
     let targetFolderId = taskerRootId
     let finalFilename = file.name
+    // PROJECT upload (TDE-373): straight into the project's Drive folder — no flow subfolder, no
+    // task-id filename prefix. Document types convert to editable Google Docs; others upload as-is.
+    let asDoc = false
 
-    if (taskId) {
+    if (projectId && !taskId) {
+      const folder = await resolveProjectFolder(authClient, token, taskerRootId, projectId)
+      if (!folder) return json({ error: 'Project not found or not accessible' }, 403)
+      targetFolderId = folder.id
+      asDoc = DOC_EXTS.includes(extOf(file.name))
+    } else if (taskId) {
       const { data: task } = await sb.from('tasks')
         .select('id, project_id, flow_id, short_id, project:projects(name, prefix, google_drive_folder_id)')
         .eq('id', taskId).maybeSingle()
@@ -138,19 +213,24 @@ Deno.serve(async (req) => {
       }
     }
 
-    // Multipart upload to Drive
+    // Multipart upload to Drive. For a doc-type project upload, set metadata.mimeType to the
+    // google-apps Doc type so Drive converts on import (editable Google Doc); the media part keeps
+    // the source content-type so Drive knows what to convert FROM.
     const boundary = 'tasker_file_boundary'
-    const meta = JSON.stringify({ name: finalFilename, parents: [targetFolderId] })
+    const metaObj: Record<string, unknown> = { name: finalFilename, parents: [targetFolderId] }
+    if (asDoc) metaObj.mimeType = 'application/vnd.google-apps.document'
+    const sourceMime = asDoc ? (file.type || SOURCE_MIME[extOf(file.name)] || 'text/plain') : (file.type || 'application/octet-stream')
+    const meta = JSON.stringify(metaObj)
     const fileBytes = await file.arrayBuffer()
     const enc = new TextEncoder()
-    const pre = enc.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${file.type || 'application/octet-stream'}\r\n\r\n`)
+    const pre = enc.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${sourceMime}\r\n\r\n`)
     const post = enc.encode(`\r\n--${boundary}--`)
     const combined = new Uint8Array(pre.byteLength + fileBytes.byteLength + post.byteLength)
     combined.set(pre, 0)
     combined.set(new Uint8Array(fileBytes), pre.byteLength)
     combined.set(post, pre.byteLength + fileBytes.byteLength)
 
-    const uploadRes = await fetch(`${DRIVE_UPLOAD}/files?uploadType=multipart`, {
+    const uploadRes = await fetch(`${DRIVE_UPLOAD}/files?uploadType=multipart&fields=id,name,mimeType,webViewLink`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
       body: combined,
@@ -167,7 +247,7 @@ Deno.serve(async (req) => {
       await sb.from('tasks').update({ output: { ...prev, drive_files: driveFiles } }).eq('id', taskId)
     }
 
-    return json({ file_id: uploaded.id, filename: finalFilename })
+    return json({ file_id: uploaded.id, filename: finalFilename, mime_type: uploaded.mimeType ?? null, web_view_link: uploaded.webViewLink ?? null })
   } catch (e) {
     return json({ error: String((e as Error)?.message ?? e) }, 500)
   }

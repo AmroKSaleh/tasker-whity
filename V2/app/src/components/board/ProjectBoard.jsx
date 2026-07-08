@@ -28,6 +28,7 @@ import TaskDetailPanel from './TaskDetailPanel'
 import KnowledgeBaseModal from '../kb/KnowledgeBaseModal'
 import InstructionSetModal from '../is/InstructionSetModal'
 import CreateTaskModal from './CreateTaskModal'
+import ProjectFilesModal from './ProjectFilesModal'
 import ProjectContextPanel from './ProjectContextPanel'
 import SectionContextSidebar from './SectionContextSidebar'
 import FrontPage, { MastheadSky } from './FrontPage'
@@ -339,6 +340,7 @@ export default function ProjectBoard({ project }) {
   const [showKB, setShowKB] = useState(false)
   const [showIS, setShowIS] = useState(false)
   const [showCreateTask, setShowCreateTask] = useState(false)
+  const [showFiles, setShowFiles] = useState(false)
   const [showContext, setShowContext] = useState(false)
   // const [showFocus, setShowFocus] = useState(false) — DISABLED
   // const [focusTaskId, setFocusTaskId] = useState(null) — DISABLED
@@ -643,6 +645,7 @@ export default function ProjectBoard({ project }) {
                   >⌘K</button>
                   <button onClick={() => setShowKB(true)} title="Knowledge Base — persistent project knowledge the AI accumulates" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">KB</button>
                   <button onClick={() => setShowIS(true)} title="Instruction Set — per-project rules that shape AI behavior" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">IS</button>
+                  <button onClick={() => setShowFiles(true)} title="Files — documents & files stored in this project's Google Drive folder" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">Files</button>
                 </div>
 
                 <div className="flex items-end justify-between gap-10 pt-5 pb-4">
@@ -886,6 +889,9 @@ export default function ProjectBoard({ project }) {
           onCreateSection={createSection}
           onClose={() => setShowCreateTask(false)}
         />
+      )}
+      {showFiles && (
+        <ProjectFilesModal projectId={project.id} projectName={project.name} onClose={() => setShowFiles(false)} />
       )}
       {showContext && <ProjectContextPanel project={project} onClose={() => setShowContext(false)} onContextUpdate={handleContextUpdate} />}
 
