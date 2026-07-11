@@ -9,6 +9,7 @@ import { useTaskStore } from '../../store/useTaskStore'
 import { updateTaskFields } from '../../hooks/useTasks'
 import FlowBlockedDialog from './DependencyWarningDialog'
 import ReviewVerdictPanel from './ReviewVerdictPanel'
+import AgentActivityPanel from './AgentActivityPanel'
 import CustomStatusField from './CustomStatusField'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
 import { chatAboutTask, generateFocusSteps, synthesizeTaskToContext } from '../../lib/gemini'
@@ -547,6 +548,14 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
             <p className="text-[11px] text-mute-2">↳ created from a resolved seed</p>
           )}
 
+          {task.delegated_to && (
+            <div className="flex items-center gap-2 rounded-md border border-line-2 bg-surf-2 px-3 py-2">
+              <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-mute shrink-0">Delegated to</span>
+              <span className="text-[12px] font-medium text-ink-2 truncate">{task.delegated_to}</span>
+              <span className="ml-auto shrink-0 text-[10px] text-mute-2">you own the gate</span>
+            </div>
+          )}
+
           <Field label="Status">
             <StatusSegmented value={task.status} onChange={(v) => patch({ status: v })} />
           </Field>
@@ -655,6 +664,11 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
           </Field>
 
           <DriveAttachments task={task} />
+
+          {/* ── Agent activity (TDE-374/375): durable, immutable record of what agents did ── */}
+          <Field label="Agent activity">
+            <AgentActivityPanel taskId={task.id} taskDone={task.status === 'done'} refreshKey={refreshKey} />
+          </Field>
 
           {/* ── AI Agent ── */}
           <Field label="AI Agent">

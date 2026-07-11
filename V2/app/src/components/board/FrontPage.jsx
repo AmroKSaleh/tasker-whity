@@ -3,6 +3,7 @@ import clsx from 'clsx'
 import { Play, Pause } from 'lucide-react'
 import { rankTasks } from '../../lib/scoring'
 import { Kicker } from '../editorial/atoms'
+import AwaitingInputStrip from './AwaitingInputStrip'
 
 // ── Masthead constellation ──
 // One mote per standalone task: grey pending, green done, orange in flight
@@ -229,6 +230,8 @@ export default function FrontPage({ project, tasks, sections, onOpenTask, onPaus
   return (
     <div className="flex-1 min-h-0 overflow-y-auto bg-paper">
       <div className="px-7 pb-16">
+
+        <AwaitingInputStrip tasks={tasks} prefix={project.prefix} onOpenTask={onOpenTask} />
 
         <div className="grid grid-cols-1 lg:grid-cols-12 lg:gap-x-9 py-6">
           {/* Lead column */}
