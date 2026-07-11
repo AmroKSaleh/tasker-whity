@@ -836,6 +836,7 @@ const TOOLS = [
         delegated_to:   { type: 'string', description: 'TDE-375: who the task is delegated to (free text — an agent or teammate). You (the owner) REMAIN responsible and still own the quality gate; delegation is NOT reassignment. Pass an empty string to clear.' },
         agent_ready:    { type: 'boolean', description: 'Mark this task "ready for the agent" — it enters the autonomous work queue (get_ready_work). Usually set by the human in the web app ("Hand to agent"); set false to pull it back.' },
         agent_proposal: { type: 'string', description: 'Prepare→confirm→execute: record the agent\'s PREPARED proposal for this task (a concise summary of what it will do). Setting it makes the task appear in the web Agent Queue "Awaiting confirmation" tab. Clear it (empty string) once the human confirms and you execute, or if declined.' },
+        agent_proposal_confirmed: { type: 'boolean', description: 'Usually set by the HUMAN in the web app (the "Confirm" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. The agent normally only clears the proposal after executing (which resets this to false).' },
       },
       required: ['task_id'],
     },
@@ -2899,7 +2900,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready', 'agent_proposal']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready', 'agent_proposal', 'agent_proposal_confirmed']
       const patch: Record<string, any> = {}
       const nullable = (k: string) => k === 'group_id' || k === 'delegated_to' || k === 'agent_proposal'   // clearable via null/empty
       for (const k of allowed) if (nullable(k) ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
@@ -2946,6 +2947,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (patch.agent_proposal !== undefined) {
         patch.agent_proposal = patch.agent_proposal || null
         patch.agent_proposal_at = patch.agent_proposal ? new Date().toISOString() : null
+        if (!patch.agent_proposal) patch.agent_proposal_confirmed = false   // clearing the proposal clears confirmation
       }
 
       await sb.from('tasks').update(patch).eq('id', task.id)
@@ -3102,6 +3104,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           await sb.from('task_guidance').update({ consumed_at: new Date().toISOString() }).in('id', pendingGuidance.map((g: any) => g.id))
           lines.push(`  (marked as seen — it won't surface again)`)
         }
+      }
+      // Prepare→confirm→execute (TDE-377 Path A): surface the agent's prepared proposal + its confirm state.
+      if (full.agent_proposal) {
+        lines.push(full.agent_proposal_confirmed
+          ? `\n✓ PROPOSAL CONFIRMED by the human — EXECUTE THIS NOW (it may have been edited from what you proposed):\n${full.agent_proposal}\nAfter executing + verifying, clear it: update_task(agent_proposal:"").`
+          : `\n◇ PREPARED PROPOSAL — awaiting the human's confirmation in the web. Do NOT execute yet:\n${full.agent_proposal}`)
       }
       // Seeds: make it loud — this is a placeholder to RESOLVE, not work to do.
       const steps: any[] = disc?.steps ?? []
@@ -3799,18 +3807,26 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         if (!p) return `Project "${args.project_id}" not found.`
         q = q.eq('project_id', p.id)
       }
-      const { data: readyData } = await q
-      const list = readyData || []
-      if (!list.length) return 'No tasks are ready for the agent. A human marks a task "Hand to agent" in the web app when it has enough context to be worked autonomously — the queue is clear.'
+      // ALSO fetch confirmed proposals ready to EXECUTE (human reviewed + approved in the web).
+      let xq = sb.from('tasks').select('id, text, short_id, agent_proposal, project:projects(prefix)')
+        .eq('user_id', userId).eq('agent_proposal_confirmed', true).not('agent_proposal', 'is', null)
+      if (args.project_id) { const p2 = await resolveProject(sb, userId, args.project_id); if (p2) xq = xq.eq('project_id', p2.id) }
+      const [{ data: readyData }, { data: execData }] = await Promise.all([q, xq])
       const prio: Record<string, number> = { rush: 0, high: 1, medium: 2, low: 3 }
-      list.sort((a: any, b: any) => (prio[a.priority] ?? 2) - (prio[b.priority] ?? 2) || (a.sort_order ?? 0) - (b.sort_order ?? 0))
+      const prep = (readyData || []).sort((a: any, b: any) => (prio[a.priority] ?? 2) - (prio[b.priority] ?? 2) || (a.sort_order ?? 0) - (b.sort_order ?? 0))
+      const exec = execData || []
       const ref = (t: any) => t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id.slice(0, 8)
-      const lines = [
-        `▶ READY FOR AGENT — ${list.length} task(s) the human queued for autonomous work, ranked by priority.`,
-        `Take the TOP one: get_task(id) to load full context + start it (sets in_progress), do the work, complete_task, then call get_ready_work again for the next.`,
-        ``,
-      ]
-      for (const t of list) lines.push(`  ${ref(t)} [${t.priority}] ${t.text}`)
+      if (!prep.length && !exec.length) return 'Nothing to do: no handed-over tasks to prepare and no confirmed proposals to execute. (In the web app, flip "Hand to agent" on a task to add one.)'
+      const lines: string[] = []
+      if (exec.length) {
+        lines.push(`✓ CONFIRMED — EXECUTE NOW (${exec.length}): the human reviewed + approved the proposal. get_task(id), DO exactly what agent_proposal says (it may have been human-edited), verify, then clear it — update_task(id, agent_proposal:"") — and complete_task.`)
+        for (const t of exec) lines.push(`  ${ref(t)} — ${t.text}\n     proposal: ${t.agent_proposal}`)
+        lines.push(``)
+      }
+      if (prep.length) {
+        lines.push(`▶ TO PREPARE (${prep.length}): the human handed these over. get_task(id) to start + load context, prepare the work FULLY, set update_task(id, agent_proposal:"…"), then STOP and let the human confirm/edit it in the web. Do NOT execute until it comes back confirmed.`)
+        for (const t of prep) lines.push(`  ${ref(t)} [${t.priority}] ${t.text}`)
+      }
       return lines.join('\n')
     }
 

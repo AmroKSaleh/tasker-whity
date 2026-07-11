@@ -143,7 +143,9 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
         {task.priority && task.priority !== 'medium' && <span className="uppercase">{task.priority}</span>}
         {task.due_date && <><span className="text-mute-2">·</span><span>{dueLabel(task.due_date)}</span></>}
         {task.agent_proposal
-          ? <span className="inline-flex items-center gap-0.5 rounded bg-review/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-review" title="Agent prepared work — awaiting your confirmation">◇ confirm</span>
+          ? (task.agent_proposal_confirmed
+              ? <span className="inline-flex items-center gap-0.5 rounded bg-priority-done/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-priority-done" title="Confirmed — the agent will execute this">✓ go</span>
+              : <span className="inline-flex items-center gap-0.5 rounded bg-review/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-review" title="Agent prepared work — awaiting your confirmation">◇ confirm</span>)
           : task.agent_ready && <span className="inline-flex items-center gap-0.5 rounded bg-accent/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-accent" title="Handed to agent — in the ready-work queue">▶ agent</span>}
         <span className="flex-1" />
         {!done && (

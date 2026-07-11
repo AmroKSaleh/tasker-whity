@@ -11,6 +11,7 @@ import FlowBlockedDialog from './DependencyWarningDialog'
 import ReviewVerdictPanel from './ReviewVerdictPanel'
 import AgentActivityPanel from './AgentActivityPanel'
 import TaskGuidance from './TaskGuidance'
+import AgentProposal from './AgentProposal'
 import CustomStatusField from './CustomStatusField'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
 import { chatAboutTask, generateFocusSteps, synthesizeTaskToContext } from '../../lib/gemini'
@@ -519,6 +520,8 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
           >
             {task.text}
           </h2>
+
+          {task.agent_proposal && <AgentProposal task={task} onPatch={patch} />}
 
           {task.kind === 'seed' && (
             <div className="rounded-lg border border-dashed border-accent/50 bg-accent/[0.04] px-3.5 py-3">

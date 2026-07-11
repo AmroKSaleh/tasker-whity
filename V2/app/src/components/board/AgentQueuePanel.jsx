@@ -16,7 +16,7 @@ export default function AgentQueuePanel({ projectId, prefix, onClose, onOpenTask
     const [{ data: q }, { data: a }] = await Promise.all([
       supabase.from('tasks').select('id, text, short_id, priority')
         .eq('project_id', projectId).eq('agent_ready', true).eq('status', 'pending'),
-      supabase.from('tasks').select('id, text, short_id, agent_proposal, agent_proposal_at')
+      supabase.from('tasks').select('id, text, short_id, agent_proposal, agent_proposal_confirmed, agent_proposal_at')
         .eq('project_id', projectId).not('agent_proposal', 'is', null)
         .order('agent_proposal_at', { ascending: false }),
     ])
@@ -66,6 +66,11 @@ export default function AgentQueuePanel({ projectId, prefix, onClose, onOpenTask
                   <button onClick={() => open(t.id)} className="group w-full rounded-lg border border-line-2 bg-surf-2 px-3 py-2.5 text-left transition-colors hover:border-accent/40">
                     <div className="flex items-baseline gap-2">
                       <span className="flex-1 text-[12.5px] font-medium leading-snug text-ink group-hover:text-accent-dark">{t.text}</span>
+                      {tab === 'awaiting' && (
+                        <span className={`shrink-0 rounded px-1 py-px font-mono text-[8px] font-bold uppercase tracking-wider ${t.agent_proposal_confirmed ? 'bg-priority-done/10 text-priority-done' : 'bg-review/10 text-review'}`}>
+                          {t.agent_proposal_confirmed ? '✓ confirmed' : 'awaiting'}
+                        </span>
+                      )}
                       {t.short_id != null && <span className="shrink-0 font-mono text-[9px] text-mute-2">{prefix}-{t.short_id}</span>}
                     </div>
                     {tab === 'awaiting' && t.agent_proposal && (

@@ -8,6 +8,7 @@ import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
 import { StatusSegmented, PrioritySegmented, DriveAttachments } from './TaskDetailPanel'
 import AgentActivityPanel from './AgentActivityPanel'
 import TaskGuidance from './TaskGuidance'
+import AgentProposal from './AgentProposal'
 import CustomStatusField from './CustomStatusField'
 import FlowBlockedDialog from './DependencyWarningDialog'
 
@@ -232,6 +233,8 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
           >
             {task.text}
           </h2>
+
+          {task.agent_proposal && <AgentProposal task={task} onPatch={patch} />}
 
           {task.delegated_to && (
             <div className="flex items-center gap-2 rounded-md border border-line-2 bg-surf-2 px-3 py-2">
