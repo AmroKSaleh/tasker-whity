@@ -6,6 +6,8 @@ import { updateTaskFields } from '../../hooks/useTasks'
 import { useSheetDrag } from './hooks/useSheetDrag'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
 import { StatusSegmented, PrioritySegmented, DriveAttachments } from './TaskDetailPanel'
+import AgentActivityPanel from './AgentActivityPanel'
+import TaskGuidance from './TaskGuidance'
 import CustomStatusField from './CustomStatusField'
 import FlowBlockedDialog from './DependencyWarningDialog'
 
@@ -231,8 +233,39 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
             {task.text}
           </h2>
 
+          {task.delegated_to && (
+            <div className="flex items-center gap-2 rounded-md border border-line-2 bg-surf-2 px-3 py-2">
+              <span className="font-mono text-[9px] uppercase tracking-[0.1em] text-mute shrink-0">Delegated to</span>
+              <span className="text-[12px] font-medium text-ink-2 truncate">{task.delegated_to}</span>
+              <span className="ml-auto shrink-0 text-[10px] text-mute-2">you own the gate</span>
+            </div>
+          )}
+
           <Field label="Status">
             <StatusSegmented value={task.status} onChange={(v) => patch({ status: v })} />
+          </Field>
+
+          {/* TDE-377 Path A: hand the task to an autonomous agent (pull loop via get_ready_work) */}
+          <Field label="Autonomous work">
+            <button
+              onClick={() => patch({ agent_ready: !task.agent_ready })}
+              className={clsx(
+                'flex w-full items-center justify-between gap-2 rounded-md border px-3 py-2.5 text-left transition-colors',
+                task.agent_ready ? 'border-accent/50 bg-accent/[0.06]' : 'border-line-2 bg-surf-2 hover:border-accent/40',
+              )}
+            >
+              <span className="flex flex-col">
+                <span className={clsx('text-[12.5px] font-medium', task.agent_ready ? 'text-accent-dark' : 'text-ink-2')}>
+                  {task.agent_ready ? '✓ Handed to agent' : 'Hand to agent'}
+                </span>
+                <span className="text-[10.5px] text-mute-2">
+                  {task.agent_ready
+                    ? 'Queued — a running agent will pick this up and work it.'
+                    : 'Mark ready so an agent works it autonomously. Give it enough context first.'}
+                </span>
+              </span>
+              <span className={clsx('h-4 w-4 shrink-0 rounded-full border transition-colors', task.agent_ready ? 'bg-accent border-accent' : 'border-line')} />
+            </button>
           </Field>
 
           <CustomStatusField task={task} />
@@ -340,6 +373,16 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
           </Field>
 
           <DriveAttachments task={task} />
+
+          {/* ── Guidance for the agent (TDE-383) ── */}
+          <Field label="Guidance for the agent">
+            <TaskGuidance taskId={task.id} />
+          </Field>
+
+          {/* ── Agent activity ledger (TDE-374/375) ── */}
+          <Field label="Agent activity">
+            <AgentActivityPanel taskId={task.id} taskDone={task.status === 'done'} />
+          </Field>
 
         </div>
       </div>
