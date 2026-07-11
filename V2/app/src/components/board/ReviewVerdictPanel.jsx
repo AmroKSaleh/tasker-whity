@@ -28,9 +28,20 @@ export default function ReviewVerdictPanel({ verdict, bar }) {
           </li>
         ))}
       </ul>
-      {verdict.critique && (
-        <p className="mt-2 text-[11px] text-mute whitespace-pre-wrap border-t border-line-2 pt-2">{verdict.critique}</p>
-      )}
+      {/* TDE-382: guided-review narrative (core → consequences → secondary), fallback to flat critique */}
+      {verdict.narrative && (verdict.narrative.core || verdict.narrative.sections?.length || verdict.narrative.secondary) ? (
+        <div className="mt-2 flex flex-col gap-1.5 border-t border-line-2 pt-2">
+          {verdict.narrative.core && <p className="text-[12px] font-medium leading-snug text-ink">{verdict.narrative.core}</p>}
+          {(verdict.narrative.sections || []).map((s, i) => (
+            <p key={i} className="border-l-2 border-line pl-2 text-[11px] leading-snug text-ink-2">
+              {s.point}{s.consequence ? <span className="text-mute"> — {s.consequence}</span> : null}
+            </p>
+          ))}
+          {verdict.narrative.secondary && <p className="text-[10px] leading-snug text-mute-2">{verdict.narrative.secondary}</p>}
+        </div>
+      ) : verdict.critique ? (
+        <p className="mt-2 whitespace-pre-wrap border-t border-line-2 pt-2 text-[11px] text-mute">{verdict.critique}</p>
+      ) : null}
     </div>
   )
 }

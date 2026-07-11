@@ -1691,6 +1691,15 @@ const TOOLS = [
             required: ['rule_id', 'status'],
           },
         },
+        narrative: {
+          type: 'object',
+          description: 'GUIDED REVIEW (TDE-382): a human-facing narrative of the verdict, structured so the human gate is ~30s of judgment, not error-hunting. Provide on any fail/escalation. Verdict logic is unchanged — this is presentation.',
+          properties: {
+            core:      { type: 'string', description: 'The single most important thing the human must judge.' },
+            sections:  { type: 'array', description: 'Consequence-ordered points.', items: { type: 'object', properties: { point: { type: 'string' }, consequence: { type: 'string' } } } },
+            secondary: { type: 'string', description: 'Minor / glue notes, separated out.' },
+          },
+        },
       },
       required: ['task_id', 'results'],
     },
@@ -3133,7 +3142,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           const extra = r.observed_value ? ` — ${r.observed_value}` : (r.status === 'fail' && r.note ? ` — ${r.note}` : '')
           lines.push(`  ${r.status === 'pass' ? '✓' : '✗'} ${label}${extra}`)
         }
-        if (v.critique) lines.push(`  Critique:\n${String(v.critique).split('\n').map((l: string) => '    ' + l).join('\n')}`)
+        // TDE-382: prefer the guided-review narrative (core → consequences → secondary); fall back to the flat critique.
+        const n: any = v.narrative
+        if (n && (n.core || n.sections?.length || n.secondary)) {
+          if (n.core) lines.push(`  ▸ Core: ${n.core}`)
+          for (const s of (n.sections || [])) lines.push(`    → ${s.point}${s.consequence ? ` — ${s.consequence}` : ''}`)
+          if (n.secondary) lines.push(`  Secondary: ${n.secondary}`)
+        } else if (v.critique) {
+          lines.push(`  Critique:\n${String(v.critique).split('\n').map((l: string) => '    ' + l).join('\n')}`)
+        }
       }
 
       // TOKEN ECONOMY (TDE-371): the heavy per-project context below — Foundation + Instruction
@@ -5685,6 +5702,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `1. CHECK rules (${checks.length}): run each for real; record observed_value.`,
         `2. JUDGMENT rules (${judgments.length}): spawn a FRESH independent subagent (Agent tool, FAIL prior) with the artifact + each judgment rule. Do NOT grade judgment rules yourself.`,
         `3. Call submit_task_review("${args.task_id}", results, validator:"independent-subagent") — one result per rule (rule_id, status, observed_value for checks, note for fails).`,
+        `4. GUIDED REVIEW (TDE-382): when anything fails, ALSO pass narrative:{core, sections:[{point,consequence}], secondary} — core = the ONE thing the human must judge; sections consequence-ordered (what's wrong → what it causes); secondary = minor notes. This restructures the verdict so the human's gate is ~30s of judgment, not hunting. Presentation only — it does not change pass/fail.`,
         `On a blocker fail submit_task_review reopens this task with the critique; after 3 attempts it escalates to the human.`,
       ].join('\n')
     }
@@ -5702,8 +5720,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const overall = blockerFail ? 'fail' : 'pass'
       const attempt = overall === 'fail' ? prior + 1 : prior
       const critique = fails.map((x: any) => { const r: any = byId.get(x.rule_id); return `• ${(r?.label) || x.rule_id}: ${x.note || 'failed'}` }).join('\n')
+      const narrative = (args.narrative && typeof args.narrative === 'object') ? args.narrative : null   // TDE-382 guided review
       const escalate = overall === 'fail' && attempt >= 3
-      const review_verdict = { overall, results, critique, validated_at: new Date().toISOString(), attempt, escalated: escalate, validator: args.validator || 'self' }
+      const review_verdict = { overall, results, critique, narrative, validated_at: new Date().toISOString(), attempt, escalated: escalate, validator: args.validator || 'self' }
       const update: any = { review_verdict }
       if (overall === 'fail') update.status = 'in_progress'   // reopen the producer
       const { error } = await sb.from('tasks').update(update).eq('id', task.id)

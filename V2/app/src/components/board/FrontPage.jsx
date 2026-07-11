@@ -174,7 +174,8 @@ function InFlightCard({ task, prefix, sectionName, onOpenTask, onPause }) {
 function LeadCard({ task, prefix, onOpenTask }) {
   const [showCritique, setShowCritique] = useState(false)
   const fails = (task.review_verdict?.results || []).filter(r => r.status === 'fail')
-  const deck = fails[0]?.note || task.review_verdict?.critique || 'The judge escalated this task to you after exhausting its self-revision budget.'
+  const narrative = task.review_verdict?.narrative
+  const deck = narrative?.core || fails[0]?.note || task.review_verdict?.critique || 'The judge escalated this task to you after exhausting its self-revision budget.'
   return (
     <article className="rounded-xl border border-review/30 bg-review-soft px-6 py-5 mb-4 transition-colors hover:border-review/60">
       <div className="font-mono text-[9.5px] tracking-[0.15em] text-review font-bold mb-2.5 uppercase">
@@ -189,9 +190,12 @@ function LeadCard({ task, prefix, onOpenTask }) {
       {showCritique && (
         <div className="border-l-2 border-review pl-3.5 py-1 mb-3.5 flex flex-col gap-1.5">
           <span className="font-mono text-[9px] tracking-[0.12em] text-mute-2 uppercase">Validator notes</span>
-          {fails.length > 0
-            ? fails.map((f, i) => <p key={i} className="text-[12.5px] text-ink-2 leading-snug m-0">FAIL — {f.note || f.rule || 'no note recorded'}</p>)
-            : <p className="text-[12.5px] text-ink-2 m-0">{task.review_verdict?.critique || 'No detailed critique recorded.'}</p>}
+          {narrative?.sections?.length
+            ? narrative.sections.map((s, i) => <p key={i} className="text-[12.5px] text-ink-2 leading-snug m-0">{s.point}{s.consequence ? ` — ${s.consequence}` : ''}</p>)
+            : fails.length > 0
+              ? fails.map((f, i) => <p key={i} className="text-[12.5px] text-ink-2 leading-snug m-0">FAIL — {f.note || f.rule || 'no note recorded'}</p>)
+              : <p className="text-[12.5px] text-ink-2 m-0">{task.review_verdict?.critique || 'No detailed critique recorded.'}</p>}
+          {narrative?.secondary && <p className="text-[11px] text-mute-2 leading-snug m-0 mt-1">{narrative.secondary}</p>}
         </div>
       )}
       <div className="flex items-center gap-2">
