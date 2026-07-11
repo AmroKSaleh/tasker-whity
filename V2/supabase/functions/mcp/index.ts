@@ -2968,11 +2968,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .eq('task_id', task.id)
         .maybeSingle()
       const shortRef = full.project?.prefix && full.short_id != null ? `${full.project.prefix}-${full.short_id}` : full.id
+      // TDE-376: canonical branch name for coding agents — check out this exact branch so a
+      // future PR/commit magic word (fixes/closes TDE-N) can drive task state through the gate.
+      const branchSlug = String(full.text || '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 50).replace(/-+$/g, '')
+      const branchName = full.project?.prefix && full.short_id != null
+        ? `${String(full.project.prefix).toLowerCase()}-${full.short_id}${branchSlug ? '-' + branchSlug : ''}`
+        : null
       const lines: string[] = [
         `# ${full.text}`,
         `ID: ${shortRef} | Project: ${full.project?.name ?? '—'} | Section: ${full.section?.name ?? 'Ungrouped'}`,
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
       ]
+      if (branchName) lines.push(`Branch: ${branchName}`)
       // Relay (TDE-324): a handed-off task carries a curated rationale layer authored by the
       // person who relayed it. Surface it LOUD and FIRST — its whole point is that the assignee
       // (you) can act without a follow-up round-trip to the creator. Distinct from detail/Context.
