@@ -835,6 +835,7 @@ const TOOLS = [
         relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set/replace the curated relay rationale layer on an EXISTING task (e.g. when the user decides to hand off a task already created). Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump. Setting it marks the task as a relay.' },
         delegated_to:   { type: 'string', description: 'TDE-375: who the task is delegated to (free text — an agent or teammate). You (the owner) REMAIN responsible and still own the quality gate; delegation is NOT reassignment. Pass an empty string to clear.' },
         agent_ready:    { type: 'boolean', description: 'Mark this task "ready for the agent" — it enters the autonomous work queue (get_ready_work). Usually set by the human in the web app ("Hand to agent"); set false to pull it back.' },
+        agent_proposal: { type: 'string', description: 'Prepare→confirm→execute: record the agent\'s PREPARED proposal for this task (a concise summary of what it will do). Setting it makes the task appear in the web Agent Queue "Awaiting confirmation" tab. Clear it (empty string) once the human confirms and you execute, or if declined.' },
       },
       required: ['task_id'],
     },
@@ -2898,9 +2899,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready', 'agent_proposal']
       const patch: Record<string, any> = {}
-      const nullable = (k: string) => k === 'group_id' || k === 'delegated_to'   // TDE-375: delegated_to clearable via null
+      const nullable = (k: string) => k === 'group_id' || k === 'delegated_to' || k === 'agent_proposal'   // clearable via null/empty
       for (const k of allowed) if (nullable(k) ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
       const task = await resolveTask(sb, userId, task_id)
       if (!task) return 'Task not found.'
@@ -2941,6 +2942,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       if (patch.agent_ready === true) patch.agent_ready_at = new Date().toISOString()
       else if (patch.agent_ready === false) patch.agent_ready_at = null
+
+      if (patch.agent_proposal !== undefined) {
+        patch.agent_proposal = patch.agent_proposal || null
+        patch.agent_proposal_at = patch.agent_proposal ? new Date().toISOString() : null
+      }
 
       await sb.from('tasks').update(patch).eq('id', task.id)
       return `Updated "${task.text}".${appended ? ' (appended to detail)' : ''}`

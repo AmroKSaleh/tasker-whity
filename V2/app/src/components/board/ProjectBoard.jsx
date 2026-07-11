@@ -29,6 +29,7 @@ import KnowledgeBaseModal from '../kb/KnowledgeBaseModal'
 import InstructionSetModal from '../is/InstructionSetModal'
 import CreateTaskModal from './CreateTaskModal'
 import ProjectFilesModal from './ProjectFilesModal'
+import AgentQueuePanel from './AgentQueuePanel'
 import ProjectContextPanel from './ProjectContextPanel'
 import SectionContextSidebar from './SectionContextSidebar'
 import FrontPage, { MastheadSky } from './FrontPage'
@@ -141,6 +142,9 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
         {task.priority && task.priority !== 'medium' && <span className={`dot dot-${prio}`} />}
         {task.priority && task.priority !== 'medium' && <span className="uppercase">{task.priority}</span>}
         {task.due_date && <><span className="text-mute-2">·</span><span>{dueLabel(task.due_date)}</span></>}
+        {task.agent_proposal
+          ? <span className="inline-flex items-center gap-0.5 rounded bg-review/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-review" title="Agent prepared work — awaiting your confirmation">◇ confirm</span>
+          : task.agent_ready && <span className="inline-flex items-center gap-0.5 rounded bg-accent/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-accent" title="Handed to agent — in the ready-work queue">▶ agent</span>}
         <span className="flex-1" />
         {!done && (
           <button
@@ -341,6 +345,7 @@ export default function ProjectBoard({ project }) {
   const [showIS, setShowIS] = useState(false)
   const [showCreateTask, setShowCreateTask] = useState(false)
   const [showFiles, setShowFiles] = useState(false)
+  const [showQueue, setShowQueue] = useState(false)
   const [showContext, setShowContext] = useState(false)
   // const [showFocus, setShowFocus] = useState(false) — DISABLED
   // const [focusTaskId, setFocusTaskId] = useState(null) — DISABLED
@@ -646,6 +651,7 @@ export default function ProjectBoard({ project }) {
                   <button onClick={() => setShowKB(true)} title="Knowledge Base — persistent project knowledge the AI accumulates" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">KB</button>
                   <button onClick={() => setShowIS(true)} title="Instruction Set — per-project rules that shape AI behavior" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">IS</button>
                   <button onClick={() => setShowFiles(true)} title="Files — documents & files stored in this project's Google Drive folder" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">Files</button>
+                  <button onClick={() => setShowQueue(true)} title="Agent queue — tasks handed to the agent, and those the agent prepared and is awaiting your confirmation on" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">Queue</button>
                 </div>
 
                 <div className="flex items-end justify-between gap-10 pt-5 pb-4">
@@ -892,6 +898,9 @@ export default function ProjectBoard({ project }) {
       )}
       {showFiles && (
         <ProjectFilesModal projectId={project.id} projectName={project.name} onClose={() => setShowFiles(false)} />
+      )}
+      {showQueue && (
+        <AgentQueuePanel projectId={project.id} prefix={project.prefix} onClose={() => setShowQueue(false)} onOpenTask={openTask} />
       )}
       {showContext && <ProjectContextPanel project={project} onClose={() => setShowContext(false)} onContextUpdate={handleContextUpdate} />}
 
