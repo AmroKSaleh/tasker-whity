@@ -1064,6 +1064,31 @@ const TOOLS = [
     },
   },
   {
+    name: 'stop_flow',
+    description: "TDE-384: set a durable STOP on a flow — a human-set halt agents MUST honor. While stopped, run_flow / guide_flow / advance_guide refuse to proceed and return the reason. Use when the human changes their mind mid-flow (checks INTENT — distinct from the quality gates, which check output). Identify the flow by flow_id (UUID or name) or any task_id in it.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id: { type: 'string', description: 'Flow UUID or (partial) name.' },
+        task_id: { type: 'string', description: 'Or any task in the flow (short ID or UUID).' },
+        reason:  { type: 'string', description: 'Why you are stopping — shown to the agent when it tries to proceed.' },
+      },
+      required: [],
+    },
+  },
+  {
+    name: 'resume_flow',
+    description: "TDE-384: clear a flow's stop. It resumes exactly where it stood (guide cursor and task states untouched). Identify by flow_id (UUID or name) or any task_id in it.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        flow_id: { type: 'string', description: 'Flow UUID or (partial) name.' },
+        task_id: { type: 'string', description: 'Or any task in the flow.' },
+      },
+      required: [],
+    },
+  },
+  {
     name: 'github_connect',
     description: 'Connect a GitHub account by saving a Personal Access Token (PAT). Required before using any other GitHub tools.',
     inputSchema: {
@@ -2238,6 +2263,27 @@ async function importProjectBundle(sb: any, userId: string, bundle: any, opts: {
 }
 
 // ── Tool handlers ─────────────────────────────────────────────
+// TDE-384: resolve a flow by flow_id (UUID or partial name) or by a task_id within it.
+async function resolveFlowRef(sb: any, userId: string, args: any) {
+  if (args.flow_id) {
+    const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
+    if (looksLikeUuid) {
+      const { data } = await sb.from('flows').select('id, name').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+      return data
+    }
+    const { data } = await sb.from('flows').select('id, name').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
+    return data
+  }
+  if (args.task_id) {
+    const anchor = await resolveTask(sb, userId, args.task_id)
+    if (anchor?.flow_id) {
+      const { data } = await sb.from('flows').select('id, name').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+      return data
+    }
+  }
+  return null
+}
+
 async function runTool(sb: any, userId: string, name: string, args: any, rawParams?: any, tokenActor?: string | null): Promise<string> {
   const logCtx = { tool_name: name, raw_params: rawParams }
   switch (name) {
@@ -3625,6 +3671,20 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       return lines.join('\n')
     }
 
+    case 'stop_flow': {
+      const flow = await resolveFlowRef(sb, userId, args)
+      if (!flow) return 'Flow not found. Pass flow_id (UUID or name) or a task_id in the flow.'
+      await sb.from('flows').update({ stop_requested: true, stop_reason: args.reason ?? null, stopped_at: new Date().toISOString() }).eq('id', flow.id)
+      return `⛔ Stopped flow "${flow.name}". Agents will refuse to run, guide, or advance it until you resume_flow.${args.reason ? `\nReason: ${args.reason}` : ''}`
+    }
+
+    case 'resume_flow': {
+      const flow = await resolveFlowRef(sb, userId, args)
+      if (!flow) return 'Flow not found. Pass flow_id (UUID or name) or a task_id in the flow.'
+      await sb.from('flows').update({ stop_requested: false, stop_reason: null, stopped_at: null }).eq('id', flow.id)
+      return `▶ Resumed flow "${flow.name}". It picks up exactly where it stood.`
+    }
+
     case 'github_connect': {
       const { token } = args
       let ghUser: any
@@ -4899,6 +4959,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       if (!flowTasks.length) return 'No tasks found in this flow.'
 
+      // TDE-384: a human-set stop halts the flow. Refuse to proceed until it's cleared.
+      if (flowRecord?.id) {
+        const { data: fs } = await sb.from('flows').select('stop_requested, stop_reason, stopped_at').eq('id', flowRecord.id).maybeSingle()
+        if (fs?.stop_requested) {
+          return `⛔ FLOW STOPPED by the human${fs.stopped_at ? ` (at ${fs.stopped_at})` : ''}. You must NOT proceed with this flow — no task work, no completions, no further calls on it.\nReason: ${fs.stop_reason || '(none given)'}\nAcknowledge this to the user and wait. The flow resumes exactly where it stood once they clear the stop (resume_flow).`
+        }
+      }
+
       // Sort: use persistent flow_step if available, fall back to topo-sort
       const hasSteps = flowTasks.some((t: any) => t.flow_step != null)
       let sorted: any[]
@@ -5090,6 +5158,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const found = await resolveGuideFlow()
       if (!found || !guideFlowRecord) return 'Flow not found. Pass flow_id or task_id.'
       if (!guideTasks.length) return 'No tasks found in this flow.'
+
+      // TDE-384: honor a human-set stop before guiding/advancing.
+      {
+        const { data: fs } = await sb.from('flows').select('stop_requested, stop_reason, stopped_at').eq('id', guideFlowRecord.id).maybeSingle()
+        if (fs?.stop_requested) {
+          return `⛔ FLOW STOPPED by the human${fs.stopped_at ? ` (at ${fs.stopped_at})` : ''}. Do not advance this flow.\nReason: ${fs.stop_reason || '(none given)'}\nAcknowledge to the user; it resumes where it stood once they clear the stop (resume_flow).`
+        }
+      }
 
       // Sort by flow_step
       const guideSorted = [...guideTasks].sort((a: any, b: any) => (a.flow_step ?? 999) - (b.flow_step ?? 999))

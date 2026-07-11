@@ -124,6 +124,8 @@ function ClaudeCodeApiKey({ onKeyChange }) {
   const [lastUsed, setLastUsed]   = useState(undefined)
   const [mcpStatus, setMcpStatus] = useState(null)
   const [testingMCP, setTestingMCP] = useState(false)
+  const [agentLabel, setAgentLabel] = useState('')
+  const [labelSaved, setLabelSaved] = useState(false)
 
   useEffect(() => {
     async function check() {
@@ -131,15 +133,26 @@ function ClaudeCodeApiKey({ onKeyChange }) {
       if (!user) return
       const { data } = await supabase
         .from('user_api_keys')
-        .select('id, last_used_at, key_plain')
+        .select('id, last_used_at, key_plain, agent_label')
         .eq('user_id', user.id)
         .maybeSingle()
       setHasKey(!!data)
       setLastUsed(data?.last_used_at ?? null)
+      setAgentLabel(data?.agent_label ?? '')
       if (data?.key_plain) { setNewKey(data.key_plain); onKeyChange?.(data.key_plain) }
     }
     check()
   }, [])
+
+  // TDE-375: the human names their key so the agent's writes are attributed to a
+  // trustworthy, token-derived actor (not a value the agent supplies per call).
+  async function saveLabel() {
+    const { data: { user } } = await supabase.auth.getUser()
+    if (!user) return
+    await supabase.from('user_api_keys').update({ agent_label: agentLabel.trim() || null }).eq('user_id', user.id)
+    setLabelSaved(true)
+    setTimeout(() => setLabelSaved(false), 2000)
+  }
 
   async function generate() {
     setGenerating(true)
@@ -152,7 +165,7 @@ function ClaudeCodeApiKey({ onKeyChange }) {
       const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(rawKey))
       const keyHash = Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
       await supabase.from('user_api_keys').delete().eq('user_id', user.id)
-      await supabase.from('user_api_keys').insert({ user_id: user.id, key_hash: keyHash, key_plain: rawKey })
+      await supabase.from('user_api_keys').insert({ user_id: user.id, key_hash: keyHash, key_plain: rawKey, agent_label: agentLabel.trim() || null })
       setNewKey(rawKey)
       setHasKey(true)
       setLastUsed(null)
@@ -221,6 +234,20 @@ function ClaudeCodeApiKey({ onKeyChange }) {
             Revoke key
           </button>
         </div>
+      </div>
+      <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl border border-line bg-surf-2">
+        <span className="text-[12px] text-ink-2 shrink-0">Agent name</span>
+        <input
+          value={agentLabel}
+          onChange={e => setAgentLabel(e.target.value)}
+          onBlur={saveLabel}
+          onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur() }}
+          placeholder="e.g. Claude Code"
+          className="flex-1 bg-transparent text-right text-[12px] text-ink outline-none placeholder:text-mute-2"
+        />
+        {labelSaved
+          ? <span className="text-[10px] font-medium text-green-600 shrink-0">✓ saved</span>
+          : <span className="text-[10px] text-mute-2 shrink-0" title="Attributes this key's writes to a name in the agent activity ledger">attributes writes</span>}
       </div>
       <div className="flex items-center gap-3 px-4 py-2.5 rounded-xl border border-line bg-surf-2">
         <span className="text-[12px] text-ink-2 flex-1">MCP server reachable?</span>
