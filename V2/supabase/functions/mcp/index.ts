@@ -1024,6 +1024,32 @@ const TOOLS = [
     },
   },
   {
+    name: 'append_session_activity',
+    description: "Append a typed, IMMUTABLE entry to a task's agent session ledger — the durable, human-inspectable record of what the agent did (persists across sessions). Opens a session lazily if none is open. Types: progress (a step taken / status update), action (a concrete change made), question (BLOCKED — needs human input; sets the session to awaiting_input), result (an outcome / deliverable), error (a failure). Entries cannot be edited or deleted (TDE-374).",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
+        type:    { type: 'string', enum: ['progress', 'action', 'question', 'result', 'error'], description: 'The kind of entry.' },
+        body:    { type: 'string', description: 'What happened / what you are asking — one concise entry.' },
+        actor:   { type: 'string', description: 'Optional: the agent/client acting (e.g. "Claude Code"). The full provenance layer is completed in TDE-375.' },
+      },
+      required: ['task_id', 'type', 'body'],
+    },
+  },
+  {
+    name: 'get_task_activity',
+    description: "Read a task's agent session ledger: recent sessions with their DERIVED lifecycle state (active / awaiting_input / error / stale / complete) and the immutable activity thread. Use it to see what prior agents/sessions actually did on a task before you pick it up.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
+        limit:   { type: 'number', description: 'Max activities per session (default 20, max 100).' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
     name: 'github_connect',
     description: 'Connect a GitHub account by saving a Personal Access Token (PAT). Required before using any other GitHub tools.',
     inputSchema: {
@@ -3520,6 +3546,60 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (error) throw new Error(error.message)
       if (label === null) return `No milestone at index ${args.index} for "${task.text}".`
       return `Deleted milestone "${label}" from "${task.text}".`
+    }
+
+    case 'append_session_activity': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return 'Task not found.'
+      const allowed = ['progress', 'action', 'question', 'result', 'error']
+      if (!allowed.includes(args.type)) return `Invalid type "${args.type}". Use one of: ${allowed.join(', ')}.`
+      const body = (args.body ?? '').toString().trim()
+      if (!body) return 'body is required — a concise note of what happened or what you are asking.'
+      // Lazily reuse the task's open session (closed_at null); open one if none exists.
+      const { data: openSession } = await sb.from('agent_sessions')
+        .select('id').eq('task_id', task.id).eq('user_id', userId).is('closed_at', null)
+        .order('opened_at', { ascending: false }).limit(1).maybeSingle()
+      let sessionId = openSession?.id
+      if (!sessionId) {
+        const { data: created, error: sErr } = await sb.from('agent_sessions')
+          .insert({ task_id: task.id, user_id: userId, actor: args.actor ?? null })
+          .select('id').single()
+        if (sErr) throw new Error(sErr.message)
+        sessionId = created.id
+      }
+      const { error: aErr } = await sb.from('agent_activities')
+        .insert({ session_id: sessionId, task_id: task.id, user_id: userId, type: args.type, body })
+      if (aErr) throw new Error(aErr.message)
+      await sb.from('agent_sessions').update({ last_activity_at: new Date().toISOString() }).eq('id', sessionId)
+      const state = args.type === 'question' ? 'awaiting_input' : args.type === 'error' ? 'error' : 'active'
+      return `Logged ${args.type} on "${task.text}". Session state: ${state}.`
+    }
+
+    case 'get_task_activity': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return 'Task not found.'
+      const limit = Math.min(Math.max(parseInt(String(args.limit ?? 20), 10) || 20, 1), 100)
+      const { data: sessions } = await sb.from('agent_sessions')
+        .select('id, actor, opened_at, last_activity_at, closed_at')
+        .eq('task_id', task.id).order('opened_at', { ascending: false }).limit(10)
+      if (!sessions || !sessions.length) return `No agent sessions on "${task.text}" yet.`
+      const STALE_MS = 24 * 60 * 60 * 1000
+      const lines: string[] = [`# Agent sessions — ${task.text}`]
+      for (const s of sessions) {
+        const { data: acts } = await sb.from('agent_activities')
+          .select('type, body, created_at').eq('session_id', s.id)
+          .order('created_at', { ascending: true }).limit(limit)
+        const last = acts && acts.length ? acts[acts.length - 1] : null
+        let state: string
+        if (task.status === 'done' || s.closed_at) state = 'complete'
+        else if (!last) state = 'active'
+        else if (last.type === 'question') state = 'awaiting_input'
+        else if (last.type === 'error') state = 'error'
+        else state = (Date.now() - new Date(last.created_at).getTime()) < STALE_MS ? 'active' : 'stale'
+        lines.push(`\n▸ Session${s.actor ? ` by ${s.actor}` : ''} · ${state} · opened ${s.opened_at}`)
+        for (const a of (acts || [])) lines.push(`  [${a.type}] ${a.body}`)
+      }
+      return lines.join('\n')
     }
 
     case 'github_connect': {
