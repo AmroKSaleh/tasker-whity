@@ -834,6 +834,7 @@ const TOOLS = [
         human_guidance: { type: 'string', description: 'Human-facing step instructions for guide mode (user/external steps). Replaces existing.' },
         relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set/replace the curated relay rationale layer on an EXISTING task (e.g. when the user decides to hand off a task already created). Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump. Setting it marks the task as a relay.' },
         delegated_to:   { type: 'string', description: 'TDE-375: who the task is delegated to (free text — an agent or teammate). You (the owner) REMAIN responsible and still own the quality gate; delegation is NOT reassignment. Pass an empty string to clear.' },
+        agent_ready:    { type: 'boolean', description: 'Mark this task "ready for the agent" — it enters the autonomous work queue (get_ready_work). Usually set by the human in the web app ("Hand to agent"); set false to pull it back.' },
       },
       required: ['task_id'],
     },
@@ -1072,6 +1073,15 @@ const TOOLS = [
       properties: {
         project_id: { type: 'string', description: 'Optional — scope to one project (prefix/slug/UUID). Omit for all your projects.' },
       },
+      required: [],
+    },
+  },
+  {
+    name: 'get_ready_work',
+    description: "The agent's autonomous work queue: tasks a human marked 'ready for agent' in the web app (agent_ready + still pending), ranked by priority. The pull half of Tasker-triggers-agent-work — a looping/scheduled agent calls this, takes the TOP task (get_task to load context + start it), works it, completes it, then calls again. Returns an empty-queue message when there is nothing ready.",
+    inputSchema: {
+      type: 'object',
+      properties: { project_id: { type: 'string', description: 'Optional — scope to one project.' } },
       required: [],
     },
   },
@@ -2888,7 +2898,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready']
       const patch: Record<string, any> = {}
       const nullable = (k: string) => k === 'group_id' || k === 'delegated_to'   // TDE-375: delegated_to clearable via null
       for (const k of allowed) if (nullable(k) ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
@@ -2928,6 +2938,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       } else if (patch.pinned === false) {
         patch.pinned_at = null
       }
+
+      if (patch.agent_ready === true) patch.agent_ready_at = new Date().toISOString()
+      else if (patch.agent_ready === false) patch.agent_ready_at = null
 
       await sb.from('tasks').update(patch).eq('id', task.id)
       return `Updated "${task.text}".${appended ? ' (appended to detail)' : ''}`
@@ -3721,7 +3734,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         projectFilter = p.id
       }
       let tq = sb.from('tasks')
-        .select('id, text, short_id, status, priority, due_date, review_verdict, project_id, project:projects(prefix)')
+        .select('id, text, short_id, status, priority, due_date, review_verdict, agent_ready, project_id, project:projects(prefix)')
         .eq('user_id', userId).neq('status', 'done')
       if (projectFilter) tq = tq.eq('project_id', projectFilter)
       const { data: tasksData } = await tq
@@ -3755,17 +3768,43 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
       }
       const needsReview = taskList.filter((t: any) => t.review_verdict?.escalated)
+      const readyForAgent = taskList.filter((t: any) => t.agent_ready && t.status === 'pending')
       const today = new Date().toISOString().slice(0, 10)
       const overdue = taskList.filter((t: any) => t.due_date && t.due_date < today)
 
       const lines: string[] = ['# What needs you']
       const section = (title: string, items: string[]) => { if (items.length) { lines.push(`\n${title} (${items.length}):`); items.forEach(i => lines.push(`  ${i}`)) } }
+      section('▶ READY FOR AGENT — a human queued these for autonomous work (see get_ready_work)', readyForAgent.map((t: any) => `${ref(t)} — ${t.text}`))
       section('◆ AWAITING YOUR REVIEW — judge escalated', needsReview.map((t: any) => `${ref(t)} — ${t.text}`))
       section('✎ PENDING GUIDANCE — a human left a steering note', guidance.map((g: any) => `${ref(byId.get(g.task_id))} — "${g.body}"`))
       section('⏳ AWAITING INPUT — an agent asked a question and is blocked', [...awaitingInput].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
       section('⋯ STALE IN-PROGRESS — quiet for 2+ days', [...stale].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
       section('⚠ OVERDUE', overdue.map((t: any) => `${ref(t)} — ${t.text} (due ${t.due_date})`))
-      if (lines.length === 1) return 'Nothing needs your attention right now — no escalated reviews, pending guidance, blocked agents, stale work, or overdue tasks.'
+      if (lines.length === 1) return 'Nothing needs your attention right now — no ready-for-agent work, escalated reviews, pending guidance, blocked agents, stale work, or overdue tasks.'
+      return lines.join('\n')
+    }
+
+    case 'get_ready_work': {
+      let q = sb.from('tasks')
+        .select('id, text, short_id, priority, sort_order, project_id, project:projects(prefix, name)')
+        .eq('user_id', userId).eq('agent_ready', true).eq('status', 'pending')
+      if (args.project_id) {
+        const p = await resolveProject(sb, userId, args.project_id)
+        if (!p) return `Project "${args.project_id}" not found.`
+        q = q.eq('project_id', p.id)
+      }
+      const { data: readyData } = await q
+      const list = readyData || []
+      if (!list.length) return 'No tasks are ready for the agent. A human marks a task "Hand to agent" in the web app when it has enough context to be worked autonomously — the queue is clear.'
+      const prio: Record<string, number> = { rush: 0, high: 1, medium: 2, low: 3 }
+      list.sort((a: any, b: any) => (prio[a.priority] ?? 2) - (prio[b.priority] ?? 2) || (a.sort_order ?? 0) - (b.sort_order ?? 0))
+      const ref = (t: any) => t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id.slice(0, 8)
+      const lines = [
+        `▶ READY FOR AGENT — ${list.length} task(s) the human queued for autonomous work, ranked by priority.`,
+        `Take the TOP one: get_task(id) to load full context + start it (sets in_progress), do the work, complete_task, then call get_ready_work again for the next.`,
+        ``,
+      ]
+      for (const t of list) lines.push(`  ${ref(t)} [${t.priority}] ${t.text}`)
       return lines.join('\n')
     }
 

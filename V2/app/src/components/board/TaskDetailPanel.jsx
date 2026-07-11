@@ -561,6 +561,29 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
             <StatusSegmented value={task.status} onChange={(v) => patch({ status: v })} />
           </Field>
 
+          {/* TDE-377 Path A: hand the task to an autonomous agent (pull loop via get_ready_work) */}
+          <Field label="Autonomous work">
+            <button
+              onClick={() => patch({ agent_ready: !task.agent_ready })}
+              className={clsx(
+                'flex items-center justify-between gap-2 rounded-md border px-3 py-2.5 text-left transition-colors',
+                task.agent_ready ? 'border-accent/50 bg-accent/[0.06]' : 'border-line-2 bg-surf-2 hover:border-accent/40',
+              )}
+            >
+              <span className="flex flex-col">
+                <span className={clsx('text-[12.5px] font-medium', task.agent_ready ? 'text-accent-dark' : 'text-ink-2')}>
+                  {task.agent_ready ? '✓ Handed to agent' : 'Hand to agent'}
+                </span>
+                <span className="text-[10.5px] text-mute-2">
+                  {task.agent_ready
+                    ? 'Queued — a running agent will pick this up and work it.'
+                    : 'Mark ready so an agent works it autonomously. Give it enough context first.'}
+                </span>
+              </span>
+              <span className={clsx('h-4 w-4 shrink-0 rounded-full border transition-colors', task.agent_ready ? 'bg-accent border-accent' : 'border-line')} />
+            </button>
+          </Field>
+
           <CustomStatusField task={task} />
 
           <Field label="Priority">
