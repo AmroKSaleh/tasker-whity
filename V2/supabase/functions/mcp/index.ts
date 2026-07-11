@@ -75,6 +75,19 @@ async function resolveApiKey(sb: any, raw: string): Promise<string | null> {
   return null
 }
 
+// TDE-375: token-derived actor (provenance) — which agent/client a key represents. Kept SEPARATE
+// from resolveApiKey and best-effort (never throws) so it can NEVER affect authentication.
+async function resolveActor(sb: any, raw: string): Promise<string | null> {
+  try {
+    if (raw.startsWith('tsk_')) {
+      const hash = await hashKey(raw)
+      const { data } = await sb.from('user_api_keys').select('agent_label').eq('key_hash', hash).maybeSingle()
+      return data?.agent_label ?? null
+    }
+  } catch (_) { /* provenance is best-effort — swallow and fall through */ }
+  return null
+}
+
 // ── JSON-RPC helpers ─────────────────────────────────────────
 function json(body: any, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
@@ -819,6 +832,7 @@ const TOOLS = [
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent = AI; user = human (AI coaches); external = third party.' },
         human_guidance: { type: 'string', description: 'Human-facing step instructions for guide mode (user/external steps). Replaces existing.' },
         relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set/replace the curated relay rationale layer on an EXISTING task (e.g. when the user decides to hand off a task already created). Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump. Setting it marks the task as a relay.' },
+        delegated_to:   { type: 'string', description: 'TDE-375: who the task is delegated to (free text — an agent or teammate). You (the owner) REMAIN responsible and still own the quality gate; delegation is NOT reassignment. Pass an empty string to clear.' },
       },
       required: ['task_id'],
     },
@@ -2224,7 +2238,7 @@ async function importProjectBundle(sb: any, userId: string, bundle: any, opts: {
 }
 
 // ── Tool handlers ─────────────────────────────────────────────
-async function runTool(sb: any, userId: string, name: string, args: any, rawParams?: any): Promise<string> {
+async function runTool(sb: any, userId: string, name: string, args: any, rawParams?: any, tokenActor?: string | null): Promise<string> {
   const logCtx = { tool_name: name, raw_params: rawParams }
   switch (name) {
 
@@ -2807,9 +2821,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to']
       const patch: Record<string, any> = {}
-      for (const k of allowed) if (k === 'group_id' ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
+      const nullable = (k: string) => k === 'group_id' || k === 'delegated_to'   // TDE-375: delegated_to clearable via null
+      for (const k of allowed) if (nullable(k) ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
       const task = await resolveTask(sb, userId, task_id)
       if (!task) return 'Task not found.'
 
@@ -2980,6 +2995,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
       ]
       if (branchName) lines.push(`Branch: ${branchName}`)
+      if (full.delegated_to) lines.push(`Delegated to: ${full.delegated_to} (you remain the owner and own the gate)`)
       // Relay (TDE-324): a handed-off task carries a curated rationale layer authored by the
       // person who relayed it. Surface it LOUD and FIRST — its whole point is that the assignee
       // (you) can act without a follow-up round-trip to the creator. Distinct from detail/Context.
@@ -3569,7 +3585,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       let sessionId = openSession?.id
       if (!sessionId) {
         const { data: created, error: sErr } = await sb.from('agent_sessions')
-          .insert({ task_id: task.id, user_id: userId, actor: args.actor ?? null })
+          .insert({ task_id: task.id, user_id: userId, actor: tokenActor ?? args.actor ?? null })
           .select('id').single()
         if (sErr) throw new Error(sErr.message)
         sessionId = created.id
@@ -6618,13 +6634,18 @@ Deno.serve(async (req: Request) => {
   }
 
   const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
-  const userId = await resolveApiKey(sb, authHeader.slice(7).trim())
+  const rawToken = authHeader.slice(7).trim()
+  const userId = await resolveApiKey(sb, rawToken)
   if (!userId) {
     return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message: 'Invalid token' }, id: null }), {
       status: 401,
       headers: { ...cors, 'Content-Type': 'application/json', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${RESOURCE_METADATA_URL}"` },
     })
   }
+
+  // TDE-375: token-derived actor for provenance. Best-effort — auth already succeeded above; this
+  // never blocks the request (resolveActor swallows its own errors).
+  const tokenActor = await resolveActor(sb, rawToken)
 
   try {
     switch (method) {
@@ -6633,7 +6654,7 @@ Deno.serve(async (req: Request) => {
         const { name, arguments: toolArgs, input: toolInput } = params
         const resolvedArgs = toolArgs ?? toolInput ?? {}
         try {
-          const text = await runTool(sb, userId, name, resolvedArgs, params)
+          const text = await runTool(sb, userId, name, resolvedArgs, params, tokenActor)
           return toolOk(text, id)
         } catch (err: any) {
           fireAndForget(sb.from('mcp_error_logs').insert({
