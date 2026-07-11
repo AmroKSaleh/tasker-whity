@@ -503,6 +503,7 @@ Rules that always apply, even before you call anything else:
 // Advisory — the MCP can't enforce agent behavior — but injected so every agent
 // using Tasker gets a consistent baseline.
 const ASSISTANT_DIRECTIVES = [
+  'ATTENTION FIRST (TDE-383): right after __init_tasker_session, call get_my_attention — one cross-task pull of what needs the human/you: tasks awaiting the human\'s review, pending GUIDANCE a human left on tasks (picked up even across sessions), agent sessions AWAITING INPUT (blocked on a question), STALE in-progress work, and OVERDUE items. It is your "what needs me?" triage before picking up anything new. Then act on the highest-priority item.',
   'When you begin working on a task, the FIRST thing to do is set its status to in_progress. Calling get_task does this automatically; if you start work without calling get_task, set it explicitly via update_task before doing anything else. When the work is genuinely and verifiably complete, mark it done with complete_task; otherwise leave it in_progress.',
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
@@ -1061,6 +1062,17 @@ const TOOLS = [
         limit:   { type: 'number', description: 'Max activities per session (default 20, max 100).' },
       },
       required: ['task_id'],
+    },
+  },
+  {
+    name: 'get_my_attention',
+    description: "The agent's 'what needs me?' triage — one cross-task pull. Recommended FIRST move after __init_tasker_session. Returns, for the user's non-done work (optionally scoped to a project): tasks awaiting the human's review verdict, pending human GUIDANCE left on tasks (unconsumed), agent sessions AWAITING INPUT (an agent asked a question and is blocked), STALE in-progress tasks (quiet 2+ days), and OVERDUE items. Read it, then act on the highest-priority item.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Optional — scope to one project (prefix/slug/UUID). Omit for all your projects.' },
+      },
+      required: [],
     },
   },
   {
@@ -3050,6 +3062,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         lines.push(`This task was RELAYED to you. The relay context below is the creator's curated hand-off — treat it as authoritative intent; act on it without going back to ask:`)
         lines.push(full.relay_context)
       }
+      // TDE-383: pending human guidance — a steering note left for the agent. Surface it LOUD and,
+      // on a real (non-peek) get_task, mark it consumed so it isn't re-surfaced next session.
+      const { data: pendingGuidance } = await sb.from('task_guidance')
+        .select('id, body, created_at').eq('task_id', full.id).is('consumed_at', null)
+        .order('created_at', { ascending: true })
+      if (pendingGuidance?.length) {
+        lines.push(`\n📌 PENDING GUIDANCE from the human — read and act on this before continuing:`)
+        for (const g of pendingGuidance) lines.push(`  • ${g.body}`)
+        if (!args.peek) {
+          await sb.from('task_guidance').update({ consumed_at: new Date().toISOString() }).in('id', pendingGuidance.map((g: any) => g.id))
+          lines.push(`  (marked as seen — it won't surface again)`)
+        }
+      }
       // Seeds: make it loud — this is a placeholder to RESOLVE, not work to do.
       const steps: any[] = disc?.steps ?? []
       const checked: boolean[] = disc?.checked_steps ?? []
@@ -3668,6 +3693,62 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         lines.push(`\n▸ Session${s.actor ? ` by ${s.actor}` : ''} · ${state} · opened ${s.opened_at}`)
         for (const a of (acts || [])) lines.push(`  [${a.type}] ${a.body}`)
       }
+      return lines.join('\n')
+    }
+
+    case 'get_my_attention': {
+      let projectFilter: string | null = null
+      if (args.project_id) {
+        const p = await resolveProject(sb, userId, args.project_id)
+        if (!p) return `Project "${args.project_id}" not found.`
+        projectFilter = p.id
+      }
+      let tq = sb.from('tasks')
+        .select('id, text, short_id, status, priority, due_date, review_verdict, project_id, project:projects(prefix)')
+        .eq('user_id', userId).neq('status', 'done')
+      if (projectFilter) tq = tq.eq('project_id', projectFilter)
+      const { data: tasksData } = await tq
+      const taskList = tasksData || []
+      const byId = new Map<string, any>(taskList.map((t: any) => [t.id, t]))
+      const taskIds = taskList.map((t: any) => t.id)
+      const ref = (t: any) => t?.project?.prefix && t?.short_id != null ? `${t.project.prefix}-${t.short_id}` : (t?.id?.slice(0, 8) ?? '?')
+
+      // Unconsumed human guidance
+      let guidance: any[] = []
+      if (taskIds.length) {
+        const { data } = await sb.from('task_guidance').select('task_id, body').eq('user_id', userId).is('consumed_at', null).in('task_id', taskIds).order('created_at', { ascending: true })
+        guidance = data || []
+      }
+      // Open sessions → awaiting_input + stale (from the TDE-374 ledger)
+      const awaitingInput = new Set<string>()
+      const stale = new Set<string>()
+      if (taskIds.length) {
+        const { data: sessions } = await sb.from('agent_sessions').select('id, task_id, last_activity_at').is('closed_at', null).in('task_id', taskIds)
+        const openSessions = sessions || []
+        if (openSessions.length) {
+          const { data: acts } = await sb.from('agent_activities').select('session_id, type, created_at').in('session_id', openSessions.map((s: any) => s.id)).order('created_at', { ascending: true })
+          const lastType = new Map<string, string>(), lastAt = new Map<string, string>()
+          for (const a of ((acts ?? []) as any[])) { lastType.set(a.session_id, a.type); lastAt.set(a.session_id, a.created_at) }
+          const STALE_MS = 2 * 24 * 60 * 60 * 1000
+          for (const s of openSessions) {
+            if (lastType.get(s.id) === 'question') { awaitingInput.add(s.task_id); continue }
+            const at = lastAt.get(s.id) || s.last_activity_at
+            if (at && Date.now() - new Date(at).getTime() > STALE_MS && byId.get(s.task_id)?.status === 'in_progress') stale.add(s.task_id)
+          }
+        }
+      }
+      const needsReview = taskList.filter((t: any) => t.review_verdict?.escalated)
+      const today = new Date().toISOString().slice(0, 10)
+      const overdue = taskList.filter((t: any) => t.due_date && t.due_date < today)
+
+      const lines: string[] = ['# What needs you']
+      const section = (title: string, items: string[]) => { if (items.length) { lines.push(`\n${title} (${items.length}):`); items.forEach(i => lines.push(`  ${i}`)) } }
+      section('◆ AWAITING YOUR REVIEW — judge escalated', needsReview.map((t: any) => `${ref(t)} — ${t.text}`))
+      section('✎ PENDING GUIDANCE — a human left a steering note', guidance.map((g: any) => `${ref(byId.get(g.task_id))} — "${g.body}"`))
+      section('⏳ AWAITING INPUT — an agent asked a question and is blocked', [...awaitingInput].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
+      section('⋯ STALE IN-PROGRESS — quiet for 2+ days', [...stale].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
+      section('⚠ OVERDUE', overdue.map((t: any) => `${ref(t)} — ${t.text} (due ${t.due_date})`))
+      if (lines.length === 1) return 'Nothing needs your attention right now — no escalated reviews, pending guidance, blocked agents, stale work, or overdue tasks.'
       return lines.join('\n')
     }
 

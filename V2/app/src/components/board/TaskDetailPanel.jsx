@@ -10,6 +10,7 @@ import { updateTaskFields } from '../../hooks/useTasks'
 import FlowBlockedDialog from './DependencyWarningDialog'
 import ReviewVerdictPanel from './ReviewVerdictPanel'
 import AgentActivityPanel from './AgentActivityPanel'
+import TaskGuidance from './TaskGuidance'
 import CustomStatusField from './CustomStatusField'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
 import { chatAboutTask, generateFocusSteps, synthesizeTaskToContext } from '../../lib/gemini'
@@ -664,6 +665,11 @@ export default function TaskDetailPanel({ taskId, onClose, onFocus, onMilestoneC
           </Field>
 
           <DriveAttachments task={task} />
+
+          {/* ── Guidance for the agent (TDE-383): steering note picked up on next get_task ── */}
+          <Field label="Guidance for the agent">
+            <TaskGuidance taskId={task.id} />
+          </Field>
 
           {/* ── Agent activity (TDE-374/375): durable, immutable record of what agents did ── */}
           <Field label="Agent activity">
