@@ -1,0 +1,82 @@
+{
+  "version": 1,
+  "name": "Tasker Development",
+  "prefix": "TDE",
+  "next_short_id": 414,
+  "sections": [
+    {
+      "id": "core-app",
+      "name": "Core App",
+      "order": 0
+    },
+    {
+      "id": "flows",
+      "name": "Flows",
+      "order": 1
+    },
+    {
+      "id": "mcp-integrations",
+      "name": "MCP & Integrations",
+      "order": 2
+    },
+    {
+      "id": "bugs",
+      "name": "Bugs",
+      "order": 3
+    },
+    {
+      "id": "qol",
+      "name": "QoL",
+      "order": 7
+    },
+    {
+      "id": "backlog",
+      "name": "Backlog",
+      "order": 8
+    },
+    {
+      "id": "flows-optimization",
+      "name": "Flows Optimization",
+      "order": 14
+    },
+    {
+      "id": "security",
+      "name": "Security",
+      "order": 15
+    },
+    {
+      "id": "3rd-party-integrations",
+      "name": "3rd Party Integrations",
+      "order": 18
+    },
+    {
+      "id": "research-planning",
+      "name": "Research & Planning",
+      "order": 19
+    },
+    {
+      "id": "confirmation-test",
+      "name": "Confirmation Test",
+      "order": 20
+    },
+    {
+      "id": "agent-native-layer",
+      "name": "Agent-Native Layer",
+      "order": 21
+    },
+    {
+      "id": "unfiled",
+      "name": "Unfiled",
+      "order": 9990
+    }
+  ],
+  "groups": [
+    {
+      "id": "google-integrations",
+      "name": "Google Integrations",
+      "section": "mcp-integrations",
+      "order": 1
+    }
+  ],
+  "flows": {}
+}

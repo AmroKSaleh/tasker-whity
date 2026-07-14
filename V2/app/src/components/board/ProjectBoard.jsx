@@ -16,6 +16,7 @@ import { useIsDesktop } from './hooks/useMediaQuery'
 import { useTaskPanelState } from './hooks/useTaskPanelState'
 import { useHorizontalWheelScroll } from './hooks/useHorizontalWheelScroll'
 import { updateProject } from '../../hooks/useProjects'
+import { useEnvironmentStore } from '../../store/useEnvironmentStore'
 import { useGoogleCalendar } from '../../hooks/useGoogleCalendar'
 import { useGitHub } from '../../hooks/useGitHub'
 import AppShell from '../editorial/AppShell'
@@ -639,6 +640,12 @@ export default function ProjectBoard({ project }) {
                   <span className="text-mute-2">›</span>
                   <Kicker className="text-ink">{project.prefix}</Kicker>
                   <span className="font-mono text-[9.5px] tracking-[0.12em] text-mute-2 uppercase ml-1.5">· {dateline}</span>
+                  {project.local_mode && (
+                    <span
+                      title="Local Mode — this project mirrors to .tasker/ files on your devices; agents work the files and sync back"
+                      className="font-mono text-[9px] tracking-[0.12em] uppercase text-accent border border-accent/40 rounded px-1.5 py-0.5 ml-1.5"
+                    >⇄ Local Mode</span>
+                  )}
                   <span className="flex-1" />
                   {ghConnected && project.github_repo && (
                     <button onClick={handleSyncIssues} disabled={ghSyncing} className="font-mono text-[9.5px] text-mute tracking-[0.1em] inline-flex items-center gap-1.5 mr-2">
@@ -659,6 +666,15 @@ export default function ProjectBoard({ project }) {
                   <button onClick={() => setShowIS(true)} title="Instruction Set — per-project rules that shape AI behavior" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">IS</button>
                   <button onClick={() => setShowFiles(true)} title="Files — documents & files stored in this project's Google Drive folder" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">Files</button>
                   <button onClick={() => setShowQueue(true)} title="Agent queue — tasks handed to the agent, and those the agent prepared and is awaiting your confirmation on" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">Queue</button>
+                  {!useEnvironmentStore.getState().environments.find(e => e.id === project.environment_id)?.org_id && (
+                    <button
+                      onClick={() => updateProject(project.id, { local_mode: !project.local_mode })}
+                      title={project.local_mode
+                        ? 'Local Mode is ON — agents mirror this project to .tasker/ files and sync back. Click to turn off.'
+                        : 'Turn on Local Mode — mirror this project to .tasker/ files on your devices (agents pull, work files directly, and sync back). Owner-only.'}
+                      className={`btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase ${project.local_mode ? 'text-accent' : 'text-mute hover:text-ink'}`}
+                    >⇄ Local</button>
+                  )}
                 </div>
 
                 <div className="flex items-end justify-between gap-10 pt-5 pb-4">

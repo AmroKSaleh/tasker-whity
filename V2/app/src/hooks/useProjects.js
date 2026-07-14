@@ -13,7 +13,7 @@ export function derivePrefix(name) {
   return (result + 'XXX').slice(0, 3)
 }
 
-export async function createProject(displayName, customPrefix) {
+export async function createProject(displayName, customPrefix, opts = {}) {
   const { addProject } = useProjectStore.getState()
   const slug = displayName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'project'
   const prefix = customPrefix ? customPrefix.toUpperCase().slice(0, 3) : derivePrefix(displayName)
@@ -26,6 +26,7 @@ export async function createProject(displayName, customPrefix) {
     user_id: user.id,
     prefix,
     environment_id,
+    local_mode: !!opts.localMode,
   }).select().single()
   if (proj) {
     addProject(proj)

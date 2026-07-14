@@ -253,6 +253,7 @@ export default function NewProjectModal({ onClose, onCreated }) {
   const [mode, setMode] = useState('manual')
   const [name, setName] = useState('')
   const [prefix, setPrefix] = useState('')
+  const [localMode, setLocalMode] = useState(false)
   const [description, setDescription] = useState('')
   // step: 'input' | 'discussing' | 'summarizing' | 'summary' | 'loading' | 'preview' | 'creating'
   const [step, setStep] = useState('input')
@@ -311,7 +312,7 @@ export default function NewProjectModal({ onClose, onCreated }) {
     setStep('creating')
     setError(null)
     try {
-      const proj = await createProject(trimmed, prefix || derivePrefix(trimmed))
+      const proj = await createProject(trimmed, prefix || derivePrefix(trimmed), { localMode })
       onCreated(proj)
     } catch {
       setError('Failed to create project. Try again.')
@@ -642,6 +643,20 @@ export default function NewProjectModal({ onClose, onCreated }) {
               />
               <span className="text-[11px] text-mute-2">Tasks will be numbered {prefix || (name ? derivePrefix(name) : 'ABC')}-1, {prefix || (name ? derivePrefix(name) : 'ABC')}-2…</span>
             </div>
+            <label className="flex items-start gap-2.5 rounded-lg border border-line bg-surf-2 px-3 py-2.5 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={localMode}
+                onChange={e => setLocalMode(e.target.checked)}
+                className="mt-0.5 accent-current"
+              />
+              <span className="flex flex-col gap-0.5">
+                <span className="text-[12px] font-medium text-ink">⇄ Local Mode</span>
+                <span className="text-[11px] text-mute leading-relaxed">
+                  Mirror this project to .tasker/ files on your devices — agents work the files directly and sync back. You can also toggle this later from the project page.
+                </span>
+              </span>
+            </label>
             {error && <p className="text-[11px] text-red-500">{error}</p>}
             <div className="flex gap-2 justify-end">
               <button type="button" onClick={onClose}
