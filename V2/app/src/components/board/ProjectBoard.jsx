@@ -147,6 +147,11 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
               ? <span className="inline-flex items-center gap-0.5 rounded bg-priority-done/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-priority-done" title="Confirmed — the agent will execute this">✓ go</span>
               : <span className="inline-flex items-center gap-0.5 rounded bg-review/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-review" title="Agent prepared work — awaiting your confirmation">◇ confirm</span>)
           : task.agent_ready && <span className="inline-flex items-center gap-0.5 rounded bg-accent/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-accent" title="Handed to agent — in the ready-work queue">▶ agent</span>}
+        {done && task.review_bar?.rules?.length > 0 && (
+          task.review_verdict?.overall === 'pass'
+            ? <span className="inline-flex items-center gap-0.5 rounded bg-priority-done/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-priority-done" title="Completion backed by passing check evidence (verified)">✓ verified</span>
+            : <span className="inline-flex items-center gap-0.5 rounded bg-amber-500/10 px-1 py-px text-[9px] font-bold uppercase tracking-[0.06em] text-amber-600" title="Done, but no passing verification evidence on file">unverified</span>
+        )}
         <span className="flex-1" />
         {!done && (
           <button

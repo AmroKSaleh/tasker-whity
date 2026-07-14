@@ -9,7 +9,9 @@ const cors = {
   'Access-Control-Allow-Headers': 'authorization, content-type',
 }
 
-const RESOURCE_METADATA_URL = 'https://smarttasksxdd.netlify.app/.well-known/oauth-authorization-server'
+// RFC 9728: the WWW-Authenticate `resource_metadata` param must point at the PROTECTED-RESOURCE
+// metadata document (which references the authorization server), NOT the RFC 8414 auth-server doc.
+const RESOURCE_METADATA_URL = 'https://smarttasksxdd.netlify.app/.well-known/oauth-protected-resource'
 
 // ── Scoring (mirrors scoring.js) ─────────────────────────────
 const PRIORITY_SCORES: Record<string, number> = { rush: 100, high: 60, medium: 30, low: 10 }
@@ -86,6 +88,39 @@ async function resolveActor(sb: any, raw: string): Promise<string | null> {
     }
   } catch (_) { /* provenance is best-effort — swallow and fall through */ }
   return null
+}
+
+// TDE-377 (Path B): enqueue an outbound-webhook delivery for every active endpoint the user has
+// that subscribes to this event and matches the project (project_id null = all projects). Payload
+// follows Linear's proven shape {action,type,actor,data,updatedFrom,webhookTimestamp}. Best-effort
+// + fire-and-forget: it must NEVER slow or fail a mutation. The pg_cron drain (webhook-dispatch fn)
+// does the HMAC signing + POST + retry ladder — nothing is sent from inside the write handler.
+async function emitWebhook(
+  sb: any,
+  userId: string,
+  ev: { projectId: string | null; event: string; action: 'create' | 'update' | 'remove'; type: string; data: any; updatedFrom?: any; actor?: string | null },
+): Promise<void> {
+  try {
+    const { data: hooks } = await sb.from('webhooks')
+      .select('id, project_id, events')
+      .eq('user_id', userId).eq('active', true)
+    if (!hooks?.length) return
+    const matching = hooks.filter((h: any) =>
+      (h.project_id === null || h.project_id === ev.projectId) &&
+      Array.isArray(h.events) && h.events.includes(ev.event))
+    if (!matching.length) return
+    const payload = {
+      event: ev.event,
+      action: ev.action,
+      type: ev.type,
+      actor: ev.actor ?? 'user',
+      data: ev.data,
+      updatedFrom: ev.updatedFrom ?? null,
+      webhookTimestamp: Date.now(),
+    }
+    const rows = matching.map((h: any) => ({ webhook_id: h.id, user_id: userId, event: ev.event, payload }))
+    await sb.from('webhook_deliveries').insert(rows)
+  } catch (_) { /* outbound notification is best-effort — never affect the mutation */ }
 }
 
 // ── JSON-RPC helpers ─────────────────────────────────────────
@@ -308,6 +343,38 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
   return data ?? null
 }
 
+// ── Duplicate defense (TDE-379) — lexical similarity, NO server-side AI ───────
+// Bigram Dice coefficient on normalized titles: 1.0 identical, ~0 unrelated. Cheap + deterministic;
+// the AI agent (already in the loop) decides what to do with the candidates the server surfaces.
+function normTitle(s: string): string {
+  return (s || '').toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim()
+}
+function titleBigrams(s: string): string[] {
+  const out: string[] = []
+  for (let i = 0; i < s.length - 1; i++) out.push(s.slice(i, i + 2))
+  return out
+}
+function diceSimilarity(a: string, b: string): number {
+  const na = normTitle(a), nb = normTitle(b)
+  if (!na || !nb) return 0
+  if (na === nb) return 1
+  const ba = titleBigrams(na), bb = titleBigrams(nb)
+  if (!ba.length || !bb.length) return 0
+  const counts: Record<string, number> = {}
+  for (const g of ba) counts[g] = (counts[g] || 0) + 1
+  let matched = 0
+  for (const g of bb) if (counts[g] > 0) { matched++; counts[g]-- }
+  return (2 * matched) / (ba.length + bb.length)
+}
+// Existing tasks in the project ranked by title similarity to `text`, above `floor`.
+async function findSimilarTasks(sb: any, projectId: string, text: string, floor = 0.5): Promise<any[]> {
+  const { data } = await sb.from('tasks').select('id, text, short_id, status, duplicate_of').eq('project_id', projectId)
+  return ((data ?? []) as any[])
+    .map((t: any) => ({ ...t, sim: diceSimilarity(text, t.text) }))
+    .filter((t: any) => t.sim >= floor && !t.duplicate_of)
+    .sort((a: any, b: any) => b.sim - a.sim)
+}
+
 // ── Flow I/O helpers (contract layer — TDE-137) ───────────────
 // A flow is a connected component of the project-wide I/O graph. Edges are
 // authoritative on the INPUT side. The `input` field is read through here so
@@ -490,6 +557,8 @@ async function deriveProjectPrefix(sb: any, userId: string, name: string): Promi
 // never calls __init_tasker_session. The detailed playbook stays in ASSISTANT_DIRECTIVES.
 const TASKER_SERVER_INSTRUCTIONS = `Tasker is a task manager that lives inside your AI workflow. Hierarchy: Project → Section → Group → Task → Milestone. Tasks can be linked by I/O edges (one task's output is another's input) into FLOWS — multi-step processes with quality gates (contracts) between steps.
 
+YOUR NATIVE TASK LIST vs TASKER — ROUTE DURABLE WORK HERE, BY DEFAULT: whenever you are about to record a piece of work, first ask "is this DURABLE?" — does a human want it persisted, shared, reviewed, or quality-gated, or does it outlive this one session? If YES, it belongs in Tasker (create_task) — NOT in your platform's native to-do list. Reach for Tasker by default for real work; do not leave durable items sitting in a native list where they vanish when the session ends. Durable → Tasker: a bug you found while doing something else, a follow-up the human will care about later, work someone assigned you, a decision that needs tracking. Transient → keep native: "read file X", "run the test", "fix the import on line 40" — the private, per-step scratchpad for executing the item in front of you. Your native list stays your execution tool; do NOT mirror those transient sub-steps into Tasker (that just floods the spine with noise). So: pull durable work from get_ready_work, use your native plan to EXECUTE one item, and write the outcome back (complete_task, reviews, stored artifacts). Tasker is the durable spine across sessions, agents, and people; your native list is how you do one item on it.
+
 FIRST MOVE: at the start of a Tasker session call __init_tasker_session. It returns the user's behavioral preferences plus the full directive playbook (task lifecycle, running flows, validation, dependency rules). Read and follow those directives.
 
 Rules that always apply, even before you call anything else:
@@ -504,7 +573,11 @@ Rules that always apply, even before you call anything else:
 // using Tasker gets a consistent baseline.
 const ASSISTANT_DIRECTIVES = [
   'ATTENTION FIRST (TDE-383): right after __init_tasker_session, call get_my_attention — one cross-task pull of what needs the human/you: tasks awaiting the human\'s review, pending GUIDANCE a human left on tasks (picked up even across sessions), agent sessions AWAITING INPUT (blocked on a question), STALE in-progress work, and OVERDUE items. It is your "what needs me?" triage before picking up anything new. Then act on the highest-priority item.',
+  'DURABLE WORK BELONGS IN TASKER (use Tasker by default, not your native list): whenever you are about to record a piece of work, ask "is this DURABLE?" — does a human want it persisted, shared, reviewed, or quality-gated, or does it outlive this session? If YES → create it in Tasker (create_task), do NOT leave it in your platform\'s native to-do list where it vanishes at session end. Durable → Tasker: a bug found while doing something else, a follow-up the human will care about later, work someone assigned you, a decision that needs tracking. Transient → keep native: "read file X", "run the test", "fix the import on line 40" — the private per-step scratchpad for executing the item in front of you; do NOT mirror those into Tasker (it floods the spine with noise). Tasker is the durable spine; your native list is how you execute one item on it. (This is a strong default, not a lock — the MCP cannot disable your host\'s native to-do tool; the choice is yours to make correctly.)',
+  'AUTONOMOUS WORK LOOP: When the user says "start looping" (or any clearly similar phrase — "start the loop", "clock in the worker", "run autonomously", "work my queue"), work Tasker\'s ready queue hands-off. Each pass: call get_ready_work, then (A) EXECUTE every CONFIRMED proposal EXACTLY as its agent_proposal text says (the human may have edited it — the proposal IS your instruction; no new scope) — verify it works, write a KB entry for anything non-obvious, then clear it via update_task(id, agent_proposal:"") and complete_task only if genuinely done; (B) fully PREPARE the top handed-over (agent_ready) task — investigate and resolve every decision so a confirmed run is pure mechanical application — record it via update_task(id, agent_proposal:"<complete plan>"), then STOP it for the human\'s ASYNC web confirmation. NEVER execute a prepared task until it returns CONFIRMED — the human\'s web confirm (and their edits) is the gate. Unattended rules: do NOT call AskUserQuestion or wait for a chat reply (instead skip the task, append a note stating the open question, and continue), stay quiet on an empty queue, skip-and-flag blockers, NEVER guess on destructive/irreversible actions, and honor stop_flow. CONTINUOUS looping needs a client-side scheduler — on Claude Code run `/loop 2m /work-loop` (or a shorter interval); on a client without a scheduler, run one on-demand pass per request. This runs on the user\'s OWN session at $0 marginal cost (their subscription, not the API) and ONLY while that session stays open; the parked cloud receiver (TDE-398) is the PC-closed alternative that costs API $ per task.',
   'When you begin working on a task, the FIRST thing to do is set its status to in_progress. Calling get_task does this automatically; if you start work without calling get_task, set it explicitly via update_task before doing anything else. When the work is genuinely and verifiably complete, mark it done with complete_task; otherwise leave it in_progress.',
+  'VERIFY BEFORE COMPLETE (TDE-344): when a task\'s deliverable is a CHECKABLE artifact (a file, a live page, a pushed commit, a passing test/build/lint, a word count, an API response) and you are the executing agent, attach a deterministic verification as the task\'s gate and PROVE it before completing. (1) When you PREPARE / hand over a task (set agent_proposal), include the check in the plan so the human confirms the work AND its proof together, and freeze it: enable_task_review(task_id, bar:{rules:[{label, kind:"check", rule:"<how to check — e.g. fetch URL X and confirm text Y is present / run the test suite, expect exit 0>", severity:"blocker"}]}). (2) On EXECUTION: actually RUN the check, capture the raw observed_value (the fetched text, the exit code, the file path — never assert), and submit_task_review with it BEFORE complete_task. Completion is NEVER blocked, but a task completed without passing check evidence is durably marked DONE (UNVERIFIED). Prefer deterministic kind=check over human-judgment gates. Skip the gate only for tasks with no checkable artifact (pure discussion/decision).',
+  'DEDUPE BEFORE CREATE (TDE-379): assume another session may already have made this task. create_task auto-checks similarity — it REFUSES a near-identical OPEN task (returning the matches) unless you pass allow_duplicate:true, and lists softer matches as a heads-up. When matches appear, prefer working the existing task or merge_task_as_duplicate(duplicate_task_id, canonical_task_id) to CONVERGE — do NOT reflexively set allow_duplicate; override only when the task is genuinely distinct. This keeps the shared backlog from forking into parallel copies across sessions/agents.',
   'When a request is ambiguous, default to the most obvious interpretation and proceed, briefly stating the assumption you made. Do NOT ask a clarifying question for read-only / list / display / search requests — bias toward action over questions.',
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'NEVER be sycophantic. When you have a different or better view on a design, plan, scope, or contract, push back and argue it — challenge vague, contradictory, unrealistic, or over-scoped input. Pushback exists to improve the input and the result, not disagreement for its own sake; when the user is right, say so plainly and proceed. Applies everywhere: bootstrap_project, build_new_flow, reviews, planning.',
@@ -708,7 +781,7 @@ const TOOLS = [
   },
   {
     name: 'list_sections',
-    description: 'List all sections in a project.',
+    description: 'List all sections in a project, each with its task counts (open / total).',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
@@ -786,8 +859,21 @@ const TOOLS = [
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent (default) = AI runs it; user = human executes, AI coaches; external = third party (web admin, client, etc.). A single flow can mix executor types.' },
         human_guidance: { type: 'string', description: 'For user/external steps only: the human-facing step instructions shown in guide mode. Distinct from detail (which is AI-facing context). Write as a clear action directive: what the person must do, where, and how to verify it worked.' },
         relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set this only when the user wants to relay/hand off this task to someone else. A CURATED rationale layer that lets the assignee act without coming back to ask — NOT a transcript dump. Distill from your discussion: who it is going to (free text, e.g. "to: Sara (backend)"), the key decision(s) and WHY, approaches considered and rejected and why-not, intent / how to treat it, open questions, and watch-outs. Setting this marks the task as a relay. Leave unset for normal tasks.' },
+        allow_duplicate: { type: 'boolean', description: 'TDE-379 duplicate defense: creation is REFUSED if a near-identical open task already exists (the response lists the matches). Pass true to override and create anyway when it is genuinely distinct. Leave unset normally — if you see the guard, prefer working the existing task or merge_task_as_duplicate.' },
       },
       required: ['project_id', 'text'],
+    },
+  },
+  {
+    name: 'merge_task_as_duplicate',
+    description: 'TDE-379: fold a duplicate task into a canonical one so agents/sessions converge on ONE task instead of spawning copies. Transfers the duplicate\'s incomplete milestones and appends its detail to the canonical task, then closes the duplicate with a DISTINCT outcome (duplicate_of → canonical, not a plain "done"). Use it when create_task\'s duplicate guard surfaces a match, or to clean up existing dups.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        duplicate_task_id: { type: 'string', description: 'The task to fold away (UUID or short ID). It gets closed as MERGED.' },
+        canonical_task_id: { type: 'string', description: 'The task to keep (UUID or short ID). It receives the duplicate\'s milestones + context.' },
+      },
+      required: ['duplicate_task_id', 'canonical_task_id'],
     },
   },
   {
@@ -2709,9 +2795,23 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'list_sections': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
-      const { data } = await sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order')
+      const [{ data }, { data: tasks }] = await Promise.all([
+        sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order'),
+        sb.from('tasks').select('section_id, status').eq('project_id', project.id),
+      ])
       if (!data?.length) return `No sections in "${project.name}".`
-      return data.map((s: any) => `[id: ${s.id}] ${s.name}`).join('\n')
+      // Per-section task tallies (default behaviour): open = not done, matching the app's hide-done convention.
+      const counts: Record<string, { open: number; total: number }> = {}
+      for (const t of ((tasks ?? []) as any[])) {
+        if (!t.section_id) continue
+        const c = counts[t.section_id] ?? (counts[t.section_id] = { open: 0, total: 0 })
+        c.total++
+        if (t.status !== 'done') c.open++
+      }
+      return data.map((s: any) => {
+        const c = counts[s.id] ?? { open: 0, total: 0 }
+        return `[id: ${s.id}] ${s.name} — ${c.open} open / ${c.total} total`
+      }).join('\n')
     }
 
     case 'create_section': {
@@ -2795,6 +2895,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!project) return `Project "${project_id}" not found.`
       const isSeed = kind === 'seed'
       if (isSeed && !['task', 'flow'].includes(seed_target)) return 'A seed requires seed_target: "task" or "flow".'
+
+      // TDE-379 duplicate defense (soft-gate): refuse to create a NEAR-IDENTICAL open task unless
+      // allow_duplicate. High threshold (near-dup only) so bulk paths (bootstrap/flows) don't trip;
+      // a false positive is non-fatal (retry with allow_duplicate). Convergence is enforced via
+      // merge_task_as_duplicate, not here — detection is advisory to the (AI) caller.
+      let dupAdvisory = ''
+      if (!isSeed) {
+        const similar = await findSimilarTasks(sb, project.id, text, 0.55)
+        const blocker = similar.find((t: any) => t.sim >= 0.82 && t.status !== 'done')
+        const fmt = (t: any) => `  • ${project.prefix}-${t.short_id} [${t.status}] "${t.text}" (${Math.round(t.sim * 100)}% match)`
+        if (blocker && !args.allow_duplicate) {
+          return `⧉ DUPLICATE GUARD — "${text}" is near-identical to an existing OPEN task:\n${similar.slice(0, 5).map(fmt).join('\n')}\n\nConverge, don't fork: work the existing task, or merge_task_as_duplicate(duplicate_task_id, canonical_task_id) to fold copies into one. If this really is distinct, pass allow_duplicate: true to create it anyway.`
+        }
+        if (similar.length) {
+          dupAdvisory = `\n\n⧉ Similar existing task(s) — merge_task_as_duplicate if this turns out to be a dup:\n${similar.slice(0, 3).map(fmt).join('\n')}`
+        }
+      }
+
       const resolvedSectionId = section_id ?? await getOrCreateBacklog(sb, project.id)
       const siblingQuery = sb.from('tasks').select('sort_order').eq('project_id', project.id).eq('section_id', resolvedSectionId)
       const { data: lastSibling } = await siblingQuery.order('sort_order', { ascending: false }).limit(1).maybeSingle()
@@ -2844,7 +2962,43 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         await sb.rpc('append_milestone', { p_task_id: data.id, p_user_id: userId, p_text: m })
       }
       const relayNote = data.relay_context ? `\n[Recording context for the task] — relay context captured; the assignee will see it on get_task.` : ''
-      return `Created task "${text}"\nid: ${data.id}${relayNote}`
+      return `Created task "${text}"\nid: ${data.id}${relayNote}${dupAdvisory}`
+    }
+
+    case 'merge_task_as_duplicate': {
+      const dup = await resolveTask(sb, userId, args.duplicate_task_id)
+      if (!dup) return `Duplicate task "${args.duplicate_task_id}" not found.`
+      const canon = await resolveTask(sb, userId, args.canonical_task_id)
+      if (!canon) return `Canonical task "${args.canonical_task_id}" not found.`
+      if (dup.id === canon.id) return `A task cannot be a duplicate of itself.`
+      if (isFlowTask(dup) || isFlowTask(canon)) return `Merge is for standalone tasks — flow tasks are governed by their flow.`
+
+      // Transfer INCOMPLETE milestones dup → canonical.
+      const { data: dd } = await sb.from('task_discussions').select('steps, checked_steps').eq('task_id', dup.id).maybeSingle()
+      const steps: any[] = dd?.steps ?? []
+      const checked: boolean[] = dd?.checked_steps ?? []
+      let moved = 0
+      for (let i = 0; i < steps.length; i++) {
+        if (checked[i]) continue
+        const label = typeof steps[i] === 'string' ? steps[i] : steps[i]?.summary
+        if (!label) continue
+        await sb.rpc('append_milestone', { p_task_id: canon.id, p_user_id: userId, p_text: label })
+        moved++
+      }
+
+      // Preserve the dup's context on the canonical task (append as a merge note).
+      const dupDetail = (dup.detail ?? '').trim()
+      if (dupDetail) {
+        const { data: cur } = await sb.from('tasks').select('detail').eq('id', canon.id).maybeSingle()
+        const existing = (cur?.detail ?? '').trim()
+        const note = `[Merged from ${dup.short_id ? '#' + dup.short_id : dup.id}] ${dup.text}:\n${dupDetail}`
+        await sb.from('tasks').update({ detail: existing ? `${existing}\n\n${note}` : note }).eq('id', canon.id)
+      }
+
+      // Close the dup with a DISTINCT outcome — duplicate_of set = MERGED, not a plain "done".
+      await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString(), duplicate_of: canon.id }).eq('id', dup.id)
+
+      return `⧉ Merged "${dup.text}" into "${canon.text}" — ${moved} open milestone(s) transferred${dupDetail ? ', context appended' : ''}. The duplicate is closed as MERGED (duplicate_of → canonical), not plain done.`
     }
 
     case 'resolve_seed': {
@@ -2951,6 +3105,16 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
 
       await sb.from('tasks').update(patch).eq('id', task.id)
+
+      // TDE-377: fire an outbound task.updated event (fire-and-forget; never blocks the write).
+      const changedFrom: Record<string, any> = {}
+      for (const k of Object.keys(patch)) if (k in task) changedFrom[k] = (task as any)[k]
+      fireAndForget(emitWebhook(sb, userId, {
+        projectId: (task as any).project_id ?? null,
+        event: 'task.updated', action: 'update', type: 'Task', actor: tokenActor,
+        data: { id: task.id, short_id: (task as any).short_id, text: task.text, project_id: (task as any).project_id, section_id: patch.section_id ?? (task as any).section_id, status: patch.status ?? task.status, ...patch },
+        updatedFrom: changedFrom,
+      }))
       return `Updated "${task.text}".${appended ? ' (appended to detail)' : ''}`
     }
 
@@ -2980,16 +3144,32 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
 
       await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString() }).eq('id', task.id)
+      // TDE-377: outbound task.completed event (fire-and-forget).
+      fireAndForget(emitWebhook(sb, userId, {
+        projectId: (task as any).project_id ?? null,
+        event: 'task.completed', action: 'update', type: 'Task', actor: tokenActor,
+        data: { id: task.id, short_id: (task as any).short_id, text: task.text, project_id: (task as any).project_id, section_id: (task as any).section_id, status: 'done' },
+        updatedFrom: { status: task.status },
+      }))
       // Fire-and-forget: move Drive attachments to Completed/ subfolder.
       if (task.output?.drive_files?.length) {
         loadGoogleAccessToken(sb, userId).then(t => { if (t) moveDriveFilesToFolder(sb, t, task, userId, 'Completed') }).catch(() => {})
       }
-      // TDE-261 trigger: a review-enabled non-flow task gets judged on completion.
-      let reviewNudge = ''
-      if (task.review_enabled && !isFlowTask(task) && task.review_bar?.rules?.length) {
-        reviewNudge = `\n\n⟳ Task-level review is ON for this task. Run review_task("${args.task_id}") to judge the output against the frozen bar (${task.review_bar.rules.length} rule(s)). store_artifact first if you have not.`
+      // TDE-344 verify-before-complete: surface whether this completion carries passing check
+      // evidence. Reuses the TDE-261 task-review machinery — a frozen review_bar IS the gate,
+      // review_verdict IS the evidence. No hard-block (skippable by design): we make verified-ness
+      // VISIBLE + durable, not mandatory. A task marked done without passing evidence is UNVERIFIED.
+      const hasGate = !isFlowTask(task) && task.review_bar?.rules?.length > 0
+      const verified = task.review_verdict?.overall === 'pass'
+      let tail = ''
+      if (hasGate && verified) {
+        tail = `\n\n✓ VERIFIED — backed by passing check evidence (${task.review_bar.rules.length} rule(s)).`
+      } else if (hasGate && !verified) {
+        tail = `\n\n⚠ DONE (UNVERIFIED) — a verification check is attached but has no passing evidence. Run the check and submit_task_review with the raw observed_value to verify it. (Not blocked — but it stays marked unverified.)`
+      } else if (task.review_enabled && !isFlowTask(task)) {
+        tail = `\n\n⟳ Review is enabled but no bar is frozen — call enable_task_review to attach a check.`
       }
-      return `✓ Marked "${task.text}" as done.` + reviewNudge
+      return `✓ Marked "${task.text}" as done.` + tail
     }
 
     case 'uncomplete_task': {
@@ -5788,6 +5968,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (overall === 'fail') update.status = 'in_progress'   // reopen the producer
       const { error } = await sb.from('tasks').update(update).eq('id', task.id)
       if (error) throw new Error(error.message)
+      // TDE-377: outbound review.submitted event (fire-and-forget) — the "task entered/cleared the gate" trigger.
+      fireAndForget(emitWebhook(sb, userId, {
+        projectId: (task as any).project_id ?? null,
+        event: 'review.submitted', action: 'create', type: 'Review', actor: tokenActor,
+        data: { task_id: task.id, short_id: (task as any).short_id, text: task.text, project_id: (task as any).project_id, verdict: overall, attempt, escalated: escalate, rules_graded: results.length },
+      }))
       if (overall === 'pass') return `✓ REVIEW PASSED — "${task.text}". ${results.length} rule(s) graded, all blockers satisfied. (action=pass)`
       if (escalate) return `⛔ REVIEW FAILED (attempt ${attempt}/3) — retry limit reached. ESCALATE TO HUMAN (action=ask_human).\nCritique:\n${critique}`
       return `↩ REVIEW FAILED (attempt ${attempt}/3) — task reopened (action=regenerate). Apply this critique and re-run:\n${critique}`
@@ -6844,14 +7030,20 @@ Deno.serve(async (req: Request) => {
 
   // Allow discovery methods without auth so clients can verify the server is alive
   if (method === 'initialize') {
+    // Version negotiation (MCP spec): echo the client's requested revision if we support it,
+    // otherwise return our latest. Newest-first; SUPPORTED[0] is the fallback.
+    const SUPPORTED_PROTOCOL_VERSIONS = ['2025-06-18', '2025-03-26', '2024-11-05']
+    const requested = params?.protocolVersion
+    const protocolVersion = SUPPORTED_PROTOCOL_VERSIONS.includes(requested) ? requested : SUPPORTED_PROTOCOL_VERSIONS[0]
     return rpcOk({
-      protocolVersion: '2024-11-05',
+      protocolVersion,
       capabilities: { tools: {} },
       serverInfo: { name: 'tasker', version: '1.0.0' },
       instructions: TASKER_SERVER_INSTRUCTIONS,
     }, id)
   }
-  if (method === 'notifications/initialized') {
+  // Notifications (any notifications/* method) carry no id and MUST NOT receive a response body.
+  if (typeof method === 'string' && method.startsWith('notifications/')) {
     return new Response(null, { status: 204, headers: cors })
   }
   if (method === 'tools/list') {
@@ -6864,7 +7056,7 @@ Deno.serve(async (req: Request) => {
   // All other methods require auth
   const authHeader = req.headers.get('authorization') ?? req.headers.get('Authorization') ?? ''
   if (!authHeader.startsWith('Bearer ')) {
-    return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message: 'Missing Bearer token' }, id: null }), {
+    return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message: 'Missing Bearer token' }, id: id ?? null }), {
       status: 401,
       headers: { ...cors, 'Content-Type': 'application/json', 'WWW-Authenticate': `Bearer resource_metadata="${RESOURCE_METADATA_URL}"` },
     })
@@ -6874,7 +7066,7 @@ Deno.serve(async (req: Request) => {
   const rawToken = authHeader.slice(7).trim()
   const userId = await resolveApiKey(sb, rawToken)
   if (!userId) {
-    return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message: 'Invalid token' }, id: null }), {
+    return new Response(JSON.stringify({ jsonrpc: '2.0', error: { code: -32001, message: 'Invalid token' }, id: id ?? null }), {
       status: 401,
       headers: { ...cors, 'Content-Type': 'application/json', 'WWW-Authenticate': `Bearer error="invalid_token", resource_metadata="${RESOURCE_METADATA_URL}"` },
     })
@@ -6903,9 +7095,6 @@ Deno.serve(async (req: Request) => {
           return toolFail(err.message, id)
         }
       }
-
-      case 'ping':
-        return rpcOk({}, id)
 
       default:
         return rpcErr(-32601, `Method not found: ${method}`, id)

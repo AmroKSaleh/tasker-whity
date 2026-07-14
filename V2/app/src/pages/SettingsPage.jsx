@@ -10,6 +10,7 @@ import ThemeToggle from '../components/editorial/ThemeToggle'
 import TaskStatusSettings from '../components/settings/TaskStatusSettings'
 import ConnectorsSection from '../components/settings/ConnectorsSection'
 import DefaultInstructionsSection from '../components/settings/DefaultInstructionsSection'
+import WebhooksSection from '../components/settings/WebhooksSection'
 
 const PROVIDER_KEYS = Object.keys(PROVIDERS)
 const MCP_URL = 'https://smarttasksxdd.netlify.app/api/mcp'
@@ -784,6 +785,10 @@ export default function SettingsPage() {
             <div className="border-t border-line-2 my-8" />
 
             <ConnectorsSection />
+
+            <div className="border-t border-line-2 my-8" />
+
+            <WebhooksSection />
 
             <div className="border-t border-line-2 my-8" />
 
