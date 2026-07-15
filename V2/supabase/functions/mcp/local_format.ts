@@ -85,9 +85,31 @@ function parseInlineObject(raw: string): Record<string, unknown> | null {
   } catch { return null }
 }
 
+// ── governance footer ─────────────────────────────────────────────────────────
+// FORCED IS exposure (parity with online get_task injection): every task file
+// carries the governing Instruction Set below this marker, auto-injected on
+// every pull. It is NOT task data: parse strips everything from the marker on,
+// so it can never leak into detail or sync upward. Agents can't read a task
+// without the rules arriving with it.
+
+export const GOVERNANCE_MARKER = '<!-- ═══ GOVERNANCE — auto-injected on every pull · read before acting · NOT part of this task · stripped on flush ═══ -->'
+
+export function withGovernance(fileText: string, governance: string): string {
+  const g = (governance || '').trim()
+  if (!g) return fileText
+  return `${fileText.replace(/\s+$/, '')}\n\n${GOVERNANCE_MARKER}\n\n${g}\n`
+}
+
+export function stripGovernance(text: string): string {
+  const i = text.indexOf(GOVERNANCE_MARKER)
+  if (i === -1) return text
+  return text.slice(0, i).replace(/\s+$/, '') + '\n'
+}
+
 // ── task file ─────────────────────────────────────────────────────────────────
 
-export function parseTaskFile(text: string, path = 'task'): { task: TaskerTask | null; warnings: ParseWarning[] } {
+export function parseTaskFile(rawText: string, path = 'task'): { task: TaskerTask | null; warnings: ParseWarning[] } {
+  const text = stripGovernance(rawText)
   const warnings: ParseWarning[] = []
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/)
   if (!m) return { task: null, warnings: [{ path, message: 'missing frontmatter block' }] }

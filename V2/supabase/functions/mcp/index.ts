@@ -1,6 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { inputEdges, inputSourceIds, outputContract, lintRule, deriveOutputFromConsumers, contractGateViolations } from './contract_gate.ts'
-import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash } from './local_format.ts'
+import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash, withGovernance } from './local_format.ts'
 import {
   buildPullMaps, buildProjectMeta, dbRowToTaskerTask, resolveFlushChange, resolveFlushDelete,
   leaseFreeIds, shortIdWithinLease, parseShortRef, LEASE_BLOCK, LEASE_MIN_FREE, UNFILED_SLUG,
@@ -625,13 +625,24 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
   const needUnfiled = tasks.some(t => !t.section_id)
   const meta = buildProjectMeta(project.name, prefix, maxShort + 1, sections || [], groups || [], maps, needUnfiled)
 
+  // Governance footer (forced IS exposure — parity with online get_task injection):
+  // the FULL project IS rides inside every task file, below a marker that parse strips.
+  const { data: projIs } = await sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at')
+  const governance = (projIs?.length)
+    ? [
+        '# ⚖ Instruction Set — governs this task (project-wide)',
+        '',
+        ...projIs.flatMap((e: any) => [`## ${e.title}`, '', e.content, '']),
+        '_Auto-injected on every pull; do not edit (stripped on flush). Foundation + KB index live in context.md._',
+      ].join('\n')
+    : ''
+
   const files: Record<string, string> = {}
   files['project.json'] = serializeProjectJson(meta)
-  for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = serializeTaskFile(dbRowToTaskerTask(row, prefix, maps))
+  for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = withGovernance(serializeTaskFile(dbRowToTaskerTask(row, prefix, maps)), governance)
 
   // context.md — read-only grounding snapshot (Foundation + IS + KB titles), regenerated on every pull, never synced up.
   const foundationLines = renderFoundation(project.context)
-  const { data: projIs } = await sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at')
   const { data: kbTitles } = await sb.from('project_knowledge').select('title').eq('project_id', project.id).order('created_at', { ascending: false }).limit(100)
   const ctxLines: string[] = [`# ${project.name} — project context (READ-ONLY snapshot, regenerated on every pull)`, '']
   if (foundationLines.length) { ctxLines.push('## Foundation'); for (const l of foundationLines) ctxLines.push(`- ${l}`); ctxLines.push('') }
@@ -644,7 +655,7 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
     '',
     'This folder is the LOCAL mirror of a Tasker project. Agents: work the tasks by editing these files directly — no per-edit network calls.',
     '',
-    '- FIRST, read context.md — it carries the project Foundation and the FULL Instruction Set that governs every task here. Online, the server injects these into each task automatically; locally, reading context.md IS that step. Do not work tasks ungoverned.',
+    '- EVERY task file carries the governing Instruction Set as a ⚖ GOVERNANCE footer (auto-injected on each pull) — reading a task means reading its rules; follow them. Do not edit the footer (it is stripped on flush, never synced). The Foundation + KB index live in context.md — read that once per session.',
     '- One task = one file in tasks/ (YAML frontmatter + markdown body = the task context).',
     '- PULL before starting work: call pull_local_project — it returns a short-lived bundle URL + a hydrate.mjs script; write the script and run `node hydrate.mjs` to (re)write this folder. (Pass inline:true only if node is unavailable.)',
     `- Create a task: new file tasks/${prefix}-<id>.md using ONLY ids from .sync.json lease/next_free_ids; stamp updated_at (ISO, UTC, now).`,
@@ -735,7 +746,7 @@ Rules that always apply, even before you call anything else:
 const ASSISTANT_DIRECTIVES = [
   'ATTENTION FIRST (TDE-383): right after __init_tasker_session, call get_my_attention — one cross-task pull of what needs the human/you: tasks awaiting the human\'s review, pending GUIDANCE a human left on tasks (picked up even across sessions), agent sessions AWAITING INPUT (blocked on a question), STALE in-progress work, and OVERDUE items. It is your "what needs me?" triage before picking up anything new. Then act on the highest-priority item.',
   'DURABLE WORK BELONGS IN TASKER (use Tasker by default, not your native list): whenever you are about to record a piece of work, ask "is this DURABLE?" — does a human want it persisted, shared, reviewed, or quality-gated, or does it outlive this session? If YES → create it in Tasker (create_task), do NOT leave it in your platform\'s native to-do list where it vanishes at session end. Durable → Tasker: a bug found while doing something else, a follow-up the human will care about later, work someone assigned you, a decision that needs tracking. Transient → keep native: "read file X", "run the test", "fix the import on line 40" — the private per-step scratchpad for executing the item in front of you; do NOT mirror those into Tasker (it floods the spine with noise). Tasker is the durable spine; your native list is how you execute one item on it. (This is a strong default, not a lock — the MCP cannot disable your host\'s native to-do tool; the choice is yours to make correctly.)',
-  'LOCAL MODE WORK BRACKET: projects with Local Mode enabled are mirrored to .tasker/ files in a repo checkout — the FILES are the hot path, not per-edit MCP calls. The bracket: (1) PULL before starting work — call pull_local_project(project, device_id); it returns a hydrate_script: write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs` (it downloads the bundle over a short-lived signed URL, writes every file, deletes tombstoned task files, and prints a JSON summary with the cursor/lease — you may delete the script after). Only if node is unavailable, re-call with inline:true and write the returned file map yourself. (2) GROUND: read .tasker/context.md BEFORE working any task — it carries the project Foundation and the FULL Instruction Set that governs every task in this project (online, get_task injects these automatically; locally, reading context.md IS that step — skipping it means working ungoverned). (3) WORK the tasks by reading/editing tasks/<ID>.md directly — task body = context, frontmatter = fields; ALWAYS re-stamp updated_at (ISO, UTC) on every edit; create new tasks ONLY with ids from .sync.json next_free_ids; delete = remove the file and remember its numeric id. (4) FLUSH after each work unit (task completed / handoff reached — not every keystroke) — call flush_local_project with the changed files + base_cursor from .sync.json, write any hub_wins corrections back to disk, update the cursor in .sync.json. Ceremonies still go through MCP at flush time: complete_task, submit_task_review, submit_validation_result, store_artifact. input/output/review frontmatter is READ-ONLY carriage (contract edits go through the normal tools). Never hand-edit .sync.json; context.md and README.md are regenerated snapshots. Multi-device consistency comes from the hub — newest updated_at wins conflicts, deletes propagate as tombstones, and a concurrent edit beats a delete.',
+  'LOCAL MODE WORK BRACKET: projects with Local Mode enabled are mirrored to .tasker/ files in a repo checkout — the FILES are the hot path, not per-edit MCP calls. The bracket: (1) PULL before starting work — call pull_local_project(project, device_id); it returns a hydrate_script: write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs` (it downloads the bundle over a short-lived signed URL, writes every file, deletes tombstoned task files, and prints a JSON summary with the cursor/lease — you may delete the script after). Only if node is unavailable, re-call with inline:true and write the returned file map yourself. (2) GROUND: every task file ends with a ⚖ GOVERNANCE footer carrying the FULL Instruction Set — it is auto-injected on every pull precisely so reading a task means reading its rules; FOLLOW it, never edit it (it is stripped on flush, never synced). Read .tasker/context.md once per session for the Foundation + KB index. (3) WORK the tasks by reading/editing tasks/<ID>.md directly — task body = context, frontmatter = fields; ALWAYS re-stamp updated_at (ISO, UTC) on every edit; create new tasks ONLY with ids from .sync.json next_free_ids; delete = remove the file and remember its numeric id. (4) FLUSH after each work unit (task completed / handoff reached — not every keystroke) — call flush_local_project with the changed files + base_cursor from .sync.json, write any hub_wins corrections back to disk, update the cursor in .sync.json. Ceremonies still go through MCP at flush time: complete_task, submit_task_review, submit_validation_result, store_artifact. input/output/review frontmatter is READ-ONLY carriage (contract edits go through the normal tools). Never hand-edit .sync.json; context.md and README.md are regenerated snapshots. Multi-device consistency comes from the hub — newest updated_at wins conflicts, deletes propagate as tombstones, and a concurrent edit beats a delete.',
   'AUTONOMOUS WORK LOOP: When the user says "start looping" (or any clearly similar phrase — "start the loop", "clock in the worker", "run autonomously", "work my queue"), work Tasker\'s ready queue hands-off. Each pass: call get_ready_work, then (A) EXECUTE every CONFIRMED proposal EXACTLY as its agent_proposal text says (the human may have edited it — the proposal IS your instruction; no new scope) — verify it works, write a KB entry for anything non-obvious, then clear it via update_task(id, agent_proposal:"") and complete_task only if genuinely done; (B) fully PREPARE the top handed-over (agent_ready) task — investigate and resolve every decision so a confirmed run is pure mechanical application — record it via update_task(id, agent_proposal:"<complete plan>"), then STOP it for the human\'s ASYNC web confirmation. NEVER execute a prepared task until it returns CONFIRMED — the human\'s web confirm (and their edits) is the gate. Unattended rules: do NOT call AskUserQuestion or wait for a chat reply (instead skip the task, append a note stating the open question, and continue), stay quiet on an empty queue, skip-and-flag blockers, NEVER guess on destructive/irreversible actions, and honor stop_flow. CONTINUOUS looping needs a client-side scheduler — on Claude Code run `/loop 2m /work-loop` (or a shorter interval); on a client without a scheduler, run one on-demand pass per request. This runs on the user\'s OWN session at $0 marginal cost (their subscription, not the API) and ONLY while that session stays open; the parked cloud receiver (TDE-398) is the PC-closed alternative that costs API $ per task.',
   'When you begin working on a task, the FIRST thing to do is set its status to in_progress. Calling get_task does this automatically; if you start work without calling get_task, set it explicitly via update_task before doing anything else. When the work is genuinely and verifiably complete, mark it done with complete_task; otherwise leave it in_progress.',
   'VERIFY BEFORE COMPLETE (TDE-344): when a task\'s deliverable is a CHECKABLE artifact (a file, a live page, a pushed commit, a passing test/build/lint, a word count, an API response) and you are the executing agent, attach a deterministic verification as the task\'s gate and PROVE it before completing. (1) When you PREPARE / hand over a task (set agent_proposal), include the check in the plan so the human confirms the work AND its proof together, and freeze it: enable_task_review(task_id, bar:{rules:[{label, kind:"check", rule:"<how to check — e.g. fetch URL X and confirm text Y is present / run the test suite, expect exit 0>", severity:"blocker"}]}). (2) On EXECUTION: actually RUN the check, capture the raw observed_value (the fetched text, the exit code, the file path — never assert), and submit_task_review with it BEFORE complete_task. Completion is NEVER blocked, but a task completed without passing check evidence is durably marked DONE (UNVERIFIED). Prefer deterministic kind=check over human-judgment gates. Skip the gate only for tasks with no checkable artifact (pure discussion/decision).',
@@ -4264,7 +4275,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const baseCursor = Number(args.base_cursor ?? NaN)
       if (!Number.isFinite(baseCursor)) return 'base_cursor is required — the cursor from this device\'s .sync.json.'
 
-      const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }] = await Promise.all([
+      const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }, { data: flushIs }] = await Promise.all([
         sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
         sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
         sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
@@ -4272,8 +4283,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           .eq('project_id', project.id).eq('user_id', userId),
         sb.from('local_id_leases').select('lease_start, lease_end').eq('project_id', project.id).eq('device_id', deviceId).eq('user_id', userId),
         sb.from('local_tombstones').select('short_id, local_rev').eq('project_id', project.id),
+        sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at'),
       ])
       if (!proj?.local_mode) return `"${project.name}" is not a Local Mode project — nothing to flush.`
+      // hub_wins corrections must stay governed — same footer the pull injects.
+      const flushGovernance = (flushIs?.length)
+        ? [
+            '# ⚖ Instruction Set — governs this task (project-wide)',
+            '',
+            ...flushIs.flatMap((e: any) => [`## ${e.title}`, '', e.content, '']),
+            '_Auto-injected on every pull; do not edit (stripped on flush). Foundation + KB index live in context.md._',
+          ].join('\n')
+        : ''
 
       const tasks: DbTaskRow[] = (taskRows || []).filter((t: any) => t.short_id != null)
       const prefix = project.prefix || 'TSK'
@@ -4330,7 +4351,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           tombRev, baseCursor)
 
         if (decision === 'hub_wins') {
-          hubWins.push({ path, content: serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), reason: 'hub has a newer (or tied) concurrent edit — write this content back' })
+          hubWins.push({ path, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'hub has a newer (or tied) concurrent edit — write this content back' })
           continue
         }
         const fields = fileFields(task)
@@ -4363,7 +4384,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const hubRow = byShort.get(sid) || null
         const decision = resolveFlushDelete(hubRow ? { updated_at: hubRow.updated_at ?? null, local_rev: hubRow.local_rev ?? 0 } : null, baseCursor)
         if (decision === 'edit_beats_delete_keep') {
-          hubWins.push({ path: `tasks/${prefix}-${sid}.md`, content: serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), reason: 'edited on the hub since your pull — edit beats delete; restore this file' })
+          hubWins.push({ path: `tasks/${prefix}-${sid}.md`, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'edited on the hub since your pull — edit beats delete; restore this file' })
           continue
         }
         if (!hubRow) { deleted.push(`${prefix}-${sid}`); continue } // already gone — idempotent

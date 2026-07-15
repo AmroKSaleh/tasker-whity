@@ -4,7 +4,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseTasker, serializeTasker, parseTaskFile, serializeTaskFile, contentHash } from './local_format.ts'
+import { parseTasker, serializeTasker, parseTaskFile, serializeTaskFile, contentHash, withGovernance } from './local_format.ts'
 
 const EXAMPLE = join(import.meta.dirname ?? '.', '..', '..', '..', 'examples', 'blog-post-workflow', '.tasker')
 
@@ -84,6 +84,15 @@ const richText = serializeTaskFile(rich)
 const richBack = parseTaskFile(richText, 'rich').task
 assert(richBack !== null, 'rich task parses back')
 assert(deepEqual(rich, richBack), `rich task round-trips all D2 deltas${deepEqual(rich, richBack) ? '' : '\n  got: ' + JSON.stringify(richBack)}`)
+
+// Governance footer: injected content is stripped at parse and never leaks into the task
+const gov = '# ⚖ Instruction Set — governs this task\n\n## Code Style\n\nNo comments unless WHY is non-obvious.'
+const wrapped = withGovernance(serializeTaskFile(rich), gov)
+assert(wrapped.includes('GOVERNANCE') && wrapped.includes('No comments unless WHY'), 'withGovernance appends the footer')
+const richGoverned = parseTaskFile(wrapped, 'gov').task
+assert(richGoverned !== null && deepEqual(rich, richGoverned), 'governed file parses back to the EXACT same task (footer fully stripped)')
+assert(!richGoverned!.body.includes('GOVERNANCE') && !richGoverned!.body.includes('Code Style'), 'no governance text leaks into body/detail')
+assert(withGovernance(serializeTaskFile(rich), '') === serializeTaskFile(rich), 'empty governance is a no-op')
 
 // Hash determinism
 assert(contentHash('hello') === contentHash('hello') && contentHash('hello') !== contentHash('hello!'), 'contentHash deterministic and discriminating')
