@@ -561,13 +561,165 @@ async function deriveProjectPrefix(sb: any, userId: string, name: string): Promi
 // support InitializeResult.instructions feed it into the model's context). Keep it tight:
 // the mental model + the first move + the few rules that must hold even if the model
 // never calls __init_tasker_session. The detailed playbook stays in ASSISTANT_DIRECTIVES.
+// ── Local Mode bundle transport (TDE-410 follow-up) ──────────────────────────
+// Default pull no longer streams ~300KB of file contents through the agent's
+// context: pull_local_project returns a SHORT-LIVED signed bundle URL + a tiny
+// hydrate script; the agent runs the script and the bytes go server→disk.
+// Token: base64url(payload).base64url(HMAC-SHA256(payload, service key)).
+
+function b64url(bytes: Uint8Array): string {
+  let s = ''
+  for (const b of bytes) s += String.fromCharCode(b)
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+function b64urlDecode(s: string): Uint8Array {
+  const pad = s.length % 4 === 0 ? '' : '='.repeat(4 - (s.length % 4))
+  const bin = atob(s.replace(/-/g, '+').replace(/_/g, '/') + pad)
+  return Uint8Array.from(bin, c => c.charCodeAt(0))
+}
+async function hmacSign(payload: string): Promise<string> {
+  const key = await crypto.subtle.importKey('raw', new TextEncoder().encode(SUPABASE_SERVICE_KEY), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])
+  const sig = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(payload))
+  return b64url(new Uint8Array(sig))
+}
+const BUNDLE_TOKEN_TTL_MS = 15 * 60 * 1000
+
+async function signBundleToken(projectId: string, userId: string, deviceId: string, cursor: number): Promise<string> {
+  const payload = b64url(new TextEncoder().encode(JSON.stringify({
+    p: projectId, u: userId, d: deviceId, c: cursor,
+    exp: Date.now() + BUNDLE_TOKEN_TTL_MS, n: crypto.randomUUID().slice(0, 8),
+  })))
+  return `${payload}.${await hmacSign(payload)}`
+}
+async function verifyBundleToken(token: string): Promise<{ p: string; u: string; d: string; c: number } | null> {
+  const dot = token.lastIndexOf('.')
+  if (dot < 1) return null
+  const payload = token.slice(0, dot)
+  if (token.slice(dot + 1) !== await hmacSign(payload)) return null
+  try {
+    const data = JSON.parse(new TextDecoder().decode(b64urlDecode(payload)))
+    if (!data.exp || Date.now() > data.exp) return null
+    return data
+  } catch { return null }
+}
+
+// The whole pull-state build: files map + lease + tombstone diff. Shared by the
+// inline tool path and the GET bundle endpoint (single source of truth).
+async function buildLocalBundle(sb: any, userId: string, project: any, deviceId: string, cursor: number): Promise<{ error: string } | {
+  files: Record<string, string>; cursor: number; prefix: string
+  tombstoned_short_ids: number[]; lease: LeaseState; next_free_ids: number[]
+}> {
+  const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }] = await Promise.all([
+    sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
+    sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
+    sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
+    sb.from('tasks').select('id, short_id, text, detail, status, priority, due_date, section_id, group_id, sort_order, input, output, review_enabled, review_bar, updated_at, local_rev')
+      .eq('project_id', project.id).eq('user_id', userId),
+  ])
+  if (!proj?.local_mode) return { error: `"${project.name}" is not a Local Mode project. Enable Local Mode first (web app → project settings), then pull again.` }
+
+  const tasks: DbTaskRow[] = (taskRows || []).filter((t: any) => t.short_id != null)
+  const prefix = project.prefix || 'TSK'
+  const maps = buildPullMaps(prefix, sections || [], groups || [], tasks)
+  const maxShort = tasks.reduce((m, t) => Math.max(m, t.short_id || 0), 0)
+  const needUnfiled = tasks.some(t => !t.section_id)
+  const meta = buildProjectMeta(project.name, prefix, maxShort + 1, sections || [], groups || [], maps, needUnfiled)
+
+  const files: Record<string, string> = {}
+  files['project.json'] = serializeProjectJson(meta)
+  for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = serializeTaskFile(dbRowToTaskerTask(row, prefix, maps))
+
+  // context.md — read-only grounding snapshot (Foundation + IS + KB titles), regenerated on every pull, never synced up.
+  const foundationLines = renderFoundation(project.context)
+  const { data: projIs } = await sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at')
+  const { data: kbTitles } = await sb.from('project_knowledge').select('title').eq('project_id', project.id).order('created_at', { ascending: false }).limit(100)
+  const ctxLines: string[] = [`# ${project.name} — project context (READ-ONLY snapshot, regenerated on every pull)`, '']
+  if (foundationLines.length) { ctxLines.push('## Foundation'); for (const l of foundationLines) ctxLines.push(`- ${l}`); ctxLines.push('') }
+  if (projIs?.length) { ctxLines.push('## Instruction Set'); for (const e of projIs) ctxLines.push(`### ${e.title}`, '', e.content, '') }
+  if (kbTitles?.length) { ctxLines.push('## Knowledge Base (titles — pull full entries via get_kb_entries)'); for (const k of kbTitles) ctxLines.push(`- ${k.title}`); ctxLines.push('') }
+  files['context.md'] = ctxLines.join('\n')
+
+  files['README.md'] = [
+    `# .tasker/ — ${project.name} (Local Mode)`,
+    '',
+    'This folder is the LOCAL mirror of a Tasker project. Agents: work the tasks by editing these files directly — no per-edit network calls.',
+    '',
+    '- One task = one file in tasks/ (YAML frontmatter + markdown body = the task context).',
+    '- PULL before starting work: call pull_local_project — it returns a short-lived bundle URL + a hydrate.mjs script; write the script and run `node hydrate.mjs` to (re)write this folder. (Pass inline:true only if node is unavailable.)',
+    `- Create a task: new file tasks/${prefix}-<id>.md using ONLY ids from .sync.json lease/next_free_ids; stamp updated_at (ISO, UTC, now).`,
+    '- Edit a task: change the file; ALWAYS re-stamp updated_at. Delete a task: delete the file and report its numeric id in deleted_short_ids on flush.',
+    '- FLUSH after each work unit: call flush_local_project with the files you changed + base_cursor from .sync.json; write any hub_wins contents back to disk and update the cursor in .sync.json.',
+    '- input / output / review in frontmatter are READ-ONLY carriage (contracts are hub ceremonies). Milestones are hub-only in v1 (not in these files).',
+    '- Never hand-edit .sync.json. context.md is a read-only snapshot.',
+  ].join('\n')
+  files['.gitignore'] = '.sync.json\ncontext.md\n'
+
+  // ID lease (D8): reuse this device's newest block if enough of it is free, else lease a fresh one.
+  const { data: myLeases } = await sb.from('local_id_leases').select('lease_start, lease_end')
+    .eq('project_id', project.id).eq('device_id', deviceId).eq('user_id', userId).order('lease_end', { ascending: false }).limit(1)
+  // IDs are never reused: live tasks AND tombstoned (retired) ids both count as used.
+  const { data: allTombs } = await sb.from('local_tombstones').select('short_id').eq('project_id', project.id)
+  const used = new Set<number>(tasks.map(t => t.short_id))
+  for (const t of allTombs || []) { const n = Number(t.short_id); if (Number.isFinite(n)) used.add(n) }
+  let lease: LeaseState | null = myLeases?.length ? { start: myLeases[0].lease_start, end: myLeases[0].lease_end } : null
+  // A lease that doesn't sit ABOVE the live short-ID range is invalid — never hand out retired IDs.
+  if (lease && lease.start <= maxShort) lease = null
+  if (!lease || leaseFreeIds(lease, used).length < LEASE_MIN_FREE) {
+    const { data: topLease } = await sb.from('local_id_leases').select('lease_end').eq('project_id', project.id).order('lease_end', { ascending: false }).limit(1)
+    const base = Math.max(maxShort, topLease?.[0]?.lease_end || 0)
+    lease = { start: base + 1, end: base + LEASE_BLOCK }
+    const { error: leaseErr } = await sb.from('local_id_leases').insert({
+      project_id: project.id, user_id: userId, device_id: deviceId, lease_start: lease.start, lease_end: lease.end,
+    })
+    if (leaseErr) return { error: `Failed to lease an ID block: ${leaseErr.message}` }
+  }
+  const freeIds = leaseFreeIds(lease, used)
+
+  const { data: tombs } = await sb.from('local_tombstones').select('short_id, local_rev')
+    .eq('project_id', project.id).gt('local_rev', cursor)
+  const newCursor = proj.local_revision || 0
+  const hashes: Record<string, string> = {}
+  for (const [p, c] of Object.entries(files)) hashes[p] = contentHash(c)
+  files['.sync.json'] = JSON.stringify({
+    project: project.name, project_id: project.id, prefix, device_id: deviceId,
+    cursor: newCursor, lease, next_free_ids: freeIds.slice(0, 10), hashes,
+    pulled_note: 'machine-local sync state — never hand-edit, never commit',
+  }, null, 2) + '\n'
+
+  return {
+    files, cursor: newCursor, prefix,
+    tombstoned_short_ids: (tombs || []).map((t: any) => Number(t.short_id)).filter(Number.isFinite),
+    lease, next_free_ids: freeIds.slice(0, 10),
+  }
+}
+
+function hydrateScript(bundleUrl: string): string {
+  return [
+    '// hydrate.mjs — writes/refreshes the .tasker/ mirror in the CURRENT directory.',
+    '// Run: node hydrate.mjs   (then delete this file or keep it; the URL inside expires in ~15 min)',
+    "import { writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs'",
+    "import { join, dirname } from 'node:path'",
+    `const res = await fetch(${JSON.stringify(bundleUrl)})`,
+    "if (!res.ok) { console.error('bundle fetch failed:', res.status, await res.text()); process.exit(1) }",
+    'const p = await res.json()',
+    'for (const [path, content] of Object.entries(p.files)) {',
+    "  const f = join('.tasker', path); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, content, 'utf8')",
+    '}',
+    'for (const sid of p.tombstoned_short_ids || []) {',
+    "  const f = join('.tasker', 'tasks', `${p.prefix}-${sid}.md`); if (existsSync(f)) rmSync(f)",
+    '}',
+    "console.log(JSON.stringify({ status: 'hydrated', file_count: Object.keys(p.files).length, cursor: p.cursor, lease: p.lease, next_free_ids: p.next_free_ids }, null, 2))",
+    '',
+  ].join('\n')
+}
+
 const TASKER_SERVER_INSTRUCTIONS = `Tasker is a task manager that lives inside your AI workflow. Hierarchy: Project → Section → Group → Task → Milestone. Tasks can be linked by I/O edges (one task's output is another's input) into FLOWS — multi-step processes with quality gates (contracts) between steps.
 
 YOUR NATIVE TASK LIST vs TASKER — ROUTE DURABLE WORK HERE, BY DEFAULT: whenever you are about to record a piece of work, first ask "is this DURABLE?" — does a human want it persisted, shared, reviewed, or quality-gated, or does it outlive this one session? If YES, it belongs in Tasker (create_task) — NOT in your platform's native to-do list. Reach for Tasker by default for real work; do not leave durable items sitting in a native list where they vanish when the session ends. Durable → Tasker: a bug you found while doing something else, a follow-up the human will care about later, work someone assigned you, a decision that needs tracking. Transient → keep native: "read file X", "run the test", "fix the import on line 40" — the private, per-step scratchpad for executing the item in front of you. Your native list stays your execution tool; do NOT mirror those transient sub-steps into Tasker (that just floods the spine with noise). So: pull durable work from get_ready_work, use your native plan to EXECUTE one item, and write the outcome back (complete_task, reviews, stored artifacts). Tasker is the durable spine across sessions, agents, and people; your native list is how you do one item on it.
 
 FIRST MOVE: at the start of a Tasker session call __init_tasker_session. It returns the user's behavioral preferences plus the full directive playbook (task lifecycle, running flows, validation, dependency rules). Read and follow those directives.
 
-LOCAL MODE: some projects are mirrored to .tasker/ files in a repo checkout (opt-in per project). If the working directory has a .tasker/ folder — or a project refuses normal access saying it is Local Mode — work it through FILES, not per-edit MCP calls: PULL before starting work (pull_local_project → write every returned file verbatim, including .sync.json), edit tasks/<ID>.md files directly as the hot path (always re-stamp updated_at), and FLUSH after each work unit (flush_local_project with your changed files + base_cursor from .sync.json → write any hub_wins corrections back to disk). Completion ceremonies (complete_task, reviews, validation) still run via MCP at flush time. Never hand-edit .sync.json; input/output/review in frontmatter are read-only carriage.
+LOCAL MODE: some projects are mirrored to .tasker/ files in a repo checkout (opt-in per project). If the working directory has a .tasker/ folder — or a project refuses normal access saying it is Local Mode — work it through FILES, not per-edit MCP calls: PULL before starting work (pull_local_project → it returns a hydrate_script; write it as hydrate.mjs and run "node hydrate.mjs" to materialize/refresh .tasker/ — file bytes never pass through your context), edit tasks/<ID>.md files directly as the hot path (always re-stamp updated_at), and FLUSH after each work unit (flush_local_project with your changed files + base_cursor from .sync.json → write any hub_wins corrections back to disk). Completion ceremonies (complete_task, reviews, validation) still run via MCP at flush time. Never hand-edit .sync.json; input/output/review in frontmatter are read-only carriage.
 
 Rules that always apply, even before you call anything else:
 - To work a task, set it in_progress (get_task does this automatically). Mark it done only when genuinely, verifiably complete.
@@ -582,7 +734,7 @@ Rules that always apply, even before you call anything else:
 const ASSISTANT_DIRECTIVES = [
   'ATTENTION FIRST (TDE-383): right after __init_tasker_session, call get_my_attention — one cross-task pull of what needs the human/you: tasks awaiting the human\'s review, pending GUIDANCE a human left on tasks (picked up even across sessions), agent sessions AWAITING INPUT (blocked on a question), STALE in-progress work, and OVERDUE items. It is your "what needs me?" triage before picking up anything new. Then act on the highest-priority item.',
   'DURABLE WORK BELONGS IN TASKER (use Tasker by default, not your native list): whenever you are about to record a piece of work, ask "is this DURABLE?" — does a human want it persisted, shared, reviewed, or quality-gated, or does it outlive this session? If YES → create it in Tasker (create_task), do NOT leave it in your platform\'s native to-do list where it vanishes at session end. Durable → Tasker: a bug found while doing something else, a follow-up the human will care about later, work someone assigned you, a decision that needs tracking. Transient → keep native: "read file X", "run the test", "fix the import on line 40" — the private per-step scratchpad for executing the item in front of you; do NOT mirror those into Tasker (it floods the spine with noise). Tasker is the durable spine; your native list is how you execute one item on it. (This is a strong default, not a lock — the MCP cannot disable your host\'s native to-do tool; the choice is yours to make correctly.)',
-  'LOCAL MODE WORK BRACKET: projects with Local Mode enabled are mirrored to .tasker/ files in a repo checkout — the FILES are the hot path, not per-edit MCP calls. The bracket: (1) PULL before starting work — call pull_local_project(project, device_id) and write EVERY returned file verbatim under .tasker/ (create folders; overwrite; delete files listed in tombstoned_short_ids). (2) WORK the tasks by reading/editing tasks/<ID>.md directly — task body = context, frontmatter = fields; ALWAYS re-stamp updated_at (ISO, UTC) on every edit; create new tasks ONLY with ids from .sync.json next_free_ids; delete = remove the file and remember its numeric id. (3) FLUSH after each work unit (task completed / handoff reached — not every keystroke) — call flush_local_project with the changed files + base_cursor from .sync.json, write any hub_wins corrections back to disk, update the cursor in .sync.json. Ceremonies still go through MCP at flush time: complete_task, submit_task_review, submit_validation_result, store_artifact. input/output/review frontmatter is READ-ONLY carriage (contract edits go through the normal tools). Never hand-edit .sync.json; context.md and README.md are regenerated snapshots. Multi-device consistency comes from the hub — newest updated_at wins conflicts, deletes propagate as tombstones, and a concurrent edit beats a delete.',
+  'LOCAL MODE WORK BRACKET: projects with Local Mode enabled are mirrored to .tasker/ files in a repo checkout — the FILES are the hot path, not per-edit MCP calls. The bracket: (1) PULL before starting work — call pull_local_project(project, device_id); it returns a hydrate_script: write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs` (it downloads the bundle over a short-lived signed URL, writes every file, deletes tombstoned task files, and prints a JSON summary with the cursor/lease — you may delete the script after). Only if node is unavailable, re-call with inline:true and write the returned file map yourself. (2) WORK the tasks by reading/editing tasks/<ID>.md directly — task body = context, frontmatter = fields; ALWAYS re-stamp updated_at (ISO, UTC) on every edit; create new tasks ONLY with ids from .sync.json next_free_ids; delete = remove the file and remember its numeric id. (3) FLUSH after each work unit (task completed / handoff reached — not every keystroke) — call flush_local_project with the changed files + base_cursor from .sync.json, write any hub_wins corrections back to disk, update the cursor in .sync.json. Ceremonies still go through MCP at flush time: complete_task, submit_task_review, submit_validation_result, store_artifact. input/output/review frontmatter is READ-ONLY carriage (contract edits go through the normal tools). Never hand-edit .sync.json; context.md and README.md are regenerated snapshots. Multi-device consistency comes from the hub — newest updated_at wins conflicts, deletes propagate as tombstones, and a concurrent edit beats a delete.',
   'AUTONOMOUS WORK LOOP: When the user says "start looping" (or any clearly similar phrase — "start the loop", "clock in the worker", "run autonomously", "work my queue"), work Tasker\'s ready queue hands-off. Each pass: call get_ready_work, then (A) EXECUTE every CONFIRMED proposal EXACTLY as its agent_proposal text says (the human may have edited it — the proposal IS your instruction; no new scope) — verify it works, write a KB entry for anything non-obvious, then clear it via update_task(id, agent_proposal:"") and complete_task only if genuinely done; (B) fully PREPARE the top handed-over (agent_ready) task — investigate and resolve every decision so a confirmed run is pure mechanical application — record it via update_task(id, agent_proposal:"<complete plan>"), then STOP it for the human\'s ASYNC web confirmation. NEVER execute a prepared task until it returns CONFIRMED — the human\'s web confirm (and their edits) is the gate. Unattended rules: do NOT call AskUserQuestion or wait for a chat reply (instead skip the task, append a note stating the open question, and continue), stay quiet on an empty queue, skip-and-flag blockers, NEVER guess on destructive/irreversible actions, and honor stop_flow. CONTINUOUS looping needs a client-side scheduler — on Claude Code run `/loop 2m /work-loop` (or a shorter interval); on a client without a scheduler, run one on-demand pass per request. This runs on the user\'s OWN session at $0 marginal cost (their subscription, not the API) and ONLY while that session stays open; the parked cloud receiver (TDE-398) is the PC-closed alternative that costs API $ per task.',
   'When you begin working on a task, the FIRST thing to do is set its status to in_progress. Calling get_task does this automatically; if you start work without calling get_task, set it explicitly via update_task before doing anything else. When the work is genuinely and verifiably complete, mark it done with complete_task; otherwise leave it in_progress.',
   'VERIFY BEFORE COMPLETE (TDE-344): when a task\'s deliverable is a CHECKABLE artifact (a file, a live page, a pushed commit, a passing test/build/lint, a word count, an API response) and you are the executing agent, attach a deterministic verification as the task\'s gate and PROVE it before completing. (1) When you PREPARE / hand over a task (set agent_proposal), include the check in the plan so the human confirms the work AND its proof together, and freeze it: enable_task_review(task_id, bar:{rules:[{label, kind:"check", rule:"<how to check — e.g. fetch URL X and confirm text Y is present / run the test suite, expect exit 0>", severity:"blocker"}]}). (2) On EXECUTION: actually RUN the check, capture the raw observed_value (the fetched text, the exit code, the file path — never assert), and submit_task_review with it BEFORE complete_task. Completion is NEVER blocked, but a task completed without passing check evidence is durably marked DONE (UNVERIFIED). Prefer deterministic kind=check over human-judgment gates. Skip the gate only for tasks with no checkable artifact (pure discussion/decision).',
@@ -653,13 +805,14 @@ const TOOLS = [
   },
   {
     name: 'pull_local_project',
-    description: 'LOCAL MODE: hydrate/refresh the .tasker/ mirror of a Local Mode project. Returns a ready-to-write file map (project.json, tasks/*.md, context.md, README.md, .gitignore, .sync.json) plus tombstoned short IDs and this device\'s leased short-ID block. YOU (the agent) write every returned file verbatim under .tasker/ in the working directory — the server cannot touch the device. Call at the START of local work (pull-before-work). Refuses projects without Local Mode enabled.',
+    description: 'LOCAL MODE: hydrate/refresh the .tasker/ mirror of a Local Mode project. DEFAULT (script transport): returns a small response with a hydrate_script — write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs`; it downloads the bundle over a short-lived signed URL and writes every file (project.json, tasks/*.md, context.md, README.md, .gitignore, .sync.json) plus removes tombstoned task files, then prints a JSON summary (file_count, cursor, lease, next_free_ids). File contents never enter your context. Pass inline:true only when node is unavailable — that returns the full file map for you to write manually. Call at the START of local work (pull-before-work). Refuses projects without Local Mode enabled.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
         device_id: { type: 'string', description: 'Stable name for this machine/checkout (e.g. "desktop-repo"). Determines the ID lease block.' },
         cursor: { type: 'number', description: 'The cursor from this device\'s current .sync.json (omit on first pull). Used for the tombstone diff.' },
+        inline: { type: 'boolean', description: 'If true, return the full file map in the tool response instead of the hydrate script (context-heavy fallback for environments without node).' },
       },
       required: ['project_id', 'device_id'],
     },
@@ -4073,91 +4226,32 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!deviceId) return 'device_id is required — a stable name for this machine/checkout (e.g. "desktop-repo").'
       const cursor = Number(args.cursor ?? 0) || 0
 
-      const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }] = await Promise.all([
-        sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
-        sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
-        sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
-        sb.from('tasks').select('id, short_id, text, detail, status, priority, due_date, section_id, group_id, sort_order, input, output, review_enabled, review_bar, updated_at, local_rev')
-          .eq('project_id', project.id).eq('user_id', userId),
-      ])
-      if (!proj?.local_mode) return `"${project.name}" is not a Local Mode project. Enable Local Mode first (web app → project settings), then pull again.`
-
-      const tasks: DbTaskRow[] = (taskRows || []).filter((t: any) => t.short_id != null)
-      const prefix = project.prefix || 'TSK'
-      const maps = buildPullMaps(prefix, sections || [], groups || [], tasks)
-      const maxShort = tasks.reduce((m, t) => Math.max(m, t.short_id || 0), 0)
-      const needUnfiled = tasks.some(t => !t.section_id)
-      const meta = buildProjectMeta(project.name, prefix, maxShort + 1, sections || [], groups || [], maps, needUnfiled)
-
-      const files: Record<string, string> = {}
-      files['project.json'] = serializeProjectJson(meta)
-      for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = serializeTaskFile(dbRowToTaskerTask(row, prefix, maps))
-
-      // context.md — read-only grounding snapshot (Foundation + IS + KB titles), regenerated on every pull, never synced up.
-      const foundationLines = renderFoundation(project.context)
-      const { data: projIs } = await sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at')
-      const { data: kbTitles } = await sb.from('project_knowledge').select('title').eq('project_id', project.id).order('created_at', { ascending: false }).limit(100)
-      const ctxLines: string[] = [`# ${project.name} — project context (READ-ONLY snapshot, regenerated on every pull)`, '']
-      if (foundationLines.length) { ctxLines.push('## Foundation'); for (const l of foundationLines) ctxLines.push(`- ${l}`); ctxLines.push('') }
-      if (projIs?.length) { ctxLines.push('## Instruction Set'); for (const e of projIs) ctxLines.push(`### ${e.title}`, '', e.content, '') }
-      if (kbTitles?.length) { ctxLines.push('## Knowledge Base (titles — pull full entries via get_kb_entries)'); for (const k of kbTitles) ctxLines.push(`- ${k.title}`); ctxLines.push('') }
-      files['context.md'] = ctxLines.join('\n')
-
-      files['README.md'] = [
-        `# .tasker/ — ${project.name} (Local Mode)`,
-        '',
-        'This folder is the LOCAL mirror of a Tasker project. Agents: work the tasks by editing these files directly — no per-edit network calls.',
-        '',
-        '- One task = one file in tasks/ (YAML frontmatter + markdown body = the task context).',
-        '- PULL before starting work: call the pull_local_project MCP tool and write every returned file verbatim.',
-        `- Create a task: new file tasks/${prefix}-<id>.md using ONLY ids from .sync.json lease/next_free_ids; stamp updated_at (ISO, UTC, now).`,
-        '- Edit a task: change the file; ALWAYS re-stamp updated_at. Delete a task: delete the file and report its numeric id in deleted_short_ids on flush.',
-        '- FLUSH after each work unit: call flush_local_project with the files you changed + base_cursor from .sync.json; write any hub_wins contents back to disk.',
-        '- input / output / review in frontmatter are READ-ONLY carriage (contracts are hub ceremonies). Milestones are hub-only in v1 (not in these files).',
-        '- Never hand-edit .sync.json. context.md is a read-only snapshot.',
-      ].join('\n')
-      files['.gitignore'] = '.sync.json\ncontext.md\n'
-
-      // ID lease (D8): reuse this device's newest block if enough of it is free, else lease a fresh one.
-      const { data: myLeases } = await sb.from('local_id_leases').select('lease_start, lease_end')
-        .eq('project_id', project.id).eq('device_id', deviceId).eq('user_id', userId).order('lease_end', { ascending: false }).limit(1)
-      // IDs are never reused: live tasks AND tombstoned (retired) ids both count as used.
-      const { data: allTombs } = await sb.from('local_tombstones').select('short_id').eq('project_id', project.id)
-      const used = new Set<number>(tasks.map(t => t.short_id))
-      for (const t of allTombs || []) { const n = Number(t.short_id); if (Number.isFinite(n)) used.add(n) }
-      let lease: LeaseState | null = myLeases?.length ? { start: myLeases[0].lease_start, end: myLeases[0].lease_end } : null
-      // IDs are never reused: a lease that doesn't sit ABOVE the live short-ID range is
-      // invalid (can only arise from historical bugs) — never hand out retired IDs.
-      if (lease && lease.start <= maxShort) lease = null
-      if (!lease || leaseFreeIds(lease, used).length < LEASE_MIN_FREE) {
-        const { data: topLease } = await sb.from('local_id_leases').select('lease_end').eq('project_id', project.id).order('lease_end', { ascending: false }).limit(1)
-        const base = Math.max(maxShort, topLease?.[0]?.lease_end || 0)
-        lease = { start: base + 1, end: base + LEASE_BLOCK }
-        const { error: leaseErr } = await sb.from('local_id_leases').insert({
-          project_id: project.id, user_id: userId, device_id: deviceId, lease_start: lease.start, lease_end: lease.end,
+      // Inline fallback: the full file map in the tool response (context-heavy —
+      // only for environments without node). Default is the script transport below.
+      if (args.inline === true) {
+        const bundle = await buildLocalBundle(sb, userId, project, deviceId, cursor)
+        if ('error' in bundle) return bundle.error
+        return JSON.stringify({
+          status: 'pulled', project: project.name, cursor: bundle.cursor,
+          file_count: Object.keys(bundle.files).length,
+          tombstoned_short_ids: bundle.tombstoned_short_ids,
+          lease: bundle.lease, next_free_ids: bundle.next_free_ids,
+          how_to: 'Write EVERY entry of `files` verbatim under .tasker/ in the working directory (create folders as needed, overwrite existing). Delete local tasks/<prefix>-<id>.md files for tombstoned_short_ids. Then work tasks by editing files; flush each work unit via flush_local_project.',
+          files: bundle.files,
         })
-        if (leaseErr) return `Failed to lease an ID block: ${leaseErr.message}`
       }
-      const freeIds = leaseFreeIds(lease, used)
 
-      const { data: tombs } = await sb.from('local_tombstones').select('short_id, local_rev')
-        .eq('project_id', project.id).gt('local_rev', cursor)
-      const newCursor = proj.local_revision || 0
-      const hashes: Record<string, string> = {}
-      for (const [p, c] of Object.entries(files)) hashes[p] = contentHash(c)
-      files['.sync.json'] = JSON.stringify({
-        project: project.name, project_id: project.id, prefix, device_id: deviceId,
-        cursor: newCursor, lease, next_free_ids: freeIds.slice(0, 10), hashes,
-        pulled_note: 'machine-local sync state — never hand-edit, never commit',
-      }, null, 2) + '\n'
-
+      // Default: script transport. Validate cheaply, then hand back a short-lived
+      // signed bundle URL + hydrate script — file bytes never enter the agent context.
+      const { data: proj } = await sb.from('projects').select('local_mode').eq('id', project.id).maybeSingle()
+      if (!proj?.local_mode) return `"${project.name}" is not a Local Mode project. Enable Local Mode first (web app → project settings), then pull again.`
+      const token = await signBundleToken(project.id, userId, deviceId, cursor)
+      const bundleUrl = `${SUPABASE_URL}/functions/v1/mcp?local_bundle=${token}`
       return JSON.stringify({
-        status: 'pulled', project: project.name, cursor: newCursor,
-        file_count: Object.keys(files).length,
-        tombstoned_short_ids: (tombs || []).map((t: any) => Number(t.short_id)).filter(Number.isFinite),
-        lease, next_free_ids: freeIds.slice(0, 10),
-        how_to: 'Write EVERY entry of `files` verbatim under .tasker/ in the working directory (create folders as needed, overwrite existing). Delete local tasks/<prefix>-<id>.md files for tombstoned_short_ids. Then work tasks by editing files; flush each work unit via flush_local_project.',
-        files,
+        status: 'pull_ready', project: project.name,
+        how_to: 'Write hydrate_script to a file named hydrate.mjs in the directory that should contain .tasker/, run `node hydrate.mjs`, and read the JSON summary it prints (file_count, cursor, lease, next_free_ids). The bundle URL inside is single-project, short-lived (~15 min) — re-pull if it expires. Afterwards you may delete hydrate.mjs. If node is unavailable, call this tool again with inline:true to receive the full file map directly.',
+        hydrate_script: hydrateScript(bundleUrl),
+        expires_in_minutes: 15,
       })
     }
 
@@ -7283,6 +7377,40 @@ Call submit_validation_result with:
 // ── Entry point ───────────────────────────────────────────────
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response(null, { headers: cors })
+
+  // Local Mode bundle download (GET ?local_bundle=<signed token>) — the transport
+  // behind pull_local_project's default script flow. The token IS the auth:
+  // HMAC-signed, project+user+device scoped, ~15 min TTL.
+  if (req.method === 'GET') {
+    const token = new URL(req.url).searchParams.get('local_bundle')
+    if (!token) {
+      return new Response(JSON.stringify({ error: 'Method not allowed. Use POST.' }), {
+        status: 405, headers: { ...cors, 'Content-Type': 'application/json', 'Allow': 'POST, OPTIONS' },
+      })
+    }
+    const claim = await verifyBundleToken(token)
+    if (!claim) {
+      return new Response(JSON.stringify({ error: 'Invalid or expired bundle token. Call pull_local_project again for a fresh link.' }), {
+        status: 401, headers: { ...cors, 'Content-Type': 'application/json' },
+      })
+    }
+    const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
+    const { data: project } = await sb.from('projects').select('id, name, slug, prefix, context')
+      .eq('id', claim.p).eq('user_id', claim.u).maybeSingle()
+    if (!project) {
+      return new Response(JSON.stringify({ error: 'Project not found.' }), {
+        status: 404, headers: { ...cors, 'Content-Type': 'application/json' },
+      })
+    }
+    const bundle = await buildLocalBundle(sb, claim.u, project, claim.d, claim.c)
+    if ('error' in bundle) {
+      return new Response(JSON.stringify({ error: bundle.error }), {
+        status: 409, headers: { ...cors, 'Content-Type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify(bundle), { headers: { ...cors, 'Content-Type': 'application/json' } })
+  }
+
   if (req.method !== 'POST') {
     return new Response(JSON.stringify({ error: 'Method not allowed. Use POST.' }), {
       status: 405,
