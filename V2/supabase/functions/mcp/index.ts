@@ -603,6 +603,29 @@ async function verifyBundleToken(token: string): Promise<{ p: string; u: string;
   } catch { return null }
 }
 
+// ── Scoped device tokens (immediate-sync watcher) ────────────────────────────
+// A watch.mjs process runs for hours, so the 15-min bundle token won't do. A
+// device token is a long-lived, revocable secret scoped to ONE project on ONE
+// device: even if it leaks it can only pull/flush that one project's .tasker/.
+// We store only its SHA-256 (never the plaintext); the secret is shown once at mint.
+
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
+// Resolve a presented device token to its scope, or null. Touches last_used_at.
+async function resolveDeviceToken(sb: any, token: string): Promise<{ project_id: string; user_id: string; device_id: string } | null> {
+  if (!token || !token.startsWith('dt_')) return null
+  const hash = await sha256Hex(token)
+  const { data } = await sb.from('local_device_tokens')
+    .select('id, project_id, user_id, device_id, revoked_at')
+    .eq('token_hash', hash).is('revoked_at', null).maybeSingle()
+  if (!data) return null
+  fireAndForget(sb.from('local_device_tokens').update({ last_used_at: new Date().toISOString() }).eq('id', data.id))
+  return { project_id: data.project_id, user_id: data.user_id, device_id: data.device_id }
+}
+
 // The whole pull-state build: files map + lease + tombstone diff. Shared by the
 // inline tool path and the GET bundle endpoint (single source of truth).
 async function buildLocalBundle(sb: any, userId: string, project: any, deviceId: string, cursor: number): Promise<{ error: string } | {
@@ -705,6 +728,142 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
   }
 }
 
+// The whole flush apply: per-task LWW, edit-beats-delete, lease-gated creates,
+// tombstones. Shared by the flush_local_project tool and the device_flush watcher
+// endpoint (single source of truth for the sync engine's write path).
+async function applyFlush(
+  sb: any, userId: string, project: any, deviceId: string, baseCursor: number,
+  changed: Array<{ path?: string; content?: string }>, deletedIds: number[],
+): Promise<{ error: string } | {
+  cursor: number; applied: string[]; created: string[]; deleted: string[]
+  rejected: string[]; warnings: string[]; hub_wins: Array<{ path: string; content: string; reason: string }>
+}> {
+  const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }, { data: flushIs }] = await Promise.all([
+    sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
+    sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
+    sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
+    sb.from('tasks').select('id, short_id, text, detail, status, priority, due_date, section_id, group_id, sort_order, input, output, review_enabled, review_bar, updated_at, local_rev')
+      .eq('project_id', project.id).eq('user_id', userId),
+    sb.from('local_id_leases').select('lease_start, lease_end').eq('project_id', project.id).eq('device_id', deviceId).eq('user_id', userId),
+    sb.from('local_tombstones').select('short_id, local_rev').eq('project_id', project.id),
+    sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at'),
+  ])
+  if (!proj?.local_mode) return { error: `"${project.name}" is not a Local Mode project — nothing to flush.` }
+  // hub_wins corrections must stay governed — same footer the pull injects.
+  const flushGovernance = (flushIs?.length)
+    ? [
+        '# ⚖ Instruction Set — governs this task (project-wide)',
+        '',
+        ...flushIs.flatMap((e: any) => [`## ${e.title}`, '', e.content, '']),
+        '_Auto-injected on every pull; do not edit (stripped on flush). Foundation + KB index live in context.md._',
+      ].join('\n')
+    : ''
+
+  const tasks: DbTaskRow[] = (taskRows || []).filter((t: any) => t.short_id != null)
+  const prefix = project.prefix || 'TSK'
+  const maps = buildPullMaps(prefix, sections || [], groups || [], tasks)
+  const byShort = new Map<number, DbTaskRow>(tasks.map(t => [t.short_id, t]))
+  const byUuid = new Map<string, DbTaskRow>(tasks.map(t => [t.id, t]))
+  const leases: LeaseState[] = (leaseRows || []).map((l: any) => ({ start: l.lease_start, end: l.lease_end }))
+  const tombRevByShort = new Map<number, number>()
+  for (const t of tombRows || []) {
+    const cur = tombRevByShort.get(t.short_id) ?? -1
+    if (t.local_rev > cur) tombRevByShort.set(t.short_id, t.local_rev)
+  }
+
+  const applied: string[] = [], created: string[] = [], deleted: string[] = [], rejected: string[] = [], warnings: string[] = []
+  const hubWins: Array<{ path: string; content: string; reason: string }> = []
+
+  const slugToSectionId = (slug: string | undefined, current: string | null): { id: string | null; warn?: string } => {
+    if (!slug || slug === UNFILED_SLUG) return { id: slug === UNFILED_SLUG ? null : current }
+    const id = maps.sectionIdBySlug.get(slug)
+    if (id) return { id }
+    return { id: current, warn: `unknown section slug "${slug}" — kept the hub's section` }
+  }
+
+  const fileFields = (t: ReturnType<typeof parseTaskFile>['task'] & object) => {
+    const sec = slugToSectionId(t.section, null)
+    let groupId: string | null = null
+    if (t.group) {
+      const g = maps.groupIdBySlug.get(t.group)
+      if (g && (!sec.id || g.section_id === sec.id)) groupId = g.id
+      else warnings.push(`${t.id}: unknown or cross-section group "${t.group}" — left ungrouped`)
+    }
+    if (sec.warn) warnings.push(`${t.id}: ${sec.warn}`)
+    return {
+      text: t.title, detail: t.body || null, status: t.status, priority: t.priority,
+      due_date: t.due || null, section_id: sec.id, group_id: groupId,
+      sort_order: t.order ?? 0, updated_at: t.updated_at || new Date().toISOString(),
+    }
+  }
+
+  for (const f of changed) {
+    const path = String(f?.path || '')
+    if (!/^tasks\/.+\.md$/.test(path)) { rejected.push(`${path || '(no path)'}: only tasks/*.md entries are applied`); continue }
+    const { task, warnings: pw } = parseTaskFile(String(f.content || ''), path)
+    for (const w of pw) warnings.push(`${w.path}: ${w.message}`)
+    if (!task) { rejected.push(`${path}: unparseable frontmatter`); continue }
+    const sid = parseShortRef(task.id)
+    if (sid === null) { rejected.push(`${path}: id "${task.id}" is not <PREFIX>-<number>`); continue }
+    const hubRow = byShort.get(sid) || null
+    const tombRev = tombRevByShort.get(sid) ?? null
+    const decision = resolveFlushChange(task.updated_at,
+      hubRow ? { updated_at: hubRow.updated_at ?? null, local_rev: hubRow.local_rev ?? 0 } : null,
+      tombRev, baseCursor)
+
+    if (decision === 'hub_wins') {
+      hubWins.push({ path, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'hub has a newer (or tied) concurrent edit — write this content back' })
+      continue
+    }
+    const fields = fileFields(task)
+    if (decision === 'apply') {
+      // Flow-dependency guard mirrors complete_task: don't let a file edit start/finish a gated task early.
+      if ((fields.status === 'done' || fields.status === 'in_progress') && hubRow!.status !== fields.status) {
+        const unmet = inputSourceIds(hubRow!.input).map(id => byUuid.get(id)).filter(s => s && s.status !== 'done')
+        if (unmet.length) {
+          warnings.push(`${task.id}: status change to ${fields.status} blocked — upstream not done (${unmet.map(u => `${prefix}-${u!.short_id}`).join(', ')}); other fields applied`)
+          fields.status = hubRow!.status as any
+        }
+      }
+      const { error } = await sb.from('tasks').update(fields).eq('id', hubRow!.id).eq('user_id', userId)
+      if (error) rejected.push(`${task.id}: update failed — ${error.message}`)
+      else applied.push(task.id)
+    } else { // create | resurrect_edit_beats_delete
+      if (decision === 'create' && !shortIdWithinLease(sid, leases)) {
+        rejected.push(`${task.id}: id ${sid} is outside this device's leased block(s) — use ids from .sync.json next_free_ids`)
+        continue
+      }
+      const { error } = await sb.from('tasks').insert({
+        user_id: userId, project_id: project.id, short_id: sid, ...fields,
+      })
+      if (error) rejected.push(`${task.id}: insert failed — ${error.message}`)
+      else created.push(task.id)
+    }
+  }
+
+  for (const sid of deletedIds) {
+    const hubRow = byShort.get(sid) || null
+    const decision = resolveFlushDelete(hubRow ? { updated_at: hubRow.updated_at ?? null, local_rev: hubRow.local_rev ?? 0 } : null, baseCursor)
+    if (decision === 'edit_beats_delete_keep') {
+      hubWins.push({ path: `tasks/${prefix}-${sid}.md`, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'edited on the hub since your pull — edit beats delete; restore this file' })
+      continue
+    }
+    if (!hubRow) { deleted.push(`${prefix}-${sid}`); continue } // already gone — idempotent
+    const { data: curProj } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
+    const nextRev = (curProj?.local_revision || 0) + 1
+    await sb.from('projects').update({ local_revision: nextRev }).eq('id', project.id)
+    const { error: delErr } = await sb.from('tasks').delete().eq('id', hubRow.id).eq('user_id', userId)
+    if (delErr) { rejected.push(`${prefix}-${sid}: delete failed — ${delErr.message}`); continue }
+    await sb.from('local_tombstones').insert({
+      project_id: project.id, user_id: userId, task_id: hubRow.id, short_id: String(sid), local_rev: nextRev,
+    })
+    deleted.push(`${prefix}-${sid}`)
+  }
+
+  const { data: after } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
+  return { cursor: after?.local_revision || 0, applied, created, deleted, rejected, warnings, hub_wins: hubWins }
+}
+
 function hydrateScript(bundleUrl: string): string {
   return [
     '// hydrate.mjs — writes/refreshes the .tasker/ mirror in the CURRENT directory.',
@@ -721,6 +880,118 @@ function hydrateScript(bundleUrl: string): string {
     "  const f = join('.tasker', 'tasks', `${p.prefix}-${sid}.md`); if (existsSync(f)) rmSync(f)",
     '}',
     "console.log(JSON.stringify({ status: 'hydrated', file_count: Object.keys(p.files).length, cursor: p.cursor, lease: p.lease, next_free_ids: p.next_free_ids }, null, 2))",
+    '',
+  ].join('\n')
+}
+
+// watch.mjs — immediate-sync watcher. Runs standalone under `node watch.mjs` in
+// the directory containing .tasker/. Flushes local edits within ~1s of a save and
+// polls the hub every ~15s for changes made online / on another device. Auth is
+// the embedded scoped device token (this-project-only). contentHash is inlined to
+// match local_format.ts (FNV-1a) so it agrees with the .sync.json the server wrote.
+function watchScript(base: string, token: string, projectRef: string): string {
+  return [
+    '// watch.mjs — live two-way sync for this .tasker/ folder. Run: node watch.mjs',
+    '// Leave it running while you (or an agent) edit tasks; Ctrl-C to stop.',
+    '// The token below is scoped to THIS project only. Revoke via revoke_device_token.',
+    "import { readFileSync, writeFileSync, readdirSync, existsSync, rmSync, mkdirSync, watch } from 'node:fs'",
+    "import { join, dirname } from 'node:path'",
+    '',
+    `const BASE = ${JSON.stringify(base)}`,
+    `const TOKEN = ${JSON.stringify(token)}`,
+    `const PROJECT = ${JSON.stringify(projectRef)}`,
+    "const DIR = '.tasker'",
+    "const TASKS = join(DIR, 'tasks')",
+    'const POLL_MS = 15000',
+    'const DEBOUNCE_MS = 800',
+    '',
+    '// FNV-1a — byte-identical to the server (local_format.ts contentHash).',
+    'function contentHash(text) {',
+    '  let h = 0x811c9dc5',
+    '  for (let i = 0; i < text.length; i++) { h ^= text.charCodeAt(i); h = Math.imul(h, 0x01000193) }',
+    '  return (h >>> 0).toString(16).padStart(8, "0")',
+    '}',
+    'function loadSync() { return JSON.parse(readFileSync(join(DIR, ".sync.json"), "utf8")) }',
+    'function saveSync(s) { writeFileSync(join(DIR, ".sync.json"), JSON.stringify(s, null, 2) + "\\n", "utf8") }',
+    'function taskFiles() { return existsSync(TASKS) ? readdirSync(TASKS).filter(f => f.endsWith(".md")) : [] }',
+    'function shortId(prefix, name) { const m = new RegExp("^" + prefix + "-(\\\\d+)\\\\.md$").exec(name); return m ? Number(m[1]) : null }',
+    'async function api(qs, body) {',
+    '  const res = await fetch(`${BASE}?${qs}=${TOKEN}`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) })',
+    '  const text = await res.text(); let j; try { j = JSON.parse(text) } catch { j = { error: text } }',
+    '  if (!res.ok) throw new Error(`${res.status}: ${j.error || text}`)',
+    '  return j',
+    '}',
+    '',
+    '// Push local changes: diff current task files against .sync.json hashes.',
+    'async function flush() {',
+    '  const sync = loadSync()',
+    '  const prefix = sync.prefix',
+    '  const prev = sync.hashes || {}',
+    '  const changed = []',
+    '  const present = new Set()',
+    '  for (const f of taskFiles()) {',
+    '    const rel = `tasks/${f}`; present.add(rel)',
+    '    const content = readFileSync(join(TASKS, f), "utf8")',
+    '    if (contentHash(content) !== prev[rel]) changed.push({ path: rel, content })',
+    '  }',
+    '  // Deletions: task files that were in the last sync but are gone now.',
+    '  const deleted = []',
+    '  for (const rel of Object.keys(prev)) {',
+    '    if (rel.startsWith("tasks/") && rel.endsWith(".md") && !present.has(rel)) {',
+    '      const sid = shortId(prefix, rel.slice("tasks/".length)); if (sid !== null) deleted.push(sid)',
+    '    }',
+    '  }',
+    '  if (!changed.length && !deleted.length) return',
+    '  const r = await api("device_flush", { base_cursor: sync.cursor, changed_files: changed, deleted_short_ids: deleted })',
+    '  // Apply hub_wins corrections back to disk.',
+    '  for (const hw of r.hub_wins || []) { const f = join(DIR, hw.path); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, hw.content, "utf8") }',
+    '  // Recompute hashes from disk (authoritative post-flush state) and store the new cursor.',
+    '  const hashes = {}',
+    '  for (const [k, v] of Object.entries(prev)) if (!k.startsWith("tasks/")) hashes[k] = v', // keep project.json/context.md/etc hashes
+    '  for (const f of taskFiles()) hashes[`tasks/${f}`] = contentHash(readFileSync(join(TASKS, f), "utf8"))',
+    '  sync.cursor = r.cursor; sync.hashes = hashes; saveSync(sync)',
+    '  const parts = []',
+    '  if (r.created?.length) parts.push(`+${r.created.length}`)',
+    '  if (r.applied?.length) parts.push(`~${r.applied.length}`)',
+    '  if (r.deleted?.length) parts.push(`-${r.deleted.length}`)',
+    '  if ((r.hub_wins||[]).length) parts.push(`hub_wins ${r.hub_wins.length}`)',
+    '  if ((r.rejected||[]).length) parts.push(`rejected ${r.rejected.length}`)',
+    '  console.log(`↑ flush @cursor ${r.cursor} [${parts.join(" ") || "noop"}]`)',
+    '  for (const w of r.rejected || []) console.warn("  reject:", w)',
+    '}',
+    '',
+    '// Pull hub changes: only when the hub cursor moved past ours.',
+    'let pulling = false',
+    'async function pullIfBehind() {',
+    '  if (pulling) return; pulling = true',
+    '  try {',
+    '    const sync = loadSync()',
+    '    const { cursor: hubCursor } = await api("device_poll", {})',
+    '    if ((hubCursor || 0) <= (sync.cursor || 0)) return',
+    '    const b = await api("device_pull", { cursor: sync.cursor })',
+    '    suppress = true // do not let our own writes retrigger flush',
+    '    for (const [path, content] of Object.entries(b.files)) { const f = join(DIR, path); mkdirSync(dirname(f), { recursive: true }); writeFileSync(f, content, "utf8") }',
+    '    for (const sid of b.tombstoned_short_ids || []) { const f = join(TASKS, `${b.prefix}-${sid}.md`); if (existsSync(f)) rmSync(f) }',
+    '    console.log(`↓ pull  @cursor ${b.cursor} [${Object.keys(b.files).length} files, -${(b.tombstoned_short_ids||[]).length}]`)',
+    '    setTimeout(() => { suppress = false }, 300)',
+    '  } finally { pulling = false }',
+    '}',
+    '',
+    'let suppress = false',
+    'let timer = null',
+    'function schedule() {',
+    '  if (suppress) return',
+    '  clearTimeout(timer)',
+    '  timer = setTimeout(() => { flush().catch(e => console.error("flush error:", e.message)) }, DEBOUNCE_MS)',
+    '}',
+    '',
+    'if (!existsSync(join(DIR, ".sync.json"))) { console.error("No .tasker/.sync.json here — run the hydrate step (pull_local_project) first."); process.exit(1) }',
+    'console.log(`⇄ watching ${DIR}/ for ${PROJECT} — flush on save, poll hub every ${POLL_MS/1000}s. Ctrl-C to stop.`)',
+    '// Initial reconcile both directions.',
+    'await pullIfBehind().catch(e => console.error("pull error:", e.message))',
+    'await flush().catch(e => console.error("flush error:", e.message))',
+    'watch(TASKS, { persistent: true }, () => schedule())',
+    'setInterval(() => { pullIfBehind().catch(e => console.error("pull error:", e.message)) }, POLL_MS)',
     '',
   ].join('\n')
 }
@@ -746,7 +1017,7 @@ Rules that always apply, even before you call anything else:
 const ASSISTANT_DIRECTIVES = [
   'ATTENTION FIRST (TDE-383): right after __init_tasker_session, call get_my_attention — one cross-task pull of what needs the human/you: tasks awaiting the human\'s review, pending GUIDANCE a human left on tasks (picked up even across sessions), agent sessions AWAITING INPUT (blocked on a question), STALE in-progress work, and OVERDUE items. It is your "what needs me?" triage before picking up anything new. Then act on the highest-priority item.',
   'DURABLE WORK BELONGS IN TASKER (use Tasker by default, not your native list): whenever you are about to record a piece of work, ask "is this DURABLE?" — does a human want it persisted, shared, reviewed, or quality-gated, or does it outlive this session? If YES → create it in Tasker (create_task), do NOT leave it in your platform\'s native to-do list where it vanishes at session end. Durable → Tasker: a bug found while doing something else, a follow-up the human will care about later, work someone assigned you, a decision that needs tracking. Transient → keep native: "read file X", "run the test", "fix the import on line 40" — the private per-step scratchpad for executing the item in front of you; do NOT mirror those into Tasker (it floods the spine with noise). Tasker is the durable spine; your native list is how you execute one item on it. (This is a strong default, not a lock — the MCP cannot disable your host\'s native to-do tool; the choice is yours to make correctly.)',
-  'LOCAL MODE WORK BRACKET: projects with Local Mode enabled are mirrored to .tasker/ files in a repo checkout — the FILES are the hot path, not per-edit MCP calls. The bracket: (1) PULL before starting work — call pull_local_project(project, device_id); it returns a hydrate_script: write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs` (it downloads the bundle over a short-lived signed URL, writes every file, deletes tombstoned task files, and prints a JSON summary with the cursor/lease — you may delete the script after). Only if node is unavailable, re-call with inline:true and write the returned file map yourself. (2) GROUND: every task file ends with a ⚖ GOVERNANCE footer carrying the FULL Instruction Set — it is auto-injected on every pull precisely so reading a task means reading its rules; FOLLOW it, never edit it (it is stripped on flush, never synced). Read .tasker/context.md once per session for the Foundation + KB index. (3) WORK the tasks by reading/editing tasks/<ID>.md directly — task body = context, frontmatter = fields; ALWAYS re-stamp updated_at (ISO, UTC) on every edit; create new tasks ONLY with ids from .sync.json next_free_ids; delete = remove the file and remember its numeric id. (4) FLUSH after each work unit (task completed / handoff reached — not every keystroke) — call flush_local_project with the changed files + base_cursor from .sync.json, write any hub_wins corrections back to disk, update the cursor in .sync.json. Ceremonies still go through MCP at flush time: complete_task, submit_task_review, submit_validation_result, store_artifact. input/output/review frontmatter is READ-ONLY carriage (contract edits go through the normal tools). Never hand-edit .sync.json; context.md and README.md are regenerated snapshots. Multi-device consistency comes from the hub — newest updated_at wins conflicts, deletes propagate as tombstones, and a concurrent edit beats a delete.',
+  'LOCAL MODE WORK BRACKET: projects with Local Mode enabled are mirrored to .tasker/ files in a repo checkout — the FILES are the hot path, not per-edit MCP calls. The bracket: (1) PULL before starting work — call pull_local_project(project, device_id); it returns a hydrate_script: write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs` (it downloads the bundle over a short-lived signed URL, writes every file, deletes tombstoned task files, and prints a JSON summary with the cursor/lease — you may delete the script after). Only if node is unavailable, re-call with inline:true and write the returned file map yourself. (2) GROUND: every task file ends with a ⚖ GOVERNANCE footer carrying the FULL Instruction Set — it is auto-injected on every pull precisely so reading a task means reading its rules; FOLLOW it, never edit it (it is stripped on flush, never synced). Read .tasker/context.md once per session for the Foundation + KB index. (3) WORK the tasks by reading/editing tasks/<ID>.md directly — task body = context, frontmatter = fields; ALWAYS re-stamp updated_at (ISO, UTC) on every edit; create new tasks ONLY with ids from .sync.json next_free_ids; delete = remove the file and remember its numeric id. (4) FLUSH after each work unit (task completed / handoff reached — not every keystroke) — call flush_local_project with the changed files + base_cursor from .sync.json, write any hub_wins corrections back to disk, update the cursor in .sync.json. Ceremonies still go through MCP at flush time: complete_task, submit_task_review, submit_validation_result, store_artifact. input/output/review frontmatter is READ-ONLY carriage (contract edits go through the normal tools). Never hand-edit .sync.json; context.md and README.md are regenerated snapshots. Multi-device consistency comes from the hub — newest updated_at wins conflicts, deletes propagate as tombstones, and a concurrent edit beats a delete. IMMEDIATE SYNC (optional): if the human will hand-edit .tasker/ files in an editor, or wants the web board to update live, call pull_local_project with watch:true — it returns a watch_script; save it as watch.mjs next to .tasker/ and run `node watch.mjs` in a spare terminal. It flushes edits within ~1s of a save and pulls hub changes every ~15s, using a project-scoped device token (revoke via revoke_device_token). Without the watcher, the pull-before / flush-after bracket above is the sync; the watcher just removes the manual flush.',
   'AUTONOMOUS WORK LOOP: When the user says "start looping" (or any clearly similar phrase — "start the loop", "clock in the worker", "run autonomously", "work my queue"), work Tasker\'s ready queue hands-off. Each pass: call get_ready_work, then (A) EXECUTE every CONFIRMED proposal EXACTLY as its agent_proposal text says (the human may have edited it — the proposal IS your instruction; no new scope) — verify it works, write a KB entry for anything non-obvious, then clear it via update_task(id, agent_proposal:"") and complete_task only if genuinely done; (B) fully PREPARE the top handed-over (agent_ready) task — investigate and resolve every decision so a confirmed run is pure mechanical application — record it via update_task(id, agent_proposal:"<complete plan>"), then STOP it for the human\'s ASYNC web confirmation. NEVER execute a prepared task until it returns CONFIRMED — the human\'s web confirm (and their edits) is the gate. Unattended rules: do NOT call AskUserQuestion or wait for a chat reply (instead skip the task, append a note stating the open question, and continue), stay quiet on an empty queue, skip-and-flag blockers, NEVER guess on destructive/irreversible actions, and honor stop_flow. CONTINUOUS looping needs a client-side scheduler — on Claude Code run `/loop 2m /work-loop` (or a shorter interval); on a client without a scheduler, run one on-demand pass per request. This runs on the user\'s OWN session at $0 marginal cost (their subscription, not the API) and ONLY while that session stays open; the parked cloud receiver (TDE-398) is the PC-closed alternative that costs API $ per task.',
   'When you begin working on a task, the FIRST thing to do is set its status to in_progress. Calling get_task does this automatically; if you start work without calling get_task, set it explicitly via update_task before doing anything else. When the work is genuinely and verifiably complete, mark it done with complete_task; otherwise leave it in_progress.',
   'VERIFY BEFORE COMPLETE (TDE-344): when a task\'s deliverable is a CHECKABLE artifact (a file, a live page, a pushed commit, a passing test/build/lint, a word count, an API response) and you are the executing agent, attach a deterministic verification as the task\'s gate and PROVE it before completing. (1) When you PREPARE / hand over a task (set agent_proposal), include the check in the plan so the human confirms the work AND its proof together, and freeze it: enable_task_review(task_id, bar:{rules:[{label, kind:"check", rule:"<how to check — e.g. fetch URL X and confirm text Y is present / run the test suite, expect exit 0>", severity:"blocker"}]}). (2) On EXECUTION: actually RUN the check, capture the raw observed_value (the fetched text, the exit code, the file path — never assert), and submit_task_review with it BEFORE complete_task. Completion is NEVER blocked, but a task completed without passing check evidence is durably marked DONE (UNVERIFIED). Prefer deterministic kind=check over human-judgment gates. Skip the gate only for tasks with no checkable artifact (pure discussion/decision).',
@@ -825,6 +1096,7 @@ const TOOLS = [
         device_id: { type: 'string', description: 'Stable name for this machine/checkout (e.g. "desktop-repo"). Determines the ID lease block.' },
         cursor: { type: 'number', description: 'The cursor from this device\'s current .sync.json (omit on first pull). Used for the tombstone diff.' },
         inline: { type: 'boolean', description: 'If true, return the full file map in the tool response instead of the hydrate script (context-heavy fallback for environments without node).' },
+        watch: { type: 'boolean', description: 'If true, ALSO mint a scoped device token and return a watch_script (watch.mjs) for immediate two-way sync: `node watch.mjs` flushes edits within ~1s of a save and polls the hub every ~15s. Use when a human will hand-edit files or wants the web board to update live. Off by default (avoids accruing standing tokens on ordinary pulls).' },
       },
       required: ['project_id', 'device_id'],
     },
@@ -846,6 +1118,32 @@ const TOOLS = [
         deleted_short_ids: { type: 'array', description: 'Numeric short IDs of task files you deleted locally (e.g. [52] for TDE-52).', items: { type: 'number' } },
       },
       required: ['project_id', 'device_id', 'base_cursor'],
+    },
+  },
+  {
+    name: 'mint_device_token',
+    description: 'LOCAL MODE (immediate sync): mint a long-lived, revocable device token so a watch.mjs process can auto-sync .tasker/ the instant a file changes — without re-pulling a 15-min link. The token is scoped to ONE project on ONE device: even if leaked it can only pull/flush that project. Returns the secret ONCE (store it, it is never shown again) plus the watch endpoints. Prefer just running the watch_script from pull_local_project, which mints and embeds a token for you. Owner-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID — must be a Local Mode project.' },
+        device_id: { type: 'string', description: 'Same stable device name used for pull_local_project (determines the ID lease block).' },
+        label: { type: 'string', description: 'Optional human hint stored with the token (e.g. "desktop-repo watcher").' },
+      },
+      required: ['project_id', 'device_id'],
+    },
+  },
+  {
+    name: 'revoke_device_token',
+    description: 'LOCAL MODE: revoke device watcher token(s). Pass token_id to kill one, or device_id to kill every active token for that device, or neither to list active tokens for the project. A revoked token stops working immediately (next watch poll/flush 401s).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID.' },
+        token_id: { type: 'string', description: 'UUID of a specific token to revoke (from revoke_device_token with neither field, or mint_device_token).' },
+        device_id: { type: 'string', description: 'Revoke ALL active tokens for this device.' },
+      },
+      required: ['project_id'],
     },
   },
   {
@@ -4259,12 +4557,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!proj?.local_mode) return `"${project.name}" is not a Local Mode project. Enable Local Mode first (web app → project settings), then pull again.`
       const token = await signBundleToken(project.id, userId, deviceId, cursor)
       const bundleUrl = `${SUPABASE_URL}/functions/v1/mcp?local_bundle=${token}`
-      return JSON.stringify({
+      const out: Record<string, unknown> = {
         status: 'pull_ready', project: project.name,
         how_to: 'Write hydrate_script to a file named hydrate.mjs in the directory that should contain .tasker/, run `node hydrate.mjs`, and read the JSON summary it prints (file_count, cursor, lease, next_free_ids). The bundle URL inside is single-project, short-lived (~15 min) — re-pull if it expires. Afterwards you may delete hydrate.mjs. If node is unavailable, call this tool again with inline:true to receive the full file map directly.',
         hydrate_script: hydrateScript(bundleUrl),
         expires_in_minutes: 15,
-      })
+      }
+      // Optional immediate-sync watcher: mint a scoped device token and embed a
+      // watch.mjs so `node watch.mjs` keeps .tasker/ live-synced (flush-on-save +
+      // hub polling). Off by default so plain pulls don't accrue standing tokens.
+      if (args.watch === true) {
+        const secret = `dt_${b64url(crypto.getRandomValues(new Uint8Array(32)))}`
+        const { error: tErr } = await sb.from('local_device_tokens').insert({
+          project_id: project.id, user_id: userId, device_id: deviceId,
+          token_hash: await sha256Hex(secret), label: `${deviceId} watcher`,
+        })
+        if (tErr) { out.watch_error = `Could not mint watcher token: ${tErr.message}` }
+        else {
+          out.watch_script = watchScript(`${SUPABASE_URL}/functions/v1/mcp`, secret, `${project.prefix || project.name}`)
+          out.watch_how_to = 'After hydrate.mjs has written .tasker/, save watch_script as watch.mjs beside it and run `node watch.mjs` in a spare terminal. It flushes edits within ~1s of a save and pulls hub changes every ~15s. The embedded token is scoped to THIS project only and is revocable via revoke_device_token. Leave it running while working; Ctrl-C to stop.'
+        }
+      }
+      return JSON.stringify(out)
     }
 
     case 'flush_local_project': {
@@ -4275,136 +4589,68 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const baseCursor = Number(args.base_cursor ?? NaN)
       if (!Number.isFinite(baseCursor)) return 'base_cursor is required — the cursor from this device\'s .sync.json.'
 
-      const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }, { data: flushIs }] = await Promise.all([
-        sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
-        sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
-        sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
-        sb.from('tasks').select('id, short_id, text, detail, status, priority, due_date, section_id, group_id, sort_order, input, output, review_enabled, review_bar, updated_at, local_rev')
-          .eq('project_id', project.id).eq('user_id', userId),
-        sb.from('local_id_leases').select('lease_start, lease_end').eq('project_id', project.id).eq('device_id', deviceId).eq('user_id', userId),
-        sb.from('local_tombstones').select('short_id, local_rev').eq('project_id', project.id),
-        sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at'),
-      ])
-      if (!proj?.local_mode) return `"${project.name}" is not a Local Mode project — nothing to flush.`
-      // hub_wins corrections must stay governed — same footer the pull injects.
-      const flushGovernance = (flushIs?.length)
-        ? [
-            '# ⚖ Instruction Set — governs this task (project-wide)',
-            '',
-            ...flushIs.flatMap((e: any) => [`## ${e.title}`, '', e.content, '']),
-            '_Auto-injected on every pull; do not edit (stripped on flush). Foundation + KB index live in context.md._',
-          ].join('\n')
-        : ''
-
-      const tasks: DbTaskRow[] = (taskRows || []).filter((t: any) => t.short_id != null)
-      const prefix = project.prefix || 'TSK'
-      const maps = buildPullMaps(prefix, sections || [], groups || [], tasks)
-      const byShort = new Map<number, DbTaskRow>(tasks.map(t => [t.short_id, t]))
-      const byUuid = new Map<string, DbTaskRow>(tasks.map(t => [t.id, t]))
-      const leases: LeaseState[] = (leaseRows || []).map((l: any) => ({ start: l.lease_start, end: l.lease_end }))
-      const tombRevByShort = new Map<number, number>()
-      for (const t of tombRows || []) {
-        const cur = tombRevByShort.get(t.short_id) ?? -1
-        if (t.local_rev > cur) tombRevByShort.set(t.short_id, t.local_rev)
-      }
-
       const changed = Array.isArray(args.changed_files) ? args.changed_files : []
       const deletedIds = (Array.isArray(args.deleted_short_ids) ? args.deleted_short_ids : []).map(Number).filter(Number.isFinite)
-      const applied: string[] = [], created: string[] = [], deleted: string[] = [], rejected: string[] = [], warnings: string[] = []
-      const hubWins: Array<{ path: string; content: string; reason: string }> = []
-
-      const slugToSectionId = (slug: string | undefined, current: string | null): { id: string | null; warn?: string } => {
-        if (!slug || slug === UNFILED_SLUG) return { id: slug === UNFILED_SLUG ? null : current }
-        const id = maps.sectionIdBySlug.get(slug)
-        if (id) return { id }
-        return { id: current, warn: `unknown section slug "${slug}" — kept the hub's section` }
-      }
-
-      const fileFields = (t: ReturnType<typeof parseTaskFile>['task'] & object) => {
-        const sec = slugToSectionId(t.section, null)
-        let groupId: string | null = null
-        if (t.group) {
-          const g = maps.groupIdBySlug.get(t.group)
-          if (g && (!sec.id || g.section_id === sec.id)) groupId = g.id
-          else warnings.push(`${t.id}: unknown or cross-section group "${t.group}" — left ungrouped`)
-        }
-        if (sec.warn) warnings.push(`${t.id}: ${sec.warn}`)
-        return {
-          text: t.title, detail: t.body || null, status: t.status, priority: t.priority,
-          due_date: t.due || null, section_id: sec.id, group_id: groupId,
-          sort_order: t.order ?? 0, updated_at: t.updated_at || new Date().toISOString(),
-        }
-      }
-
-      for (const f of changed) {
-        const path = String(f?.path || '')
-        if (!/^tasks\/.+\.md$/.test(path)) { rejected.push(`${path || '(no path)'}: only tasks/*.md entries are applied`); continue }
-        const { task, warnings: pw } = parseTaskFile(String(f.content || ''), path)
-        for (const w of pw) warnings.push(`${w.path}: ${w.message}`)
-        if (!task) { rejected.push(`${path}: unparseable frontmatter`); continue }
-        const sid = parseShortRef(task.id)
-        if (sid === null) { rejected.push(`${path}: id "${task.id}" is not <PREFIX>-<number>`); continue }
-        const hubRow = byShort.get(sid) || null
-        const tombRev = tombRevByShort.get(sid) ?? null
-        const decision = resolveFlushChange(task.updated_at,
-          hubRow ? { updated_at: hubRow.updated_at ?? null, local_rev: hubRow.local_rev ?? 0 } : null,
-          tombRev, baseCursor)
-
-        if (decision === 'hub_wins') {
-          hubWins.push({ path, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'hub has a newer (or tied) concurrent edit — write this content back' })
-          continue
-        }
-        const fields = fileFields(task)
-        if (decision === 'apply') {
-          // Flow-dependency guard mirrors complete_task: don't let a file edit start/finish a gated task early.
-          if ((fields.status === 'done' || fields.status === 'in_progress') && hubRow!.status !== fields.status) {
-            const unmet = inputSourceIds(hubRow!.input).map(id => byUuid.get(id)).filter(s => s && s.status !== 'done')
-            if (unmet.length) {
-              warnings.push(`${task.id}: status change to ${fields.status} blocked — upstream not done (${unmet.map(u => `${prefix}-${u!.short_id}`).join(', ')}); other fields applied`)
-              fields.status = hubRow!.status as any
-            }
-          }
-          const { error } = await sb.from('tasks').update(fields).eq('id', hubRow!.id).eq('user_id', userId)
-          if (error) rejected.push(`${task.id}: update failed — ${error.message}`)
-          else applied.push(task.id)
-        } else { // create | resurrect_edit_beats_delete
-          if (decision === 'create' && !shortIdWithinLease(sid, leases)) {
-            rejected.push(`${task.id}: id ${sid} is outside this device's leased block(s) — use ids from .sync.json next_free_ids`)
-            continue
-          }
-          const { error } = await sb.from('tasks').insert({
-            user_id: userId, project_id: project.id, short_id: sid, ...fields,
-          })
-          if (error) rejected.push(`${task.id}: insert failed — ${error.message}`)
-          else created.push(task.id)
-        }
-      }
-
-      for (const sid of deletedIds) {
-        const hubRow = byShort.get(sid) || null
-        const decision = resolveFlushDelete(hubRow ? { updated_at: hubRow.updated_at ?? null, local_rev: hubRow.local_rev ?? 0 } : null, baseCursor)
-        if (decision === 'edit_beats_delete_keep') {
-          hubWins.push({ path: `tasks/${prefix}-${sid}.md`, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'edited on the hub since your pull — edit beats delete; restore this file' })
-          continue
-        }
-        if (!hubRow) { deleted.push(`${prefix}-${sid}`); continue } // already gone — idempotent
-        const { data: curProj } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
-        const nextRev = (curProj?.local_revision || 0) + 1
-        await sb.from('projects').update({ local_revision: nextRev }).eq('id', project.id)
-        const { error: delErr } = await sb.from('tasks').delete().eq('id', hubRow.id).eq('user_id', userId)
-        if (delErr) { rejected.push(`${prefix}-${sid}: delete failed — ${delErr.message}`); continue }
-        await sb.from('local_tombstones').insert({
-          project_id: project.id, user_id: userId, task_id: hubRow.id, short_id: String(sid), local_rev: nextRev,
-        })
-        deleted.push(`${prefix}-${sid}`)
-      }
-
-      const { data: after } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
+      const res = await applyFlush(sb, userId, project, deviceId, baseCursor, changed, deletedIds)
+      if ('error' in res) return res.error
       return JSON.stringify({
-        status: 'flushed', project: project.name, cursor: after?.local_revision || 0,
-        applied, created, deleted, rejected, warnings, hub_wins: hubWins,
+        status: 'flushed', project: project.name, cursor: res.cursor,
+        applied: res.applied, created: res.created, deleted: res.deleted,
+        rejected: res.rejected, warnings: res.warnings, hub_wins: res.hub_wins,
         how_to: 'Write every hub_wins content back to its path under .tasker/, then update the cursor field in .sync.json to the value above. Completion ceremonies (submit_validation_result / submit_task_review / complete_task) still run via MCP.',
       })
+    }
+
+    case 'mint_device_token': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const deviceId = String(args.device_id || '').trim()
+      if (!deviceId) return 'device_id is required — the same stable name used for pull_local_project.'
+      const { data: proj } = await sb.from('projects').select('local_mode').eq('id', project.id).maybeSingle()
+      if (!proj?.local_mode) return `"${project.name}" is not a Local Mode project. Enable Local Mode first, then mint a watcher token.`
+      const secret = `dt_${b64url(crypto.getRandomValues(new Uint8Array(32)))}`
+      const { data: row, error } = await sb.from('local_device_tokens').insert({
+        project_id: project.id, user_id: userId, device_id: deviceId,
+        token_hash: await sha256Hex(secret), label: args.label ? String(args.label) : `${deviceId} watcher`,
+      }).select('id').single()
+      if (error) return `Failed to mint device token: ${error.message}`
+      const base = `${SUPABASE_URL}/functions/v1/mcp`
+      return JSON.stringify({
+        status: 'minted', token_id: row.id, device_id: deviceId,
+        token: secret,
+        endpoints: {
+          poll: `POST ${base}?device_poll=<token>`,
+          pull: `POST ${base}?device_pull=<token>  (body: {cursor})`,
+          flush: `POST ${base}?device_flush=<token>  (body: {base_cursor, changed_files, deleted_short_ids})`,
+        },
+        note: 'Store this token now — it is NEVER shown again. It can ONLY pull/flush this one project on this device. Revoke via revoke_device_token. To auto-sync, just run the watch_script returned by pull_local_project (it embeds a token for you).',
+      })
+    }
+
+    case 'revoke_device_token': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const tokenId = args.token_id ? String(args.token_id) : ''
+      const deviceId = args.device_id ? String(args.device_id).trim() : ''
+
+      if (!tokenId && !deviceId) {
+        const { data: rows } = await sb.from('local_device_tokens')
+          .select('id, device_id, label, created_at, last_used_at')
+          .eq('project_id', project.id).eq('user_id', userId).is('revoked_at', null).order('created_at', { ascending: false })
+        if (!rows?.length) return `No active device tokens for "${project.name}".`
+        return JSON.stringify({
+          active_tokens: rows.map((r: any) => ({ token_id: r.id, device_id: r.device_id, label: r.label, created_at: r.created_at, last_used_at: r.last_used_at })),
+          how_to: 'Revoke one with revoke_device_token(project_id, token_id) or all for a device with revoke_device_token(project_id, device_id).',
+        })
+      }
+
+      let q = sb.from('local_device_tokens').update({ revoked_at: new Date().toISOString() })
+        .eq('project_id', project.id).eq('user_id', userId).is('revoked_at', null)
+      if (tokenId) q = q.eq('id', tokenId)
+      else q = q.eq('device_id', deviceId)
+      const { data: killed, error } = await q.select('id')
+      if (error) return `Failed to revoke: ${error.message}`
+      return `Revoked ${killed?.length || 0} device token(s)${deviceId ? ` for device "${deviceId}"` : ''}. They stop working immediately.`
     }
 
     case 'github_connect': {
@@ -7438,6 +7684,51 @@ Deno.serve(async (req: Request) => {
       status: 405,
       headers: { ...cors, 'Content-Type': 'application/json', 'Allow': 'POST, OPTIONS' },
     })
+  }
+
+  // ── Immediate-sync watcher endpoints (POST ?device_pull / device_flush / device_poll) ──
+  // The watch.mjs process hits these directly with its scoped device token (query
+  // string). Token IS the auth — never the API key, so a leaked device token can
+  // only touch its one project. These bypass JSON-RPC entirely (plain HTTP).
+  {
+    const url = new URL(req.url)
+    const dToken = url.searchParams.get('device_pull') || url.searchParams.get('device_flush') || url.searchParams.get('device_poll')
+    if (dToken) {
+      const jsonRes = (obj: unknown, status = 200) =>
+        new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
+      const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
+      const scope = await resolveDeviceToken(sb, dToken)
+      if (!scope) return jsonRes({ error: 'Invalid or revoked device token. Re-pull to mint a fresh watcher token.' }, 401)
+      const { data: project } = await sb.from('projects').select('id, name, slug, prefix, context, local_mode, local_revision')
+        .eq('id', scope.project_id).eq('user_id', scope.user_id).maybeSingle()
+      if (!project) return jsonRes({ error: 'Project not found.' }, 404)
+      if (!project.local_mode) return jsonRes({ error: `"${project.name}" is not a Local Mode project.` }, 409)
+
+      // device_poll: cheapest possible — just the hub's current cursor.
+      if (url.searchParams.get('device_poll')) {
+        return jsonRes({ status: 'ok', cursor: project.local_revision || 0 })
+      }
+
+      let dbody: any = {}
+      try { dbody = await req.json() } catch { /* device_pull needs no body */ }
+
+      // device_pull: full bundle (same builder as the MCP tool / 15-min link).
+      if (url.searchParams.get('device_pull')) {
+        const cursor = Number(dbody?.cursor ?? 0) || 0
+        const bundle = await buildLocalBundle(sb, scope.user_id, project, scope.device_id, cursor)
+        if ('error' in bundle) return jsonRes({ error: bundle.error }, 409)
+        return jsonRes(bundle)
+      }
+
+      // device_flush: same write path as flush_local_project.
+      const baseCursor = Number(dbody?.base_cursor ?? NaN)
+      if (!Number.isFinite(baseCursor)) return jsonRes({ error: 'base_cursor is required.' }, 400)
+      const changed = Array.isArray(dbody?.changed_files) ? dbody.changed_files : []
+      const deletedIds = (Array.isArray(dbody?.deleted_short_ids) ? dbody.deleted_short_ids : []).map(Number).filter(Number.isFinite)
+      const res = await applyFlush(sb, scope.user_id, project, scope.device_id, baseCursor, changed, deletedIds)
+      if ('error' in res) return jsonRes({ error: res.error }, 409)
+      return jsonRes({ status: 'flushed', ...res })
+    }
   }
 
   let body: any
