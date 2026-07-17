@@ -2275,6 +2275,18 @@ const TOOLS = [
     },
   },
   {
+    name: 'disable_task_review',
+    description: 'Turn OFF task-level review (TDE-261) and clear its frozen bar + verdict — the undo counterpart of enable_task_review. Use this to release a task that was review-enabled by mistake, or stuck in an escalated (review_verdict.escalated) state, WITHOUT faking a passing review (which would corrupt the review ledger). Not a silent wipe: it stamps a {cleared:true, reason, cleared_at} record in place of the verdict so the audit shows a clear happened and why. Removes the "NEEDS REVIEW" board card. Refuses if review was never enabled.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID — the review-enabled task to release.' },
+        reason:  { type: 'string', description: 'Optional short reason recorded in the cleared record (why review is being disabled). Recommended for the audit trail.' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
     name: 'review_task',
     description: 'Run the task-level output judge (TDE-261) on a review-enabled STANDALONE task. Returns the single-task judging protocol with the frozen bar and the stored artifact (read SERVER-SIDE, not from your claims — independence). Mirrors the flow loop store_artifact → validate_output → submit_validation_result: you run check rules inline and spawn a fresh independent subagent for judgment rules, then call submit_task_review with the per-rule results. Refuses flow tasks (mutual exclusivity).',
     inputSchema: {
@@ -6631,6 +6643,23 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (overall === 'pass') return `✓ REVIEW PASSED — "${task.text}". ${results.length} rule(s) graded, all blockers satisfied. (action=pass)`
       if (escalate) return `⛔ REVIEW FAILED (attempt ${attempt}/3) — retry limit reached. ESCALATE TO HUMAN (action=ask_human).\nCritique:\n${critique}`
       return `↩ REVIEW FAILED (attempt ${attempt}/3) — task reopened (action=regenerate). Apply this critique and re-run:\n${critique}`
+    }
+
+    case 'disable_task_review': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      if (!task.review_enabled && !task.review_bar?.rules?.length && !task.review_verdict) {
+        return `Review is not enabled on "${task.text}" — nothing to disable.`
+      }
+      const wasEscalated = !!task.review_verdict?.escalated
+      // Not a silent wipe: leave a superseding "cleared" record so the audit shows a clear happened + why (TDE-374 immutability spirit).
+      const cleared_verdict = { cleared: true, reason: args.reason || null, cleared_at: new Date().toISOString(), prior_overall: task.review_verdict?.overall ?? null }
+      const { error } = await sb.from('tasks')
+        .update({ review_enabled: false, review_bar: null, review_verdict: cleared_verdict })
+        .eq('id', task.id)
+      if (error) throw new Error(error.message)
+      const note = wasEscalated ? ' Escalation cleared — the "NEEDS REVIEW" card will drop.' : ''
+      return `Disabled review on "${task.text}". Frozen bar removed; verdict replaced with a cleared record${args.reason ? ` (reason: ${args.reason})` : ''}.${note}`
     }
 
     case 'remove_task_input': {
