@@ -2507,7 +2507,7 @@ const TOOLS = [
   },
   {
     name: 'name_flow',
-    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). CONTRACT GATE (TDE-287): finalizing is BLOCKED unless every internal handoff has a non-trivial, human-blessed contract on both sides (producer output def-of-done + consumer input criteria). If it blocks, it returns the specific violations — sharpen the flagged rules and run confirm_contract, then retry. Override only with bypass:true (records the flow as visibly gate-bypassed). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided.',
+    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). CONTRACT GATE (TDE-287): finalizing is BLOCKED unless every internal handoff has a non-trivial, human-blessed contract on both sides (producer output def-of-done + consumer input criteria). If it blocks, it returns the specific violations — sharpen the flagged rules and run confirm_contract, then retry. Override only with bypass:true (records the flow as visibly gate-bypassed). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided. To RENAME an already-named flow, do NOT re-call name_flow with the full task list — call update_flow_context(task_id, name) with any one task in the flow.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2535,7 +2535,7 @@ const TOOLS = [
   },
   {
     name: 'update_flow_context',
-    description: 'Update the shared context bag for a named flow, or rename it, or set/change its short ID. Pass any task ID in the flow.',
+    description: 'RENAME a flow (pass name), update its shared context bag (pass context), and/or set/change its short ID — all via any task ID in the flow. This is the canonical way to rename an existing flow: no need to re-run name_flow with the full task list.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -5699,6 +5699,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
         lines.push('')
       }
+      lines.push('To rename a flow (or change its context / short ID), call update_flow_context with any task_id in the flow — no need to re-run name_flow with the full task list.')
       return lines.join('\n')
     }
 
