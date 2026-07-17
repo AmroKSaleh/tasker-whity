@@ -1121,6 +1121,18 @@ const TOOLS = [
     },
   },
   {
+    name: 'set_local_mode',
+    description: 'Turn Local Mode ON or OFF for a project (the same toggle as the web ⇄ Local button). When ON, the project mirrors to .tasker/ files that agents work directly and sync via pull_local_project / flush_local_project. Turning it OFF does not delete any existing .tasker/ files on disk — it just stops the hub treating the project as local (pull/flush will refuse until re-enabled). Use this to make a project local without opening the web app.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID.' },
+        on: { type: 'boolean', description: 'true = enable Local Mode, false = disable. Defaults to true.' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
     name: 'mint_device_token',
     description: 'LOCAL MODE (immediate sync): mint a long-lived, revocable device token so a watch.mjs process can auto-sync .tasker/ the instant a file changes — without re-pulling a 15-min link. The token is scoped to ONE project on ONE device: even if leaked it can only pull/flush that project. Returns the secret ONCE (store it, it is never shown again) plus the watch endpoints. Prefer just running the watch_script from pull_local_project, which mints and embeds a token for you. Owner-only.',
     inputSchema: {
@@ -4599,6 +4611,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         rejected: res.rejected, warnings: res.warnings, hub_wins: res.hub_wins,
         how_to: 'Write every hub_wins content back to its path under .tasker/, then update the cursor field in .sync.json to the value above. Completion ceremonies (submit_validation_result / submit_task_review / complete_task) still run via MCP.',
       })
+    }
+
+    case 'set_local_mode': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const on = args.on === undefined ? true : args.on === true
+      const { data: cur } = await sb.from('projects').select('local_mode').eq('id', project.id).maybeSingle()
+      if (cur?.local_mode === on) return `"${project.name}" already has Local Mode ${on ? 'ON' : 'OFF'} — no change.`
+      const { error } = await sb.from('projects').update({ local_mode: on }).eq('id', project.id).eq('user_id', userId)
+      if (error) return `Failed to set Local Mode: ${error.message}`
+      return on
+        ? `Local Mode is now ON for "${project.name}". Pull it to a machine with pull_local_project(project:"${project.prefix || project.name}", device_id:"<a stable name for this machine>") — add watch:true for immediate two-way sync.`
+        : `Local Mode is now OFF for "${project.name}". pull_local_project / flush_local_project will refuse it until re-enabled. Any .tasker/ files already on disk are left untouched.`
     }
 
     case 'mint_device_token': {
