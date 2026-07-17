@@ -20,7 +20,7 @@ export function useFlows() {
     const [{ data: projs }, { data: tsks }, { data: frecs }] = await Promise.all([
       supabase.from('projects').select(PROJECT_FIELDS).order('created_at'),
       supabase.from('tasks').select(TASK_FIELDS).order('sort_order'),
-      supabase.from('flows').select('id, short_id, gate_bypassed, gate_bypass_reason'),
+      supabase.from('flows').select('id, name, short_id, gate_bypassed, gate_bypass_reason'),
     ])
     if (projs) setProjects(projs)
     if (tsks) setTasks(tsks)
@@ -52,7 +52,9 @@ export function useFlows() {
         const flowRec = flowRecordId ? flowRecMap.get(flowRecordId) : null
         result.push({
           id: `${projectId}:${f.id}`,
-          name: f.autoName,
+          // Prefer the human-set name from the flows record (name_flow / update_flow_context);
+          // fall back to the auto-detected name only for flows that were never named (TDE-238).
+          name: flowRec?.name || f.autoName,
           // The named-flow record id (flows table), if this detected flow has been
           // named via name_flow. null when the flow was never named → no flow IS/KB.
           flowRecordId,
