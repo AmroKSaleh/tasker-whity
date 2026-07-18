@@ -1344,7 +1344,7 @@ const TOOLS = [
   },
   {
     name: 'list_tasks',
-    description: 'List tasks. Done tasks are excluded by default — pass status: "all" to include them. If no project_id is provided, the user\'s default project is used when set; otherwise this requires confirmed: true to list across ALL projects.',
+    description: 'List tasks. Flow steps are NOT tasks and are excluded (TDE-320) — a task that belongs to a named flow is a STEP, listed only via the Flows tools (list_flows / get_flow_context), never here. Done tasks are also excluded by default — pass status: "all" to include them. If no project_id is provided, the user\'s default project is used when set; otherwise this requires confirmed: true to list across ALL projects. include_flow_steps is an explicit user override only: set it solely when the USER has explicitly asked to see flow steps here as if they were normal tasks — never flip it on your own initiative.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1352,6 +1352,7 @@ const TOOLS = [
         section_id: { type: 'string', description: 'Section UUID (optional)' },
         status:     { type: 'string', enum: ['pending', 'in_progress', 'done', 'all'], description: 'Filter by status. Defaults to excluding done tasks. Pass "all" to include everything.' },
         confirmed:  { type: 'boolean', description: 'Set to true to list tasks across ALL projects (only needed when project_id is omitted AND no default project is set).' },
+        include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks — TDE-320). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own.' },
       },
       required: [],
     },
@@ -3325,13 +3326,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!project) return `Project "${args.project_id}" not found.`
       const [{ data }, { data: tasks }] = await Promise.all([
         sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order'),
-        sb.from('tasks').select('section_id, status').eq('project_id', project.id),
+        sb.from('tasks').select('section_id, status, flow_id').eq('project_id', project.id),
       ])
       if (!data?.length) return `No sections in "${project.name}".`
       // Per-section task tallies (default behaviour): open = not done, matching the app's hide-done convention.
+      // TDE-320: flow steps are not tasks — they leave the section tally (matches list_tasks + the board).
       const counts: Record<string, { open: number; total: number }> = {}
       for (const t of ((tasks ?? []) as any[])) {
-        if (!t.section_id) continue
+        if (!t.section_id || t.flow_id) continue
         const c = counts[t.section_id] ?? (counts[t.section_id] = { open: 0, total: 0 })
         c.total++
         if (t.status !== 'done') c.open++
@@ -3389,7 +3391,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case 'list_tasks': {
-      const { project_id, section_id, status, confirmed } = args
+      const { project_id, section_id, status, confirmed, include_flow_steps } = args
       let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, project:projects(prefix), section:sections(name)').eq('user_id', userId)
       if (project_id) {
         const p = await resolveProject(sb, userId, project_id)
@@ -3403,6 +3405,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
       }
       if (section_id) query = query.eq('section_id', section_id)
+      // TDE-320: flow steps are not tasks. Exclude any task that belongs to a named
+      // flow unless the user explicitly asked to see them via include_flow_steps.
+      if (!include_flow_steps) query = query.is('flow_id', null)
       if (status === 'all')   { /* no filter */ }
       else if (status)        query = query.eq('status', status)
       else                    query = query.neq('status', 'done')

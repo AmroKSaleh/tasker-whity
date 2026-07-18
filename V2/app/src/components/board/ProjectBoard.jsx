@@ -20,7 +20,6 @@ import { useGoogleCalendar } from '../../hooks/useGoogleCalendar'
 import { useGitHub } from '../../hooks/useGitHub'
 import AppShell from '../editorial/AppShell'
 import { Kicker, Pill } from '../editorial/atoms'
-import { detectFlows } from '../../lib/flowGraph'
 import AddTaskInline from './AddTaskInline'
 import TaskDetailSheet from './TaskDetailSheet'
 import TaskDetailPanel from './TaskDetailPanel'
@@ -525,12 +524,10 @@ export default function ProjectBoard({ project }) {
   // Flow tasks are not project-board citizens (decision 2026-07-01: flows and their
   // tasks live entirely on the Flows page). They leave every denominator here —
   // columns, Pulse %, filter counts, section x/y, Now Band — not merely the cards.
-  const flowTaskIds = useMemo(() => {
-    const ids = new Set()
-    detectFlows(tasks).forEach(f => f.taskIds.forEach(id => ids.add(id)))
-    return ids
-  }, [tasks])
-  const boardTasks = useMemo(() => tasks.filter(t => !flowTaskIds.has(t.id)), [tasks, flowTaskIds])
+  // TDE-320: a flow STEP is any task named into a flow (flow_id set) — the canonical
+  // "belongs to a flow" predicate, shared with MCP list_tasks. A wired-but-unnamed edge
+  // does NOT hide a task; it only leaves the board once the flow is named.
+  const boardTasks = useMemo(() => tasks.filter(t => !t.flow_id), [tasks])
 
   const enrichedSections = useMemo(() =>
     sections.map(section => {
