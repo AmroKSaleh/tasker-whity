@@ -307,6 +307,44 @@ export function serializeTasker(model: TaskerModel): Record<string, string> {
   return files
 }
 
+// ── structure manifest (TDE-713) ────────────────────────────────────────────
+// The ONE writable structural file (besides tasks/*.md). Unlike project.json (a
+// read-only regenerated snapshot), flush APPLIES this: edit `name` to rename,
+// change `order` to reorder, remove a line to delete. `slug` is the FROZEN stable
+// id — never edit it (that's what keeps task references intact across a rename).
+
+export interface StructureManifest {
+  updated_at?: string
+  sections: Array<{ slug: string; name: string; order: number }>
+  groups: Array<{ slug: string; name: string; section: string; order: number }>
+}
+
+export function serializeStructure(m: StructureManifest): string {
+  // JSON (not the frontmatter dialect) — it's a flat config the human edits by hand.
+  return JSON.stringify({
+    _README: 'Edit name/order to rename/reorder; delete a line to delete (group→its tasks ungroup; section must be empty). NEVER change slug — it is the stable id task files reference. Regenerated shape on pull; your edits to name/order/deletions are applied on flush.',
+    updated_at: m.updated_at || null,
+    sections: m.sections,
+    groups: m.groups,
+  }, null, 2) + '\n'
+}
+
+export function parseStructure(text: string, path = 'structure.json'): { manifest: StructureManifest | null; warnings: ParseWarning[] } {
+  const warnings: ParseWarning[] = []
+  let raw: Record<string, unknown>
+  try { raw = JSON.parse(text.replace(/^﻿/, '')) } catch (e) {
+    return { manifest: null, warnings: [{ path, message: `invalid JSON: ${(e as Error).message}` }] }
+  }
+  const secs = Array.isArray(raw.sections) ? raw.sections as any[] : []
+  const grps = Array.isArray(raw.groups) ? raw.groups as any[] : []
+  const manifest: StructureManifest = {
+    updated_at: typeof raw.updated_at === 'string' ? raw.updated_at : undefined,
+    sections: secs.filter(s => s && typeof s.slug === 'string' && s.slug).map(s => ({ slug: String(s.slug), name: String(s.name ?? s.slug), order: Number(s.order ?? 0) })),
+    groups: grps.filter(g => g && typeof g.slug === 'string' && g.slug).map(g => ({ slug: String(g.slug), name: String(g.name ?? g.slug), section: String(g.section ?? ''), order: Number(g.order ?? 0) })),
+  }
+  return { manifest, warnings }
+}
+
 // ── content hash (for .sync.json bookkeeping) ────────────────────────────────
 // FNV-1a 32-bit, hex — deterministic across runtimes, no crypto dependency.
 
