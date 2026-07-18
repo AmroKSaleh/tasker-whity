@@ -1,6 +1,6 @@
 import { useRef, useMemo, useState, useCallback, useEffect } from 'react'
 import clsx from 'clsx'
-import { Star, Play, Pause, X, GripVertical, MoreHorizontal, AlertTriangle, Trash2, ChevronLeft } from 'lucide-react'
+import { Star, Play, Pause, X, GripVertical, MoreHorizontal, AlertTriangle, Trash2, ChevronLeft, ArrowUpDown, ArrowUp, ArrowDown, Check } from 'lucide-react'
 import {
   DndContext, DragOverlay, PointerSensor, KeyboardSensor,
   closestCenter, useSensor, useSensors, useDroppable,
@@ -8,7 +8,7 @@ import {
 import { SortableContext, useSortable, verticalListSortingStrategy, horizontalListSortingStrategy, arrayMove } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { useProjectMilestones } from '../../hooks/useProjectMilestones'
-import { useTasks } from '../../hooks/useTasks'
+import { useTasks, updateSectionFields } from '../../hooks/useTasks'
 import { useToggleInProgressWithWarning } from '../../hooks/useToggleInProgressWithWarning'
 import FlowBlockedDialog from './DependencyWarningDialog'
 import { scanProjectFlags } from '../../lib/gemini'
@@ -40,6 +40,60 @@ function matchFilter(t, statusFilter, priorityFilter) {
     (statusFilter === 'done' && t.status === 'done')
   const priorityOk = !priorityFilter || t.priority === priorityFilter
   return statusOk && priorityOk
+}
+
+// ── Per-section view prefs (TDE-403) ──
+// Each section persists { sort, dir, status } in sections.view_prefs. Null/missing = defaults:
+// manual drag-order, ascending, and "inherit the board's global status filter".
+const DEFAULT_VIEW_PREFS = { sort: 'manual', dir: 'asc', status: null }
+const SORT_OPTIONS = [
+  { key: 'manual', label: 'Manual' },
+  { key: 'priority', label: 'Priority' },
+  { key: 'due', label: 'Due date' },
+  { key: 'created', label: 'Created' },
+  { key: 'status', label: 'Status' },
+]
+function readViewPrefs(section) {
+  const p = section?.view_prefs
+  return p ? { ...DEFAULT_VIEW_PREFS, ...p } : { ...DEFAULT_VIEW_PREFS }
+}
+
+// Ordinals: lower sorts first in ascending direction.
+const PRIORITY_RANK = { rush: 0, high: 1, medium: 2, low: 3 }
+const STATUS_RANK = { in_progress: 0, pending: 1, done: 2 }
+function priorityRank(t) { return PRIORITY_RANK[t.priority] ?? 4 }
+function statusRank(t) { return STATUS_RANK[t.status] ?? 3 }
+// Missing dates sink to the bottom in ascending order regardless of direction — an absent
+// due date or created timestamp is "unknown", not "earliest".
+function dueTime(t) { return t.due_date ? new Date(t.due_date).getTime() : Infinity }
+function createdTime(t) { return t.created_at ? new Date(t.created_at).getTime() : Infinity }
+
+// Returns a comparator for the given sort key, or null for manual (caller keeps sort_order).
+function sortComparator(sort, dir) {
+  if (sort === 'manual') return null
+  const sign = dir === 'desc' ? -1 : 1
+  const manualTiebreak = (a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0)
+  const by = {
+    priority: (a, b) => priorityRank(a) - priorityRank(b),
+    status: (a, b) => statusRank(a) - statusRank(b),
+    due: (a, b) => dueTime(a) - dueTime(b),
+    created: (a, b) => createdTime(a) - createdTime(b),
+  }[sort]
+  if (!by) return null
+  return (a, b) => {
+    const primary = by(a, b) * sign
+    return primary !== 0 ? primary : manualTiebreak(a, b)
+  }
+}
+
+// Apply a section's view prefs to a task list: filter by its status override (falling back to
+// the global filter when the section has none), then order by the chosen sort.
+function applySectionView(tasks, prefs, globalStatusFilter, priorityFilter) {
+  const statusFilter = prefs.status ?? globalStatusFilter
+  const filtered = tasks.filter(t => matchFilter(t, statusFilter, priorityFilter))
+  const cmp = sortComparator(prefs.sort, prefs.dir)
+  if (!cmp) return filtered.slice().sort((a, b) => (a.sort_order ?? 0) - (b.sort_order ?? 0))
+  return filtered.slice().sort(cmp)
 }
 
 function dueLabel(due_date) {
@@ -208,10 +262,80 @@ function DroppableList({ sectionId, groupId, items, children }) {
   )
 }
 
-function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection, onDeleteSection }) {
+// ── Per-section sort + status controls (TDE-403) ──
+// A compact header control: a sort dropdown (Manual/Priority/Due/Created/Status), a direction
+// toggle (hidden in Manual), and a Pending/All status toggle. Persisted via onChange →
+// updateSectionFields. Manual is the default and preserves drag-order.
+function SectionViewControls({ prefs, sorted, onChange }) {
+  const [open, setOpen] = useState(false)
+  const activeStatus = prefs.status // null = inheriting global; treated as "Pending" visually only when explicitly set
+  const setPref = patch => onChange({ ...prefs, ...patch })
+  const currentLabel = SORT_OPTIONS.find(o => o.key === prefs.sort)?.label || 'Manual'
+  return (
+    <div className="flex items-center gap-0.5 shrink-0">
+      {/* Status toggle: Pending / All. null (inherit) renders as neither active until set. */}
+      <div className="flex items-center rounded border border-line-2 overflow-hidden mr-1">
+        <button
+          onClick={() => setPref({ status: 'pending' })}
+          className={clsx('px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-[0.06em] transition-colors',
+            activeStatus === 'pending' ? 'bg-ink text-paper' : 'text-mute hover:text-ink')}
+          title="Show only pending tasks in this section"
+        >Pending</button>
+        <button
+          onClick={() => setPref({ status: 'all' })}
+          className={clsx('px-1.5 py-0.5 text-[9px] font-mono uppercase tracking-[0.06em] border-l border-line-2 transition-colors',
+            activeStatus === 'all' ? 'bg-ink text-paper' : 'text-mute hover:text-ink')}
+          title="Show all tasks in this section (including done)"
+        >All</button>
+      </div>
+      {/* Direction toggle — only meaningful when a real sort is active */}
+      {sorted && (
+        <button
+          onClick={() => setPref({ dir: prefs.dir === 'asc' ? 'desc' : 'asc' })}
+          className="w-[22px] h-[22px] inline-flex items-center justify-center rounded text-mute hover:text-ink hover:bg-surf-2 transition-colors"
+          title={prefs.dir === 'asc' ? 'Ascending — click for descending' : 'Descending — click for ascending'}
+        >
+          {prefs.dir === 'asc' ? <ArrowUp size={12} /> : <ArrowDown size={12} />}
+        </button>
+      )}
+      {/* Sort dropdown */}
+      <div className="relative">
+        <button
+          onClick={() => setOpen(o => !o)}
+          className={clsx('w-[22px] h-[22px] inline-flex items-center justify-center rounded transition-colors',
+            sorted ? 'text-accent hover:bg-accent/10' : 'text-mute hover:text-ink hover:bg-surf-2')}
+          title={sorted ? `Sorted by ${currentLabel}` : 'Sort this section'}
+        >
+          <ArrowUpDown size={12} />
+        </button>
+        {open && (
+          <>
+            <div className="fixed inset-0 z-10" onClick={() => setOpen(false)} />
+            <div className="absolute right-0 top-7 z-20 min-w-[130px] rounded-lg border border-line bg-paper shadow-card py-1">
+              {SORT_OPTIONS.map(o => (
+                <button
+                  key={o.key}
+                  onClick={() => { setPref({ sort: o.key }); setOpen(false) }}
+                  className="w-full flex items-center gap-2 text-left px-3 py-1.5 text-[12px] text-ink-2 hover:bg-surf-2"
+                >
+                  <span className="w-3 inline-flex justify-center">{prefs.sort === o.key && <Check size={11} className="text-accent" />}</span>
+                  {o.label}
+                </button>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection, onDeleteSection, onUpdateViewPrefs }) {
   const dim = /done|complete/i.test(section.name)
-  const ungrouped = section.ungroupedTasks.filter(t => matchFilter(t, statusFilter, priorityFilter))
-  const groups = section.groups.map(g => ({ ...g, tasks: g.tasks.filter(t => matchFilter(t, statusFilter, priorityFilter)) }))
+  const prefs = readViewPrefs(section)
+  const sorted = prefs.sort !== 'manual'
+  const ungrouped = applySectionView(section.ungroupedTasks, prefs, statusFilter, priorityFilter)
+  const groups = section.groups.map(g => ({ ...g, tasks: applySectionView(g.tasks, prefs, statusFilter, priorityFilter) }))
   const [menuOpen, setMenuOpen] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [addingGroup, setAddingGroup] = useState(false)
@@ -230,13 +354,14 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
       className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0"
     >
       <div className="relative h-11 px-3.5 flex items-center justify-between border-b border-line-2 bg-surf-2 sticky top-0 z-[2]">
-        <div className="flex items-center gap-1.5 flex-1 min-w-0 cursor-pointer hover:opacity-80 transition-opacity" onClick={() => onFocusSection(section.id)}>
+        <div className="flex items-center gap-1.5 min-w-0 cursor-pointer hover:opacity-80 transition-opacity mr-1" onClick={() => onFocusSection(section.id)}>
           <button {...attributes} {...listeners} className="cursor-grab active:cursor-grabbing text-mute-2 hover:text-mute -ml-1" title="Drag to reorder section">
             <GripVertical size={13} />
           </button>
           <Kicker count={section.completedCount} total={section.totalCount} className={dim ? 'text-mute-2' : undefined}>{section.name}</Kicker>
         </div>
-        <button className="icon-btn w-[22px] h-[22px]" onClick={() => setMenuOpen(o => !o)}><MoreHorizontal size={11} /></button>
+        <SectionViewControls prefs={prefs} sorted={sorted} onChange={p => onUpdateViewPrefs(section.id, p)} />
+        <button className="icon-btn w-[22px] h-[22px] ml-0.5" onClick={() => setMenuOpen(o => !o)}><MoreHorizontal size={11} /></button>
         {menuOpen && (
           <>
             <div className="fixed inset-0 z-10" onClick={() => setMenuOpen(false)} />
@@ -287,6 +412,14 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
           </div>
         )}
       </div>
+      {sorted && (
+        <div className="px-3.5 py-1 border-b border-line-2 bg-surf-2/60 flex items-center gap-1.5">
+          <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-accent">
+            Sorted · {SORT_OPTIONS.find(o => o.key === prefs.sort)?.label}
+          </span>
+          <span className="text-[9px] text-mute-2">— set Manual to drag-reorder</span>
+        </div>
+      )}
       <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 flex flex-col gap-1.5 col-body">
         {addingGroup && (
           <input
@@ -448,7 +581,11 @@ export default function ProjectBoard({ project }) {
     const fromGroup = a.groupId ?? null
 
     if (fromSection === toSection && fromGroup === toGroup) {
-      // Same list: reorder. If we didn't land on a sibling card, leave order as-is.
+      // Same list: reorder. Blocked when the section is in a non-manual sort (TDE-403) — the
+      // saved sort is the source of truth there; switch it back to Manual to hand-reorder.
+      const srcSection = sections.find(s => s.id === fromSection)
+      if (readViewPrefs(srcSection).sort !== 'manual') return
+      // If we didn't land on a sibling card, leave order as-is.
       if (!overIsTask || over.id === active.id) return
       const peers = boardTasks
         .filter(t => t.section_id === toSection && (t.group_id ?? null) === toGroup)
@@ -477,6 +614,9 @@ export default function ProjectBoard({ project }) {
     if (isConnected) removeTask(taskId).catch(() => {})
     deleteTask(taskId)
   }
+  const handleUpdateViewPrefs = useCallback((sectionId, viewPrefs) => {
+    updateSectionFields(sectionId, { view_prefs: viewPrefs })
+  }, [])
   const handleRename = useCallback((name) => updateProject(project.id, { name }), [project.id])
   function commitName() {
     setEditingName(false)
@@ -875,7 +1015,7 @@ export default function ProjectBoard({ project }) {
                       key={s.id} section={s} statusFilter={statusFilter} priorityFilter={priorityFilter} prefix={project.prefix}
                       onAddTask={createTask} onAddDetailed={createAndOpen} onAddGroup={createGroup} onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning}
                       onFocus={() => {}} /* DISABLED */ onPin={pinTask} onDelete={handleDeleteTask} onFocusSection={setFocusedSectionId}
-                      onDeleteSection={deleteSection}
+                      onDeleteSection={deleteSection} onUpdateViewPrefs={handleUpdateViewPrefs}
                     />
                   ))
                 )}
