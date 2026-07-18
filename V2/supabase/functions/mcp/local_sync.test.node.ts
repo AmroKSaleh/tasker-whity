@@ -4,8 +4,9 @@
 // semantics 1:1: same decision functions (sync_core), same file round-trip
 // (local_format) — proving the LWW/tombstone/edit-beats-delete machinery.
 
-import { parseTaskFile, serializeTaskFile, contentHash } from './local_format.ts'
+import { parseTaskFile, serializeTaskFile, contentHash, serializeStructure, parseStructure } from './local_format.ts'
 import type { TaskerTask } from './local_format.ts'
+import { buildSlugMap } from './sync_core.ts'
 import {
   resolveFlushChange, resolveFlushDelete, shortIdWithinLease, parseShortRef,
   slugify, dbRowToTaskerTask, buildPullMaps, LEASE_BLOCK, type LeaseState,
@@ -192,6 +193,36 @@ assert(noMs.milestones === undefined && !serializeTaskFile(noMs).includes('miles
 const steps = [{ summary: 'plain A' }, { summary: 'a question', kind: 'question' }, { summary: 'plain B' }, { summary: 'a prereq', kind: 'prerequisite' }]
 const emitted = steps.filter(s => s.kind !== 'question' && s.kind !== 'prerequisite').map(s => s.summary)
 assert(emitted.length === 2 && emitted.join(',') === 'plain A,plain B', 'emit filter keeps plain milestones, drops seed question/prerequisite items')
+
+// ── Scenario 9: FROZEN SLUGS — buildSlugMap honors a stored slug (TDE-713) ───
+// A stored slug is the permanent identity; it must be used verbatim and NEVER
+// recomputed from the name (recompute-on-rename is exactly what orphans refs).
+{
+  // renamed section: stored slug "core-app" but name now "Core Application"
+  const rows = [{ id: 's1', name: 'Core Application', slug: 'core-app' }, { id: 's2', name: 'Bugs' }]
+  const m = buildSlugMap(rows)
+  assert(m.get('s1') === 'core-app', 'stored slug used verbatim, NOT recomputed from the renamed name')
+  assert(m.get('s2') === 'bugs', 'row without a stored slug still computes one (pre-migration fallback)')
+  // a computed fallback must not collide with a reserved frozen slug
+  const rows2 = [{ id: 'a', name: 'X', slug: 'bugs' }, { id: 'b', name: 'Bugs' }]
+  const m2 = buildSlugMap(rows2)
+  assert(m2.get('a') === 'bugs' && m2.get('b') === 'bugs-2', 'computed fallback dedupes AROUND a reserved frozen slug (bugs → bugs-2)')
+}
+
+// ── Scenario 10: structure manifest round-trip (TDE-713) ─────────────────────
+{
+  const manifest = {
+    sections: [{ slug: 'core-app', name: 'Core App', order: 0 }, { slug: 'bugs', name: 'Bugs', order: 3 }],
+    groups: [{ slug: 'google-integrations', name: 'Google Integrations', section: 'mcp-integrations', order: 1 }],
+  }
+  const { manifest: rt } = parseStructure(serializeStructure(manifest))
+  assert(rt !== null && rt.sections.length === 2 && rt.groups.length === 1, 'structure manifest round-trips section+group counts')
+  assert(rt!.sections[0].slug === 'core-app' && rt!.sections[0].name === 'Core App', 'section slug + name survive round-trip')
+  assert(rt!.groups[0].section === 'mcp-integrations', 'group parent-section slug survives round-trip')
+  // tolerates a BOM + ignores rows missing a slug
+  const { manifest: rt2 } = parseStructure('﻿' + serializeStructure({ sections: [{ slug: '', name: 'no slug', order: 0 } as any], groups: [] }))
+  assert(rt2 !== null && rt2.sections.length === 0, 'BOM tolerated; a section line with no slug is dropped')
+}
 
 if (failures > 0) { console.error(`\n${failures} failure(s)`); process.exit(1) }
 console.log('\nALL SCENARIOS PASS')

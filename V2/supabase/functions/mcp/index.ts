@@ -1,6 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { inputEdges, inputSourceIds, outputContract, lintRule, deriveOutputFromConsumers, contractGateViolations } from './contract_gate.ts'
-import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash, kbFileSlug } from './local_format.ts'
+import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash, kbFileSlug, serializeStructure, parseStructure } from './local_format.ts'
 import {
   buildPullMaps, buildProjectMeta, dbRowToTaskerTask, resolveFlushChange, resolveFlushDelete,
   leaseFreeIds, shortIdWithinLease, parseShortRef, LEASE_BLOCK, LEASE_MIN_FREE, UNFILED_SLUG,
@@ -634,8 +634,8 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
 }> {
   const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }] = await Promise.all([
     sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
-    sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
-    sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
+    sb.from('sections').select('id, name, sort_order, slug').eq('project_id', project.id).order('sort_order'),
+    sb.from('groups').select('id, name, section_id, sort_order, slug').eq('project_id', project.id).order('sort_order'),
     sb.from('tasks').select('id, short_id, text, detail, status, priority, due_date, section_id, group_id, sort_order, input, output, review_enabled, review_bar, updated_at, local_rev')
       .eq('project_id', project.id).eq('user_id', userId),
   ])
@@ -676,6 +676,13 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
   const files: Record<string, string> = {}
   files['project.json'] = serializeProjectJson(meta)
   for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = serializeTaskFile(dbRowToTaskerTask(row, prefix, maps, milestonesByTaskId.get(row.id)))
+
+  // structure.json — the writable manifest for rename/reorder/delete of sections+groups
+  // (TDE-713). Excludes the synthetic Unfiled section (not a real row). slug = frozen id.
+  files['structure.json'] = serializeStructure({
+    sections: meta.sections.filter(s => s.id !== UNFILED_SLUG).map(s => ({ slug: s.id, name: s.name, order: s.order })),
+    groups: meta.groups.map(g => ({ slug: g.id, name: g.name, section: g.section, order: g.order })),
+  })
 
   // [prefix]-instruction-set.md — the full project IS, once. The single governing rulebook.
   const lc = prefix.toLowerCase()
@@ -807,13 +814,13 @@ async function applyFlush(
   changed: Array<{ path?: string; content?: string }>, deletedIds: number[],
 ): Promise<{ error: string } | {
   cursor: number; applied: string[]; created: string[]; deleted: string[]
-  created_groups: string[]; created_sections: string[]
+  created_groups: string[]; created_sections: string[]; structure_changes: string[]
   rejected: string[]; warnings: string[]; hub_wins: Array<{ path: string; content: string; reason: string }>
 }> {
   const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }] = await Promise.all([
     sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
-    sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
-    sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
+    sb.from('sections').select('id, name, sort_order, slug').eq('project_id', project.id).order('sort_order'),
+    sb.from('groups').select('id, name, section_id, sort_order, slug').eq('project_id', project.id).order('sort_order'),
     sb.from('tasks').select('id, short_id, text, detail, status, priority, due_date, section_id, group_id, sort_order, input, output, review_enabled, review_bar, updated_at, local_rev')
       .eq('project_id', project.id).eq('user_id', userId),
     sb.from('local_id_leases').select('lease_start, lease_end').eq('project_id', project.id).eq('device_id', deviceId).eq('user_id', userId),
@@ -838,7 +845,76 @@ async function applyFlush(
   const applied: string[] = [], created: string[] = [], deleted: string[] = [], rejected: string[] = [], warnings: string[] = []
   const createdGroups: string[] = []
   const createdSections: string[] = []
+  const structureChanges: string[] = [] // TDE-713: rename/reorder/delete of sections+groups via structure.json
   const hubWins: Array<{ path: string; content: string; reason: string }> = []
+
+  // Apply structure.json (TDE-713): reconcile the manifest against the hub by FROZEN
+  // slug. rename = name changed; reorder = order changed; delete = a hub row whose slug
+  // is ABSENT from the manifest (group → its tasks fall to ungrouped; section → REFUSED
+  // if it still holds tasks or groups). CREATE is NOT here — that's create-by-reference
+  // (a manifest slug with no hub row is ignored with a note). Whole-manifest LWW is
+  // handled by the caller via updated_at; here we just apply.
+  const applyStructure = async (content: string) => {
+    const { manifest, warnings: mw } = parseStructure(content)
+    for (const w of mw) warnings.push(`structure.json: ${w.message}`)
+    if (!manifest) { rejected.push('structure.json: unparseable'); return }
+
+    const hubSectionBySlug = new Map((sections || []).map((s: any) => [s.slug, s]))
+    const hubGroupBySlug = new Map((groups || []).map((g: any) => [g.slug, g]))
+    const fileSectionSlugs = new Set(manifest.sections.map(s => s.slug))
+    const fileGroupSlugs = new Set(manifest.groups.map(g => g.slug))
+
+    // SECTIONS: rename + reorder
+    for (const s of manifest.sections) {
+      const hub = hubSectionBySlug.get(s.slug)
+      if (!hub) { warnings.push(`structure.json: section slug "${s.slug}" has no hub row — ignored (create sections by referencing them from a task)`); continue }
+      const patch: Record<string, unknown> = {}
+      if (s.name && s.name !== hub.name) patch.name = s.name
+      if (Number.isFinite(s.order) && s.order !== hub.sort_order) patch.sort_order = s.order
+      if (Object.keys(patch).length) {
+        const { error } = await sb.from('sections').update(patch).eq('id', hub.id).eq('project_id', project.id)
+        if (error) rejected.push(`structure.json: section "${s.slug}" update failed — ${error.message}`)
+        else structureChanges.push(`section ${s.slug}: ${Object.keys(patch).join('+')}`)
+      }
+    }
+    // GROUPS: rename + reorder (+ section reparent by slug)
+    for (const g of manifest.groups) {
+      const hub = hubGroupBySlug.get(g.slug)
+      if (!hub) { warnings.push(`structure.json: group slug "${g.slug}" has no hub row — ignored (create groups by referencing them from a task)`); continue }
+      const patch: Record<string, unknown> = {}
+      if (g.name && g.name !== hub.name) patch.name = g.name
+      if (Number.isFinite(g.order) && g.order !== hub.sort_order) patch.sort_order = g.order
+      const newSecId = g.section ? hubSectionBySlug.get(g.section)?.id : undefined
+      if (newSecId && newSecId !== hub.section_id) patch.section_id = newSecId
+      if (Object.keys(patch).length) {
+        const { error } = await sb.from('groups').update(patch).eq('id', hub.id).eq('project_id', project.id)
+        if (error) rejected.push(`structure.json: group "${g.slug}" update failed — ${error.message}`)
+        else structureChanges.push(`group ${g.slug}: ${Object.keys(patch).join('+')}`)
+      }
+    }
+    // DELETE groups: hub group absent from the manifest → delete; its tasks fall to ungrouped.
+    for (const [slug, hub] of hubGroupBySlug) {
+      if (fileGroupSlugs.has(slug as string)) continue
+      await sb.from('tasks').update({ group_id: null }).eq('group_id', (hub as any).id).eq('user_id', userId)
+      const { error } = await sb.from('groups').delete().eq('id', (hub as any).id).eq('project_id', project.id)
+      if (error) rejected.push(`structure.json: group "${slug}" delete failed — ${error.message}`)
+      else structureChanges.push(`group ${slug}: deleted (tasks ungrouped)`)
+    }
+    // DELETE sections: only if empty (no tasks AND no groups). Otherwise REFUSE.
+    for (const [slug, hub] of hubSectionBySlug) {
+      if (fileSectionSlugs.has(slug as string)) continue
+      const secId = (hub as any).id
+      const { count: taskCount } = await sb.from('tasks').select('id', { count: 'exact', head: true }).eq('section_id', secId).eq('user_id', userId)
+      const stillHasGroup = (groups || []).some((g: any) => g.section_id === secId && fileGroupSlugs.has(g.slug))
+      if ((taskCount || 0) > 0 || stillHasGroup) {
+        warnings.push(`structure.json: section "${slug}" NOT deleted — still has ${taskCount || 0} task(s)${stillHasGroup ? ' and group(s)' : ''}; empty it first (section delete is guarded)`)
+        continue
+      }
+      const { error } = await sb.from('sections').delete().eq('id', secId).eq('project_id', project.id)
+      if (error) rejected.push(`structure.json: section "${slug}" delete failed — ${error.message}`)
+      else structureChanges.push(`section ${slug}: deleted (was empty)`)
+    }
+  }
 
   // Section create-by-reference: an unknown `section:` slug creates that section
   // (named verbatim = slug-is-name → round-trips exactly, same rationale as groups).
@@ -851,7 +927,7 @@ async function applyFlush(
     const { data: maxRow } = await sb.from('sections').select('sort_order').eq('project_id', project.id).order('sort_order', { ascending: false }).limit(1)
     const nextSort = (maxRow?.[0]?.sort_order ?? 0) + 1
     const { data: ins, error } = await sb.from('sections').insert({
-      project_id: project.id, name: slug, sort_order: nextSort,
+      project_id: project.id, name: slug, sort_order: nextSort, slug, // frozen slug = the referenced slug (slug-is-name)
     }).select('id').single()
     if (error || !ins) { warnings.push(`${t.id}: could not create section "${slug}" — ${error?.message || 'insert failed'}; task left in the hub's section`); return null }
     maps.sectionIdBySlug.set(slug, ins.id) // sibling tasks reuse it
@@ -883,7 +959,7 @@ async function applyFlush(
     const { data: maxRow } = await sb.from('groups').select('sort_order').eq('section_id', sectionId).order('sort_order', { ascending: false }).limit(1)
     const nextSort = (maxRow?.[0]?.sort_order ?? 0) + 1
     const { data: ins, error } = await sb.from('groups').insert({
-      project_id: project.id, section_id: sectionId, name: t.group, sort_order: nextSort,
+      project_id: project.id, section_id: sectionId, name: t.group, sort_order: nextSort, slug: t.group, // frozen slug = referenced slug
     }).select('id').single()
     if (error || !ins) { warnings.push(`${t.id}: could not create group "${t.group}" — ${error?.message || 'insert failed'}; left ungrouped`); return null }
     maps.groupIdBySlug.set(t.group, { id: ins.id, section_id: sectionId }) // sibling tasks reuse it
@@ -932,7 +1008,8 @@ async function applyFlush(
 
   for (const f of changed) {
     const path = String(f?.path || '')
-    if (!/^tasks\/.+\.md$/.test(path)) { rejected.push(`${path || '(no path)'}: only tasks/*.md entries are applied`); continue }
+    if (path === 'structure.json') { await applyStructure(String(f.content || '')); continue }
+    if (!/^tasks\/.+\.md$/.test(path)) { rejected.push(`${path || '(no path)'}: only tasks/*.md and structure.json are applied`); continue }
     const { task, warnings: pw } = parseTaskFile(String(f.content || ''), path)
     for (const w of pw) warnings.push(`${w.path}: ${w.message}`)
     if (!task) { rejected.push(`${path}: unparseable frontmatter`); continue }
@@ -993,8 +1070,15 @@ async function applyFlush(
     deleted.push(`${prefix}-${sid}`)
   }
 
+  // Structural edits (rename/reorder/delete via structure.json) don't touch tasks.local_rev,
+  // so bump the project cursor explicitly so other devices see the change on their next pull.
+  if (structureChanges.length) {
+    const { data: cur } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
+    await sb.from('projects').update({ local_revision: (cur?.local_revision || 0) + 1 }).eq('id', project.id)
+  }
+
   const { data: after } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
-  return { cursor: after?.local_revision || 0, applied, created, deleted, created_groups: createdGroups, created_sections: createdSections, rejected, warnings, hub_wins: hubWins }
+  return { cursor: after?.local_revision || 0, applied, created, deleted, created_groups: createdGroups, created_sections: createdSections, structure_changes: structureChanges, rejected, warnings, hub_wins: hubWins }
 }
 
 function hydrateScript(bundleUrl: string): string {
@@ -4759,6 +4843,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         status: 'flushed', project: project.name, cursor: res.cursor,
         applied: res.applied, created: res.created, deleted: res.deleted,
         created_groups: res.created_groups, created_sections: res.created_sections,
+        structure_changes: res.structure_changes,
         rejected: res.rejected, warnings: res.warnings, hub_wins: res.hub_wins,
         how_to: 'Write every hub_wins content back to its path under .tasker/, then update the cursor field in .sync.json to the value above. Completion ceremonies (submit_validation_result / submit_task_review / complete_task) still run via MCP.',
         ...(res.created_groups.length ? { note_created_groups: `Created ${res.created_groups.length} group(s) by reference from a task's group: field: ${res.created_groups.join(', ')}. Named exactly as the slug (rename via the web app / rename_group if you want a prettier display name). If any of these was a typo, it made a stray group — delete it via the web app.` } : {}),

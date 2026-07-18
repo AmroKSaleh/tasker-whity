@@ -8,8 +8,8 @@ import type { TaskerTask, TaskerProjectMeta, TaskerSection, TaskerGroup, TaskerM
 
 // ── DB row shapes (subset the sync engine reads) ─────────────────────────────
 
-export interface DbSectionRow { id: string; name: string; sort_order?: number | null }
-export interface DbGroupRow { id: string; name: string; section_id: string; sort_order?: number | null }
+export interface DbSectionRow { id: string; name: string; sort_order?: number | null; slug?: string | null }
+export interface DbGroupRow { id: string; name: string; section_id: string; sort_order?: number | null; slug?: string | null }
 
 export interface DbTaskRow {
   id: string
@@ -37,11 +37,18 @@ export function slugify(name: string): string {
   return s || 'section'
 }
 
-// Stable, collision-free slug per row (dedup by appending -2, -3 … in list order).
-export function buildSlugMap(rows: Array<{ id: string; name: string }>): Map<string, string> {
+// Stable, collision-free slug per row. FROZEN SLUGS (TDE-713): if a row carries a
+// stored `slug`, use it verbatim — that is its permanent identity and must NOT be
+// recomputed from the name (recomputing is what breaks rename). Only rows WITHOUT a
+// stored slug fall back to computing one (dedup by appending -2, -3 … in list order),
+// covering pre-migration rows and any transient state. Stored slugs are reserved
+// first so a computed fallback can never collide with an existing frozen slug.
+export function buildSlugMap(rows: Array<{ id: string; name: string; slug?: string | null }>): Map<string, string> {
   const used = new Set<string>()
   const map = new Map<string, string>()
+  for (const r of rows) { if (r.slug) { used.add(r.slug); map.set(r.id, r.slug) } } // reserve frozen slugs first
   for (const r of rows) {
+    if (r.slug) continue // already mapped to its frozen slug
     let slug = slugify(r.name)
     let n = 2
     while (used.has(slug)) { slug = `${slugify(r.name)}-${n}`; n++ }
