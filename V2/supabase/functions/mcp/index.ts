@@ -787,7 +787,7 @@ async function applyFlush(
   sb: any, userId: string, project: any, deviceId: string, baseCursor: number,
   changed: Array<{ path?: string; content?: string }>, deletedIds: number[],
 ): Promise<{ error: string } | {
-  cursor: number; applied: string[]; created: string[]; deleted: string[]
+  cursor: number; applied: string[]; created: string[]; deleted: string[]; created_groups: string[]
   rejected: string[]; warnings: string[]; hub_wins: Array<{ path: string; content: string; reason: string }>
 }> {
   const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }] = await Promise.all([
@@ -816,6 +816,7 @@ async function applyFlush(
   }
 
   const applied: string[] = [], created: string[] = [], deleted: string[] = [], rejected: string[] = [], warnings: string[] = []
+  const createdGroups: string[] = []
   const hubWins: Array<{ path: string; content: string; reason: string }> = []
 
   const slugToSectionId = (slug: string | undefined, current: string | null): { id: string | null; warn?: string } => {
@@ -825,14 +826,41 @@ async function applyFlush(
     return { id: current, warn: `unknown section slug "${slug}" — kept the hub's section` }
   }
 
-  const fileFields = (t: ReturnType<typeof parseTaskFile>['task'] & object) => {
-    const sec = slugToSectionId(t.section, null)
-    let groupId: string | null = null
-    if (t.group) {
-      const g = maps.groupIdBySlug.get(t.group)
-      if (g && (!sec.id || g.section_id === sec.id)) groupId = g.id
-      else warnings.push(`${t.id}: unknown or cross-section group "${t.group}" — left ungrouped`)
+  // Create-by-reference (TDE-581): an unknown `group:` slug on a task that has a
+  // section creates that group IN that section. The created group is NAMED the slug
+  // verbatim (slug-is-name) so it round-trips exactly on the next pull — slugify(slug)
+  // === slug, so the reference can never drift. Cosmetic renames stay an MCP/web op.
+  // The new group is registered in maps immediately so sibling tasks in the SAME flush
+  // referencing the same slug bind to it instead of creating a duplicate.
+  const resolveGroupForTask = async (t: ReturnType<typeof parseTaskFile>['task'] & object, sectionId: string | null): Promise<string | null> => {
+    if (!t.group) return null
+    const g = maps.groupIdBySlug.get(t.group)
+    if (g) {
+      if (sectionId && g.section_id !== sectionId) {
+        warnings.push(`${t.id}: group "${t.group}" exists in another section — left ungrouped`)
+        return null
+      }
+      return g.id
     }
+    // Unknown slug → create, but only if we know which section to put it in.
+    if (!sectionId) {
+      warnings.push(`${t.id}: group "${t.group}" does not exist and the task has no section — left ungrouped`)
+      return null
+    }
+    const { data: maxRow } = await sb.from('groups').select('sort_order').eq('section_id', sectionId).order('sort_order', { ascending: false }).limit(1)
+    const nextSort = (maxRow?.[0]?.sort_order ?? 0) + 1
+    const { data: ins, error } = await sb.from('groups').insert({
+      project_id: project.id, section_id: sectionId, name: t.group, sort_order: nextSort,
+    }).select('id').single()
+    if (error || !ins) { warnings.push(`${t.id}: could not create group "${t.group}" — ${error?.message || 'insert failed'}; left ungrouped`); return null }
+    maps.groupIdBySlug.set(t.group, { id: ins.id, section_id: sectionId }) // sibling tasks reuse it
+    createdGroups.push(t.group)
+    return ins.id
+  }
+
+  const fileFields = async (t: ReturnType<typeof parseTaskFile>['task'] & object) => {
+    const sec = slugToSectionId(t.section, null)
+    const groupId = await resolveGroupForTask(t, sec.id)
     if (sec.warn) warnings.push(`${t.id}: ${sec.warn}`)
     return {
       text: t.title, detail: t.body || null, status: t.status, priority: t.priority,
@@ -859,7 +887,7 @@ async function applyFlush(
       hubWins.push({ path, content: serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), reason: 'hub has a newer (or tied) concurrent edit — write this content back' })
       continue
     }
-    const fields = fileFields(task)
+    const fields = await fileFields(task)
     if (decision === 'apply') {
       // Flow-dependency guard mirrors complete_task: don't let a file edit start/finish a gated task early.
       if ((fields.status === 'done' || fields.status === 'in_progress') && hubRow!.status !== fields.status) {
@@ -905,7 +933,7 @@ async function applyFlush(
   }
 
   const { data: after } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
-  return { cursor: after?.local_revision || 0, applied, created, deleted, rejected, warnings, hub_wins: hubWins }
+  return { cursor: after?.local_revision || 0, applied, created, deleted, created_groups: createdGroups, rejected, warnings, hub_wins: hubWins }
 }
 
 function hydrateScript(bundleUrl: string): string {
@@ -1147,7 +1175,7 @@ const TOOLS = [
   },
   {
     name: 'flush_local_project',
-    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send the task files you changed (verbatim content) and any deleted short IDs. The hub applies per-task last-write-wins by updated_at (ties → hub), enforces edit-beats-delete, accepts new tasks only within this device\'s leased ID block, and records tombstones for deletions. Returns the new cursor plus hub_wins corrections — write those file contents back to disk, then update .sync.json\'s cursor. Call after each work unit (flush-after-work). Note: input/output/review fields in files are READ-ONLY carriage — contract/bar edits flow through the normal MCP ceremonies, not flush.',
+    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send the task files you changed (verbatim content) and any deleted short IDs. The hub applies per-task last-write-wins by updated_at (ties → hub), enforces edit-beats-delete, accepts new tasks only within this device\'s leased ID block, and records tombstones for deletions. STRUCTURAL: a task\'s `section:` and `group:` frontmatter are writable — set `section:` to move a task between sections; set `group:` to move it into a group. GROUP CREATE-BY-REFERENCE (TDE-581): if `group:` names a slug that does not exist yet AND the task has a section, the hub CREATES that group in that section (named exactly as the slug — rename later via the web app / rename_group). Returned as created_groups. Group rename/delete still go through MCP. Returns the new cursor plus hub_wins corrections — write those file contents back to disk, then update .sync.json\'s cursor. Call after each work unit (flush-after-work). Note: input/output/review fields in files are READ-ONLY carriage — contract/bar edits flow through the normal MCP ceremonies, not flush.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4669,8 +4697,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       return JSON.stringify({
         status: 'flushed', project: project.name, cursor: res.cursor,
         applied: res.applied, created: res.created, deleted: res.deleted,
+        created_groups: res.created_groups,
         rejected: res.rejected, warnings: res.warnings, hub_wins: res.hub_wins,
         how_to: 'Write every hub_wins content back to its path under .tasker/, then update the cursor field in .sync.json to the value above. Completion ceremonies (submit_validation_result / submit_task_review / complete_task) still run via MCP.',
+        ...(res.created_groups.length ? { note_created_groups: `Created ${res.created_groups.length} group(s) by reference from a task's group: field: ${res.created_groups.join(', ')}. Named exactly as the slug (rename via the web app / rename_group if you want a prettier display name). If any of these was a typo, it made a stray group — delete it via the web app.` } : {}),
       })
     }
 

@@ -8,7 +8,7 @@ import { parseTaskFile, serializeTaskFile, contentHash } from './local_format.ts
 import type { TaskerTask } from './local_format.ts'
 import {
   resolveFlushChange, resolveFlushDelete, shortIdWithinLease, parseShortRef,
-  LEASE_BLOCK, type LeaseState,
+  slugify, LEASE_BLOCK, type LeaseState,
 } from './sync_core.ts'
 
 let failures = 0
@@ -159,6 +159,18 @@ const fA6b = hub.flush('device-A', fA6.cursor, [fileOf(rogue)])
 assert(fA6b.rejected.length === 1 && !hub.tasks.has(999), 'create outside lease rejected')
 const pullB6 = hub.pull('device-B')
 assert(`tasks/TST-${newIdA}.md` in pullB6.files, 'B pull sees the task A created')
+
+// ── Scenario 7: group create-by-reference round-trip guarantee (TDE-581) ─────
+// applyFlush creates an unknown `group:` slug NAMED verbatim as the slug ("slug-is-name")
+// so the reference is stable across pulls. The core correctness claim is that the created
+// group's own slug (derived from its name on the next pull) equals what the user typed —
+// i.e. slugify(slug) === slug for anything the file could legally carry as a group slug.
+// (The DB write path itself is verified live — applyFlush has no mock-sb harness by design.)
+for (const s of ['backend-work', 'bugs', 'q3-planning', 'a', 'group-2', 'ai-native-layer']) {
+  assert(slugify(s) === s, `group slug "${s}" round-trips (slugify is idempotent on a slug — slug-is-name is stable)`)
+}
+// And a raw pretty name does NOT round-trip — this is exactly why we chose slug-is-name over title-casing.
+assert(slugify('Backend Work') === 'backend-work' && slugify('Backend Work') !== 'Backend Work', 'a pretty name re-slugs (would drift) — justifies naming the created group the slug verbatim')
 
 if (failures > 0) { console.error(`\n${failures} failure(s)`); process.exit(1) }
 console.log('\nALL SCENARIOS PASS')
