@@ -276,24 +276,39 @@ async function loadProject(root, { flash = false } = {}) {
   window.tasker.watchProject(root);
 }
 
+// Two mirrors of the same project share a name — disambiguate with a path tail.
+function projectLabel(p) {
+  const parts = p.dir.split(/[\\/]/).filter((x) => x && x !== '.tasker');
+  return `${p.name} · ${parts.slice(-2).join('/')}`;
+}
+
 async function refreshProjects() {
   state.projects = await window.tasker.listProjects();
   const sel = $('project-select');
   sel.innerHTML = state.projects
-    .map((p) => `<option value="${esc(p)}" ${p === state.activeRoot ? 'selected' : ''}>${esc(p.split(/[\\/]/).pop())}</option>`)
+    .map((p) => `<option value="${esc(p.dir)}" ${p.dir === state.activeRoot ? 'selected' : ''}>${esc(projectLabel(p))}</option>`)
     .join('');
   sel.hidden = state.projects.length < 2;
+}
+
+let toastTimer = null;
+function toast(msg) {
+  const el = $('toast');
+  el.textContent = msg;
+  el.hidden = false;
+  if (toastTimer) clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 4500);
 }
 
 async function addProject() {
   const res = await window.tasker.addProject();
   if (!res) return;
   if (res.error === 'no-tasker') {
-    alert(`No .tasker/project.json found in:\n${res.root}\n\nPick a repo folder that contains a .tasker/ directory.`);
+    toast(`No Tasker project found in "${res.picked}" — pick a folder that contains a .tasker/ directory (flat or per-project).`);
     return;
   }
   await refreshProjects();
-  await loadProject(res.root);
+  if (res.added?.length) await loadProject(res.added[0].dir);
   render();
 }
 
@@ -328,12 +343,15 @@ window.tasker.onProjectChanged((root) => {
   if (root === state.activeRoot) loadProject(root, { flash: true });
 });
 
+window.addEventListener('error', (e) => console.log('RENDER-ERROR:', e.message, e.filename + ':' + e.lineno));
+window.addEventListener('unhandledrejection', (e) => console.log('PROMISE-REJECT:', e.reason?.message || e.reason));
+
 (async function init() {
   document.documentElement.dataset.theme = localStorage.getItem('theme') || 'light';
   setFilter(state.filter);
   await refreshProjects();
   const saved = localStorage.getItem('activeRoot');
-  const first = state.projects.includes(saved) ? saved : state.projects[0];
+  const first = state.projects.some((p) => p.dir === saved) ? saved : state.projects[0]?.dir;
   if (first) await loadProject(first);
   render();
 })();

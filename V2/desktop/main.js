@@ -7,9 +7,17 @@ const watchers = new Map(); // root -> { watcher, timer }
 
 const registryPath = () => path.join(app.getPath('userData'), 'projects.json');
 
+// Strip a UTF-8 BOM — files written by PowerShell/editors often carry one,
+// and JSON.parse rejects it.
+function readJson(p) {
+  let s = fs.readFileSync(p, 'utf8');
+  if (s.charCodeAt(0) === 0xFEFF) s = s.slice(1); // strip BOM
+  return JSON.parse(s);
+}
+
 function loadRegistry() {
   try {
-    const reg = JSON.parse(fs.readFileSync(registryPath(), 'utf8'));
+    const reg = readJson(registryPath());
     if (Array.isArray(reg.projects)) return reg;
   } catch {}
   return { projects: [] };
@@ -19,21 +27,52 @@ function saveRegistry(reg) {
   fs.writeFileSync(registryPath(), JSON.stringify(reg, null, 2));
 }
 
-// Accept either the repo root (containing .tasker/) or the .tasker folder itself.
-function taskerDirFor(root) {
-  return path.basename(root) === '.tasker' ? root : path.join(root, '.tasker');
+function isProjectDir(dir) {
+  return fs.existsSync(path.join(dir, 'project.json'));
 }
 
-function readProject(root) {
-  const dir = taskerDirFor(root);
-  const projectJson = path.join(dir, 'project.json');
-  if (!fs.existsSync(projectJson)) return { error: 'no-tasker', root };
-
-  const out = { root, dir, project: null, sync: null, syncMtime: null, tasks: [] };
+// A picked folder can be: a project dir itself (contains project.json), a repo
+// root with a flat .tasker/project.json, a .tasker/ folder, or a nested layout
+// .tasker/<NAME>/project.json holding several projects. Return every project dir.
+function discoverProjects(picked) {
+  const found = [];
+  const push = (d) => { if (!found.includes(d)) found.push(d); };
+  if (isProjectDir(picked)) push(picked);
+  const base = path.basename(picked) === '.tasker' ? picked : path.join(picked, '.tasker');
+  if (isProjectDir(base)) push(base);
   try {
-    out.project = JSON.parse(fs.readFileSync(projectJson, 'utf8'));
+    for (const e of fs.readdirSync(base, { withFileTypes: true })) {
+      if (e.isDirectory() && isProjectDir(path.join(base, e.name))) push(path.join(base, e.name));
+    }
+  } catch {}
+  return found;
+}
+
+function projectName(dir) {
+  try { return readJson(path.join(dir, 'project.json')).name || path.basename(dir); }
+  catch { return path.basename(dir); }
+}
+
+// Registry entries may be project dirs or anything discoverProjects understands
+// (old entries stored repo roots) — normalize to labeled project dirs.
+function listProjects() {
+  const out = [];
+  for (const entry of loadRegistry().projects) {
+    for (const dir of discoverProjects(entry)) {
+      if (!out.some((p) => p.dir === dir)) out.push({ dir, name: projectName(dir) });
+    }
+  }
+  return out;
+}
+
+function readProject(dir) {
+  if (!isProjectDir(dir)) return { error: 'no-tasker', dir };
+
+  const out = { dir, project: null, sync: null, syncMtime: null, tasks: [] };
+  try {
+    out.project = readJson(path.join(dir, 'project.json'));
   } catch (e) {
-    return { error: 'bad-project-json', root, message: String(e) };
+    return { error: 'bad-project-json', dir, message: String(e) };
   }
   try {
     const syncPath = path.join(dir, '.sync.json');
@@ -54,18 +93,17 @@ function readProject(root) {
   return out;
 }
 
-function stopWatch(root) {
-  const w = watchers.get(root);
+function stopWatch(dir) {
+  const w = watchers.get(dir);
   if (w) {
     try { w.watcher.close(); } catch {}
     if (w.timer) clearTimeout(w.timer);
-    watchers.delete(root);
+    watchers.delete(dir);
   }
 }
 
-function startWatch(root) {
-  stopWatch(root);
-  const dir = taskerDirFor(root);
+function startWatch(dir) {
+  stopWatch(dir);
   if (!fs.existsSync(dir)) return;
   try {
     const entry = { watcher: null, timer: null };
@@ -74,15 +112,15 @@ function startWatch(root) {
       if (entry.timer) clearTimeout(entry.timer);
       entry.timer = setTimeout(() => {
         entry.timer = null;
-        if (win && !win.isDestroyed()) win.webContents.send('project-changed', root);
+        if (win && !win.isDestroyed()) win.webContents.send('project-changed', dir);
       }, 250);
     });
-    watchers.set(root, entry);
+    watchers.set(dir, entry);
   } catch {} // watch is best-effort; manual refresh still works
 }
 
 app.whenReady().then(() => {
-  ipcMain.handle('registry:list', () => loadRegistry().projects);
+  ipcMain.handle('registry:list', () => listProjects());
 
   ipcMain.handle('registry:add', async () => {
     const res = await dialog.showOpenDialog(win, {
@@ -90,29 +128,27 @@ app.whenReady().then(() => {
       properties: ['openDirectory'],
     });
     if (res.canceled || !res.filePaths.length) return null;
-    let root = res.filePaths[0];
-    if (path.basename(root) === '.tasker') root = path.dirname(root);
-    if (!fs.existsSync(path.join(root, '.tasker', 'project.json'))) {
-      return { error: 'no-tasker', root };
-    }
+    const picked = res.filePaths[0];
+    const dirs = discoverProjects(picked);
+    if (!dirs.length) return { error: 'no-tasker', picked };
     const reg = loadRegistry();
-    if (!reg.projects.includes(root)) {
-      reg.projects.push(root);
-      saveRegistry(reg);
+    for (const d of dirs) {
+      if (!reg.projects.includes(d)) reg.projects.push(d);
     }
-    return { root };
-  });
-
-  ipcMain.handle('registry:remove', (_e, root) => {
-    const reg = loadRegistry();
-    reg.projects = reg.projects.filter((p) => p !== root);
     saveRegistry(reg);
-    stopWatch(root);
-    return reg.projects;
+    return { added: dirs.map((d) => ({ dir: d, name: projectName(d) })) };
   });
 
-  ipcMain.handle('project:read', (_e, root) => readProject(root));
-  ipcMain.handle('project:watch', (_e, root) => { startWatch(root); return true; });
+  ipcMain.handle('registry:remove', (_e, dir) => {
+    const reg = loadRegistry();
+    reg.projects = reg.projects.filter((p) => p !== dir);
+    saveRegistry(reg);
+    stopWatch(dir);
+    return listProjects();
+  });
+
+  ipcMain.handle('project:read', (_e, dir) => readProject(dir));
+  ipcMain.handle('project:watch', (_e, dir) => { startWatch(dir); return true; });
 
   win = new BrowserWindow({
     width: 1280,
@@ -127,6 +163,10 @@ app.whenReady().then(() => {
       nodeIntegration: false,
     },
   });
+  win.webContents.on('console-message', (_e, level, message) => {
+    if (process.env.TL_DEBUG) console.log(`[renderer] ${message}`);
+  });
+
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 });
 

@@ -55,6 +55,11 @@
 
 *, *::before, *::after { box-sizing: border-box; }
 
+/* The [hidden] attribute must win over any class that sets display/position
+   (.empty, .detail, .scrim, .toast all do) — otherwise elements toggled via
+   .hidden = true stay on screen. */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; margin: 0; overscroll-behavior-y: none; }
 
 body {
@@ -323,3 +328,13 @@ body {
 .docs-prose blockquote { border-left: 3px solid var(--color-accent); margin: 0 0 14px; padding: 4px 0 4px 14px; color: var(--color-mute); }
 .docs-prose hr { border: none; border-top: 1px solid var(--color-line-2); margin: 20px 0; }
 .gov-note { margin-top: 18px; font-family: 'JetBrains Mono', monospace; font-size: 9.5px; letter-spacing: 0.1em; text-transform: uppercase; color: var(--color-mute-2); }
+
+/* ── Toast (non-blocking notice — alert() freezes the renderer) ── */
+.toast {
+  position: absolute; left: 50%; bottom: 26px; transform: translateX(-50%);
+  z-index: 60; max-width: 480px;
+  background: var(--color-ink); color: var(--color-paper);
+  border-radius: 8px; padding: 10px 16px;
+  font-size: 12.5px; line-height: 1.5;
+  box-shadow: 0 4px 16px rgba(26,25,22,0.25);
+}
