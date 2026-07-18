@@ -125,6 +125,7 @@ function render() {
   $('project-select').hidden = state.projects.length < 2;
   $('search').hidden = !has;
   $('live-chip').hidden = !has;
+  $('pull-btn').hidden = !has;
 
   if (!has) {
     $('mast-title').textContent = state.projects.length ? 'Project unreadable' : 'No project open';
@@ -311,6 +312,62 @@ async function addProject() {
   if (res.added?.length) await loadProject(res.added[0].dir);
   render();
 }
+
+/* ── hub pull ── */
+
+async function doPull(dir) {
+  const btn = $('pull-btn');
+  btn.disabled = true;
+  const label = btn.textContent;
+  btn.textContent = '↓ Pulling…';
+  $('progress').hidden = false;
+  try {
+    const res = await window.tasker.hubPull(dir);
+    if (res.needsToken) { openTokenModal(dir); return; }
+    if (res.error) {
+      toast(res.badToken ? 'Hub rejected the token — paste a fresh one.' : `Pull failed: ${res.error}`);
+      if (res.badToken) openTokenModal(dir);
+      return;
+    }
+    if (res.upToDate) {
+      toast(`Already up to date (hub cursor ${res.hubCursor}). Nothing to pull.`);
+      return;
+    }
+    // Files changed on disk — the fs.watcher will re-render, but refresh now so
+    // the toast and board are in lockstep.
+    await loadProject(dir, { flash: true });
+    toast(`Pulled ${res.changed} file${res.changed === 1 ? '' : 's'}${res.removed ? `, removed ${res.removed}` : ''} · cursor ${res.localCursor} → ${res.hubCursor}`);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = label;
+    $('progress').hidden = true;
+  }
+}
+
+let tokenModalDir = null;
+function openTokenModal(dir) {
+  tokenModalDir = dir;
+  $('token-input').value = '';
+  $('token-modal').hidden = false;
+  $('token-input').focus();
+}
+function closeTokenModal() { tokenModalDir = null; $('token-modal').hidden = true; }
+
+async function saveTokenAndPull() {
+  const dir = tokenModalDir;
+  const res = await window.tasker.hubSetToken(dir, $('token-input').value);
+  if (res.error) { toast(res.error); return; }
+  closeTokenModal();
+  await doPull(dir);
+}
+
+$('pull-btn').addEventListener('click', () => { if (state.activeRoot) doPull(state.activeRoot); });
+$('token-save').addEventListener('click', saveTokenAndPull);
+$('token-cancel').addEventListener('click', closeTokenModal);
+$('token-input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') saveTokenAndPull();
+  if (e.key === 'Escape') closeTokenModal();
+});
 
 /* ── wiring ── */
 

@@ -5,7 +5,10 @@ const path = require('path');
 let win = null;
 const watchers = new Map(); // root -> { watcher, timer }
 
+const HUB_BASE = 'https://rzjhmipbamyvpwlkfvxx.supabase.co/functions/v1/mcp';
+
 const registryPath = () => path.join(app.getPath('userData'), 'projects.json');
+const tokensPath = () => path.join(app.getPath('userData'), 'tokens.json');
 
 // Strip a UTF-8 BOM — files written by PowerShell/editors often carry one,
 // and JSON.parse rejects it.
@@ -119,8 +122,93 @@ function startWatch(dir) {
   } catch {} // watch is best-effort; manual refresh still works
 }
 
+// ── Hub pull (owner-only, manual) ────────────────────────────────
+// A device token is project-scoped and stored per project dir. The pull is a
+// plain HTTPS POST to the same device_poll/device_pull endpoints the watcher
+// uses — main.js is Node, so we fetch + write files here directly. No child
+// process, no reimplemented sync logic. Pull-only: overwrite files, drop
+// tombstones, bump .sync.json cursor. Flush stays with the agent.
+
+function loadTokens() {
+  try { return readJson(tokensPath()); } catch { return {}; }
+}
+function tokenFor(dir) { return loadTokens()[dir] || null; }
+function saveToken(dir, token) {
+  const all = loadTokens();
+  all[dir] = token;
+  fs.writeFileSync(tokensPath(), JSON.stringify(all, null, 2));
+}
+
+async function hubApi(qs, token, body) {
+  const res = await fetch(`${HUB_BASE}?${qs}=${encodeURIComponent(token)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  });
+  const text = await res.text();
+  let json; try { json = JSON.parse(text); } catch { json = { error: text }; }
+  if (!res.ok) throw new Error(json.error || `${res.status}`);
+  return json;
+}
+
+// Pull the hub bundle into this project's .tasker dir. Returns a summary; throws
+// with a human message on token/network/mode failure.
+async function pullFromHub(dir) {
+  const token = tokenFor(dir);
+  if (!token) return { needsToken: true };
+
+  const syncPath = path.join(dir, '.sync.json');
+  let sync = {};
+  try { sync = readJson(syncPath); } catch {} // missing/corrupt → pull from cursor 0
+  const localCursor = Number(sync.cursor || 0);
+
+  const poll = await hubApi('device_poll', token, {});
+  const hubCursor = Number(poll.cursor || 0);
+  if (hubCursor <= localCursor) {
+    return { changed: 0, hubCursor, localCursor, upToDate: true };
+  }
+
+  const bundle = await hubApi('device_pull', token, { cursor: localCursor });
+  const files = bundle.files || {};
+  for (const [rel, content] of Object.entries(files)) {
+    const f = path.join(dir, rel);
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, content, 'utf8');
+  }
+  let removed = 0;
+  for (const sid of bundle.tombstoned_short_ids || []) {
+    const f = path.join(dir, 'tasks', `${bundle.prefix}-${sid}.md`);
+    if (fs.existsSync(f)) { fs.rmSync(f); removed++; }
+  }
+  return {
+    changed: Object.keys(files).length,
+    removed,
+    hubCursor: bundle.cursor,
+    localCursor,
+    upToDate: false,
+  };
+}
+
 app.whenReady().then(() => {
   ipcMain.handle('registry:list', () => listProjects());
+
+  ipcMain.handle('hub:hasToken', (_e, dir) => !!tokenFor(dir));
+  ipcMain.handle('hub:setToken', (_e, dir, token) => {
+    const t = String(token || '').trim();
+    if (!/^dt_/.test(t)) return { error: 'That does not look like a device token (should start with "dt_"). Mint one with mint_device_token in Claude Code.' };
+    saveToken(dir, t);
+    return { ok: true };
+  });
+  ipcMain.handle('hub:pull', async (_e, dir) => {
+    try { return await pullFromHub(dir); }
+    catch (e) {
+      const msg = String(e.message || e);
+      // A dead/revoked token should not silently keep failing — surface it so
+      // the UI can re-prompt.
+      const badToken = /invalid|revoked|401/i.test(msg);
+      return { error: msg, badToken };
+    }
+  });
 
   ipcMain.handle('registry:add', async () => {
     const res = await dialog.showOpenDialog(win, {

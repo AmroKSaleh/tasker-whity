@@ -8,6 +8,7 @@
 </head>
 <body>
   <div id="app" class="board-surface">
+    <div id="progress" class="progress" hidden><div class="progress-bar"></div></div>
     <header class="masthead" id="masthead">
       <div class="mast-left">
         <div class="kicker" id="mast-kicker">TASKER LOCAL</div>
@@ -20,6 +21,7 @@
         <input id="search" class="search" type="text" placeholder="Filter tasks…" hidden />
         <button id="pill-open" class="pill pill-active">Open</button>
         <button id="pill-all" class="pill">All</button>
+        <button id="pull-btn" class="btn btn-sm" title="Pull latest from the hub into these local files" hidden>↓ Pull from hub</button>
         <button id="theme-btn" class="btn btn-sm" title="Toggle light/dark">◐</button>
         <button id="add-btn" class="btn btn-sm">+ Add project folder</button>
       </div>
@@ -50,6 +52,19 @@
     </aside>
     <div id="scrim" class="scrim" hidden></div>
     <div id="toast" class="toast" hidden></div>
+
+    <div id="token-modal" class="modal-wrap" hidden>
+      <div class="modal">
+        <div class="kicker">CONNECT TO HUB · ONE-TIME</div>
+        <h3>Paste a device token</h3>
+        <p>This project has no hub token yet. In Claude Code, run <code>mint_device_token</code> for this project + device, then paste the <code>dt_…</code> secret here. It's stored locally and only ever pulls this one project.</p>
+        <input id="token-input" class="token-input" type="text" placeholder="dt_…" spellcheck="false" />
+        <div class="modal-actions">
+          <button id="token-cancel" class="btn btn-sm">Cancel</button>
+          <button id="token-save" class="btn-primary">Save &amp; pull</button>
+        </div>
+      </div>
+    </div>
   </div>
   <script src="app.js"></script>
 </body>
