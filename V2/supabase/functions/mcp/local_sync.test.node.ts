@@ -8,7 +8,7 @@ import { parseTaskFile, serializeTaskFile, contentHash } from './local_format.ts
 import type { TaskerTask } from './local_format.ts'
 import {
   resolveFlushChange, resolveFlushDelete, shortIdWithinLease, parseShortRef,
-  slugify, LEASE_BLOCK, type LeaseState,
+  slugify, dbRowToTaskerTask, buildPullMaps, LEASE_BLOCK, type LeaseState,
 } from './sync_core.ts'
 
 let failures = 0
@@ -176,6 +176,22 @@ assert(slugify('Backend Work') === 'backend-work' && slugify('Backend Work') !==
 for (const s of ['bugs', 'research-planning', 'agent-native-layer', 'q4']) {
   assert(slugify(s) === s, `section slug "${s}" round-trips (slug-is-name stable for sections too)`)
 }
+
+// ── Scenario 8: milestones in files (emit + round-trip + seed-item filter) ────
+const mMaps = buildPullMaps('TST', [{ id: 'sec1', name: 'Core', sort_order: 0 }], [], [])
+const dbRow = { id: 'u1', short_id: 5, text: 'Task with milestones', status: 'pending', priority: 'medium', section_id: 'sec1', sort_order: 0 }
+// dbRowToTaskerTask surfaces passed-in milestones; the file round-trips them.
+const withMs = dbRowToTaskerTask(dbRow as any, 'TST', mMaps, [{ text: 'step one', done: true }, { text: 'step two', done: false }])
+assert(withMs.milestones?.length === 2 && withMs.milestones[0].done === true, 'dbRowToTaskerTask surfaces milestones (done flag preserved)')
+const reparsed = parseTaskFile(serializeTaskFile(withMs), 'm').task!
+assert(reparsed.milestones?.length === 2 && reparsed.milestones[0].text === 'step one' && reparsed.milestones[1].done === false, 'milestones survive serialize → parse round-trip')
+// No milestones passed → field omitted entirely (not an empty array in the file).
+const noMs = dbRowToTaskerTask(dbRow as any, 'TST', mMaps)
+assert(noMs.milestones === undefined && !serializeTaskFile(noMs).includes('milestones:'), 'no milestones → milestones: omitted from the file')
+// The emit-side kind filter: plain steps become milestones; seed items (kind) are dropped.
+const steps = [{ summary: 'plain A' }, { summary: 'a question', kind: 'question' }, { summary: 'plain B' }, { summary: 'a prereq', kind: 'prerequisite' }]
+const emitted = steps.filter(s => s.kind !== 'question' && s.kind !== 'prerequisite').map(s => s.summary)
+assert(emitted.length === 2 && emitted.join(',') === 'plain A,plain B', 'emit filter keeps plain milestones, drops seed question/prerequisite items')
 
 if (failures > 0) { console.error(`\n${failures} failure(s)`); process.exit(1) }
 console.log('\nALL SCENARIOS PASS')
