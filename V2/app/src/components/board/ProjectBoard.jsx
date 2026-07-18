@@ -232,17 +232,22 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
 
 // ── Section column ──
 // ── Draggable card wrapper ──
-function SortableCard({ task, sectionId, groupId, ...cardProps }) {
+function SortableCard({ task, sectionId, groupId, sortLocked = false, ...cardProps }) {
+  // When a section is in a non-manual sort (TDE-403) the visual order comes from the sort
+  // comparator, not from dnd-kit. Disabling the sortable there stops dnd-kit computing reorder
+  // transforms against a stale sort_order-based measurement — which otherwise shift cards on top
+  // of each other (overlap). Drag is intentionally locked in sorted sections anyway.
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     data: { type: 'task', sectionId, groupId: groupId ?? null },
+    disabled: sortLocked,
   })
   return (
     <div
       ref={setNodeRef}
-      {...attributes}
-      {...listeners}
-      style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.4 : 1 }}
+      {...(sortLocked ? {} : attributes)}
+      {...(sortLocked ? {} : listeners)}
+      style={{ transform: sortLocked ? undefined : CSS.Translate.toString(transform), transition: sortLocked ? undefined : transition, opacity: isDragging ? 0.4 : 1 }}
     >
       <BoardCard task={task} {...cardProps} />
     </div>
@@ -426,7 +431,7 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
         )}
         <DroppableList sectionId={section.id} groupId={null} items={ungrouped.map(t => t.id)}>
           {ungrouped.map(t => (
-            <SortableCard key={t.id} task={t} sectionId={section.id} groupId={null} prefix={prefix}
+            <SortableCard key={t.id} task={t} sectionId={section.id} groupId={null} prefix={prefix} sortLocked={sorted}
               onOpen={onOpen} onToggle={onToggle} onToggleIP={onToggleIP} onFocus={onFocus} onPin={onPin} onDelete={onDelete} />
           ))}
         </DroppableList>
@@ -440,7 +445,7 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
             <div className="flex flex-col gap-1.5">
               <DroppableList sectionId={section.id} groupId={g.id} items={g.tasks.map(t => t.id)}>
                 {g.tasks.map(t => (
-                  <SortableCard key={t.id} task={t} sectionId={section.id} groupId={g.id} prefix={prefix}
+                  <SortableCard key={t.id} task={t} sectionId={section.id} groupId={g.id} prefix={prefix} sortLocked={sorted}
                     onOpen={onOpen} onToggle={onToggle} onToggleIP={onToggleIP} onFocus={onFocus} onPin={onPin} onDelete={onDelete} />
                 ))}
               </DroppableList>
