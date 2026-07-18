@@ -412,14 +412,6 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
           </div>
         )}
       </div>
-      {sorted && (
-        <div className="px-3.5 py-1 border-b border-line-2 bg-surf-2/60 flex items-center gap-1.5">
-          <span className="font-mono text-[9px] uppercase tracking-[0.08em] text-accent">
-            Sorted · {SORT_OPTIONS.find(o => o.key === prefs.sort)?.label}
-          </span>
-          <span className="text-[9px] text-mute-2">— set Manual to drag-reorder</span>
-        </div>
-      )}
       <div className="flex-1 min-h-0 overflow-y-auto px-2.5 py-2.5 flex flex-col gap-1.5 col-body">
         {addingGroup && (
           <input
