@@ -654,9 +654,28 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
   // reads the IS / Foundation / KB grounding once per session, same as online tiering.
   const { data: projIs } = await sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at')
 
+  // Milestones live in task_discussions.steps (+ parallel checked_steps). Emit ONLY
+  // plain milestones (kind absent) — seed checklist items (kind question/prerequisite)
+  // are NOT milestones and never surface in the file.
+  const { data: discRows } = await sb.from('task_discussions').select('task_id, steps, checked_steps').in('task_id', tasks.map(t => t.id))
+  const milestonesByTaskId = new Map<string, Array<{ text: string; done: boolean }>>()
+  for (const d of discRows || []) {
+    const steps: any[] = Array.isArray(d.steps) ? d.steps : []
+    const checked: any[] = Array.isArray(d.checked_steps) ? d.checked_steps : []
+    const ms: Array<{ text: string; done: boolean }> = []
+    for (let i = 0; i < steps.length; i++) {
+      const s = steps[i]
+      const kind = (s && typeof s === 'object') ? s.kind : undefined
+      if (kind === 'question' || kind === 'prerequisite') continue // seed checklist — not a milestone
+      const text = typeof s === 'string' ? s : String(s?.summary ?? '')
+      if (text) ms.push({ text, done: checked[i] === true })
+    }
+    if (ms.length) milestonesByTaskId.set(d.task_id, ms)
+  }
+
   const files: Record<string, string> = {}
   files['project.json'] = serializeProjectJson(meta)
-  for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = serializeTaskFile(dbRowToTaskerTask(row, prefix, maps))
+  for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = serializeTaskFile(dbRowToTaskerTask(row, prefix, maps, milestonesByTaskId.get(row.id)))
 
   // [prefix]-instruction-set.md — the full project IS, once. The single governing rulebook.
   const lc = prefix.toLowerCase()
@@ -882,6 +901,35 @@ async function applyFlush(
     }
   }
 
+  // Reconcile a task's milestones from its file. WHOLE-LIST-REPLACE of the PLAIN
+  // milestones (kind absent). CLOBBER GUARD: if the hub row has ANY kind-tagged step
+  // (seed question/prerequisite), this is a seed — leave its checklist ENTIRELY
+  // untouched and warn instead (seed checklists are MCP-only). Rebuilds steps +
+  // checked_steps in one update, preserving any kind-tagged entries in place.
+  const reconcileMilestones = async (taskId: string, fileTaskId: string, fileMs: Array<{ text: string; done: boolean }> | undefined) => {
+    if (fileMs === undefined) return // milestones: absent in file → do not touch the hub
+    const { data: disc } = await sb.from('task_discussions').select('id, steps, checked_steps').eq('task_id', taskId).maybeSingle()
+    const steps: any[] = Array.isArray(disc?.steps) ? disc!.steps : []
+    const checked: any[] = Array.isArray(disc?.checked_steps) ? disc!.checked_steps : []
+    const hasSeedItems = steps.some(s => s && typeof s === 'object' && (s.kind === 'question' || s.kind === 'prerequisite'))
+    if (hasSeedItems) {
+      warnings.push(`${fileTaskId}: has a seed checklist — milestones in the file were NOT applied (edit seed checklists via MCP)`)
+      return
+    }
+    // No seed items → the whole list is plain milestones; safe to replace wholesale.
+    const newSteps = fileMs.map(m => ({ summary: m.text, detail: '' }))
+    const newChecked = fileMs.map(m => m.done === true)
+    // no-op if unchanged (avoid churn / spurious updated_at bumps)
+    const sameLen = steps.length === newSteps.length
+    const unchanged = sameLen && newSteps.every((s, i) => String(steps[i]?.summary ?? steps[i] ?? '') === s.summary && (checked[i] === true) === newChecked[i])
+    if (unchanged) return
+    if (disc?.id) {
+      await sb.from('task_discussions').update({ steps: newSteps, checked_steps: newChecked }).eq('id', disc.id)
+    } else if (newSteps.length) {
+      await sb.from('task_discussions').insert({ task_id: taskId, user_id: userId, steps: newSteps, checked_steps: newChecked, messages: [] })
+    }
+  }
+
   for (const f of changed) {
     const path = String(f?.path || '')
     if (!/^tasks\/.+\.md$/.test(path)) { rejected.push(`${path || '(no path)'}: only tasks/*.md entries are applied`); continue }
@@ -912,17 +960,17 @@ async function applyFlush(
       }
       const { error } = await sb.from('tasks').update(fields).eq('id', hubRow!.id).eq('user_id', userId)
       if (error) rejected.push(`${task.id}: update failed — ${error.message}`)
-      else applied.push(task.id)
+      else { applied.push(task.id); await reconcileMilestones(hubRow!.id, task.id, task.milestones) }
     } else { // create | resurrect_edit_beats_delete
       if (decision === 'create' && !shortIdWithinLease(sid, leases)) {
         rejected.push(`${task.id}: id ${sid} is outside this device's leased block(s) — use ids from .sync.json next_free_ids`)
         continue
       }
-      const { error } = await sb.from('tasks').insert({
+      const { data: insTask, error } = await sb.from('tasks').insert({
         user_id: userId, project_id: project.id, short_id: sid, ...fields,
-      })
+      }).select('id').single()
       if (error) rejected.push(`${task.id}: insert failed — ${error.message}`)
-      else created.push(task.id)
+      else { created.push(task.id); if (insTask?.id) await reconcileMilestones(insTask.id, task.id, task.milestones) }
     }
   }
 

@@ -4,7 +4,7 @@
 // Design: docs/local-first-design.md D3 (cursor sync), D4 (per-task LWW by
 // updated_at, hub arbitrates, tombstones, edit-beats-delete), D8 (ID leases).
 
-import type { TaskerTask, TaskerProjectMeta, TaskerSection, TaskerGroup } from './local_format.ts'
+import type { TaskerTask, TaskerProjectMeta, TaskerSection, TaskerGroup, TaskerMilestone } from './local_format.ts'
 
 // ── DB row shapes (subset the sync engine reads) ─────────────────────────────
 
@@ -125,7 +125,11 @@ function translateOutput(output: unknown): TaskerTask['output'] | undefined {
   return undefined
 }
 
-export function dbRowToTaskerTask(row: DbTaskRow, prefix: string, maps: PullMaps): TaskerTask {
+// Optional milestones come from task_discussions (a separate table), so they are
+// passed in rather than read off the task row. ONLY plain milestones (kind absent)
+// are surfaced — seed checklist items (kind = 'question' | 'prerequisite') are NOT
+// milestones and are never emitted as such.
+export function dbRowToTaskerTask(row: DbTaskRow, prefix: string, maps: PullMaps, milestones?: TaskerMilestone[]): TaskerTask {
   const task: TaskerTask = {
     id: `${prefix}-${row.short_id}`,
     title: row.text,
@@ -135,6 +139,7 @@ export function dbRowToTaskerTask(row: DbTaskRow, prefix: string, maps: PullMaps
     order: row.sort_order ?? 0,
     body: (row.detail || '').replace(/\s+$/, ''),
   }
+  if (milestones && milestones.length) task.milestones = milestones
   if (row.group_id) {
     const g = maps.groupSlugById.get(row.group_id)
     if (g) task.group = g
