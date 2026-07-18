@@ -36,8 +36,11 @@ function parseTask(file) {
       t.fm[line.slice(0, i).trim()] = parseValue(line.slice(i + 1));
     }
   }
-  // The ⚖ GOVERNANCE footer is agent-facing carriage — hide it from humans.
-  const gov = t.body.search(/^[-\s]*⚖\s*GOVERNANCE/m);
+  // Older mirrors stamped an agent-facing governance footer into each task file
+  // (both an HTML-comment marker and an older "⚖ GOVERNANCE" heading form). New
+  // mirrors keep grounding in dedicated files, so task files have no footer —
+  // this strip is a harmless no-op there, and still hides it on legacy checkouts.
+  const gov = t.body.search(/<!--\s*═+\s*GOVERNANCE|^[-\s]*⚖\s*GOVERNANCE/m);
   if (gov > -1) { t.body = t.body.slice(0, gov); t.hadGovernance = true; }
   t.id = t.fm.id || file.file.replace(/\.md$/, '');
   t.title = t.fm.title || t.id;

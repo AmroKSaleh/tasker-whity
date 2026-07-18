@@ -1,6 +1,6 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
 import { inputEdges, inputSourceIds, outputContract, lintRule, deriveOutputFromConsumers, contractGateViolations } from './contract_gate.ts'
-import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash, withGovernance } from './local_format.ts'
+import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash, kbFileSlug } from './local_format.ts'
 import {
   buildPullMaps, buildProjectMeta, dbRowToTaskerTask, resolveFlushChange, resolveFlushDelete,
   leaseFreeIds, shortIdWithinLease, parseShortRef, LEASE_BLOCK, LEASE_MIN_FREE, UNFILED_SLUG,
@@ -648,29 +648,81 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
   const needUnfiled = tasks.some(t => !t.section_id)
   const meta = buildProjectMeta(project.name, prefix, maxShort + 1, sections || [], groups || [], maps, needUnfiled)
 
-  // Governance footer (forced IS exposure — parity with online get_task injection):
-  // the FULL project IS rides inside every task file, below a marker that parse strips.
+  // Grounding is written ONCE per pull as dedicated files — NOT stamped into every
+  // task (that footer duplicated the full IS N times → ~2.2x the online token cost;
+  // TDE grounding-restructure 2026-07-18). Task files are now footer-free; the agent
+  // reads the IS / Foundation / KB grounding once per session, same as online tiering.
   const { data: projIs } = await sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at')
-  const governance = (projIs?.length)
-    ? [
-        '# ⚖ Instruction Set — governs this task (project-wide)',
-        '',
-        ...projIs.flatMap((e: any) => [`## ${e.title}`, '', e.content, '']),
-        '_Auto-injected on every pull; do not edit (stripped on flush). Foundation + KB index live in context.md._',
-      ].join('\n')
-    : ''
 
   const files: Record<string, string> = {}
   files['project.json'] = serializeProjectJson(meta)
-  for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = withGovernance(serializeTaskFile(dbRowToTaskerTask(row, prefix, maps)), governance)
+  for (const row of tasks) files[`tasks/${prefix}-${row.short_id}.md`] = serializeTaskFile(dbRowToTaskerTask(row, prefix, maps))
 
-  // context.md — read-only grounding snapshot (Foundation + IS + KB titles), regenerated on every pull, never synced up.
+  // [prefix]-instruction-set.md — the full project IS, once. The single governing rulebook.
+  const lc = prefix.toLowerCase()
+  if (projIs?.length) {
+    files[`${lc}-instruction-set.md`] = [
+      `# ⚖ Instruction Set — governs every task in ${project.name} (project-wide)`,
+      '',
+      '_READ THIS ONCE at session start. It governs all work in this project. Read-only snapshot, regenerated on every pull — never synced up (edit the IS via the web app / MCP)._',
+      '',
+      ...projIs.flatMap((e: any) => [`## ${e.title}`, '', e.content, '']),
+    ].join('\n')
+  }
+
+  // [prefix]-foundation.md — goal/why/scope/success/risks, once.
   const foundationLines = renderFoundation(project.context)
-  const { data: kbTitles } = await sb.from('project_knowledge').select('title').eq('project_id', project.id).order('created_at', { ascending: false }).limit(100)
-  const ctxLines: string[] = [`# ${project.name} — project context (READ-ONLY snapshot, regenerated on every pull)`, '']
-  if (foundationLines.length) { ctxLines.push('## Foundation'); for (const l of foundationLines) ctxLines.push(`- ${l}`); ctxLines.push('') }
-  if (projIs?.length) { ctxLines.push('## Instruction Set'); for (const e of projIs) ctxLines.push(`### ${e.title}`, '', e.content, '') }
-  if (kbTitles?.length) { ctxLines.push('## Knowledge Base (titles — pull full entries via get_kb_entries)'); for (const k of kbTitles) ctxLines.push(`- ${k.title}`); ctxLines.push('') }
+  if (foundationLines.length) {
+    files[`${lc}-foundation.md`] = [
+      `# ${project.name} — Foundation`,
+      '',
+      '_The project\'s north star. Read once at session start. Read-only snapshot._',
+      '',
+      ...foundationLines.map((l: string) => `- ${l}`),
+      '',
+    ].join('\n')
+  }
+
+  // kb/ — one file per KB entry (title + body), mirrored on pull, READ-ONLY offline.
+  // Agents read only the 2-3 they need. Authoring stays an MCP ceremony (no KB LWW).
+  const { data: kbEntries } = await sb.from('project_knowledge')
+    .select('id, title, content, source')
+    .eq('project_id', project.id).is('archived_at', null)
+    .order('created_at', { ascending: false }).limit(200)
+  const kbIndex: Array<{ title: string; file: string }> = []
+  const usedKbNames = new Set<string>()
+  for (const e of kbEntries || []) {
+    let base = kbFileSlug(String(e.title || 'untitled'))
+    let name = `${base}.md`
+    let n = 2
+    while (usedKbNames.has(name)) { name = `${base}-${n}.md`; n++ } // disambiguate collisions
+    usedKbNames.add(name)
+    kbIndex.push({ title: String(e.title || 'untitled'), file: `kb/${name}` })
+    files[`kb/${name}`] = [
+      `# ${e.title}`,
+      '',
+      `_KB entry · source: ${e.source || 'agent'} · READ-ONLY mirror (edit via create_kb_entry/update_kb_entry over MCP)._`,
+      '',
+      String(e.content || ''),
+      '',
+    ].join('\n')
+  }
+
+  // context.md — the once-per-session entry point: pointers to grounding + KB index.
+  const ctxLines: string[] = [
+    `# ${project.name} — session grounding (READ-ONLY, regenerated on every pull)`,
+    '',
+    'Read this once at session start. It points at the grounding files and indexes the KB.',
+    '',
+  ]
+  if (projIs?.length) ctxLines.push(`- **Instruction Set** → \`${lc}-instruction-set.md\` — the rules governing all work here. Read it.`)
+  if (foundationLines.length) ctxLines.push(`- **Foundation** → \`${lc}-foundation.md\` — goal / why / scope.`)
+  ctxLines.push('')
+  if (kbIndex.length) {
+    ctxLines.push('## Knowledge Base — index (read only the entries relevant to your task; each is a file in `kb/`)', '')
+    for (const k of kbIndex) ctxLines.push(`- ${k.title} → \`${k.file}\``)
+    ctxLines.push('')
+  }
   files['context.md'] = ctxLines.join('\n')
 
   files['README.md'] = [
@@ -678,14 +730,14 @@ async function buildLocalBundle(sb: any, userId: string, project: any, deviceId:
     '',
     'This folder is the LOCAL mirror of a Tasker project. Agents: work the tasks by editing these files directly — no per-edit network calls.',
     '',
-    '- EVERY task file carries the governing Instruction Set as a ⚖ GOVERNANCE footer (auto-injected on each pull) — reading a task means reading its rules; follow them. Do not edit the footer (it is stripped on flush, never synced). The Foundation + KB index live in context.md — read that once per session.',
-    '- One task = one file in tasks/ (YAML frontmatter + markdown body = the task context).',
+    `- GROUNDING (read once per session): \`context.md\` points at \`${lc}-instruction-set.md\` (the governing rules — FOLLOW them), \`${lc}-foundation.md\` (goal/why/scope), and indexes \`kb/\` (one file per KB entry; read only the few relevant to your task). These are read-only snapshots, regenerated on every pull, never synced up.`,
+    '- One task = one file in tasks/ (YAML frontmatter + markdown body = the task context). Task files no longer carry the IS footer — the IS lives in its own file above.',
     '- PULL before starting work: call pull_local_project — it returns a short-lived bundle URL + a hydrate.mjs script; write the script and run `node hydrate.mjs` to (re)write this folder. (Pass inline:true only if node is unavailable.)',
     `- Create a task: new file tasks/${prefix}-<id>.md using ONLY ids from .sync.json lease/next_free_ids; stamp updated_at (ISO, UTC, now).`,
     '- Edit a task: change the file; ALWAYS re-stamp updated_at. Delete a task: delete the file and report its numeric id in deleted_short_ids on flush.',
     '- FLUSH after each work unit: call flush_local_project with the files you changed + base_cursor from .sync.json; write any hub_wins contents back to disk and update the cursor in .sync.json.',
-    '- input / output / review in frontmatter are READ-ONLY carriage (contracts are hub ceremonies). Milestones are hub-only in v1 (not in these files).',
-    '- Never hand-edit .sync.json. context.md is a read-only snapshot.',
+    '- input / output / review in frontmatter are READ-ONLY carriage (contracts are hub ceremonies). Milestones are hub-only in v1 (not in these files). KB bodies in kb/ are READ-ONLY (author via MCP).',
+    '- Never hand-edit .sync.json. context.md and the grounding files are read-only snapshots.',
   ].join('\n')
   files['.gitignore'] = '.sync.json\ncontext.md\n'
 
@@ -738,7 +790,7 @@ async function applyFlush(
   cursor: number; applied: string[]; created: string[]; deleted: string[]
   rejected: string[]; warnings: string[]; hub_wins: Array<{ path: string; content: string; reason: string }>
 }> {
-  const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }, { data: flushIs }] = await Promise.all([
+  const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }] = await Promise.all([
     sb.from('projects').select('local_mode, local_revision').eq('id', project.id).maybeSingle(),
     sb.from('sections').select('id, name, sort_order').eq('project_id', project.id).order('sort_order'),
     sb.from('groups').select('id, name, section_id, sort_order').eq('project_id', project.id).order('sort_order'),
@@ -746,18 +798,10 @@ async function applyFlush(
       .eq('project_id', project.id).eq('user_id', userId),
     sb.from('local_id_leases').select('lease_start, lease_end').eq('project_id', project.id).eq('device_id', deviceId).eq('user_id', userId),
     sb.from('local_tombstones').select('short_id, local_rev').eq('project_id', project.id),
-    sb.from('project_instructions').select('title, content').eq('project_id', project.id).order('created_at'),
   ])
   if (!proj?.local_mode) return { error: `"${project.name}" is not a Local Mode project — nothing to flush.` }
-  // hub_wins corrections must stay governed — same footer the pull injects.
-  const flushGovernance = (flushIs?.length)
-    ? [
-        '# ⚖ Instruction Set — governs this task (project-wide)',
-        '',
-        ...flushIs.flatMap((e: any) => [`## ${e.title}`, '', e.content, '']),
-        '_Auto-injected on every pull; do not edit (stripped on flush). Foundation + KB index live in context.md._',
-      ].join('\n')
-    : ''
+  // hub_wins corrections are footer-free, matching the pull format (grounding lives
+  // in dedicated files now, not per-task footers).
 
   const tasks: DbTaskRow[] = (taskRows || []).filter((t: any) => t.short_id != null)
   const prefix = project.prefix || 'TSK'
@@ -812,7 +856,7 @@ async function applyFlush(
       tombRev, baseCursor)
 
     if (decision === 'hub_wins') {
-      hubWins.push({ path, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'hub has a newer (or tied) concurrent edit — write this content back' })
+      hubWins.push({ path, content: serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), reason: 'hub has a newer (or tied) concurrent edit — write this content back' })
       continue
     }
     const fields = fileFields(task)
@@ -845,7 +889,7 @@ async function applyFlush(
     const hubRow = byShort.get(sid) || null
     const decision = resolveFlushDelete(hubRow ? { updated_at: hubRow.updated_at ?? null, local_rev: hubRow.local_rev ?? 0 } : null, baseCursor)
     if (decision === 'edit_beats_delete_keep') {
-      hubWins.push({ path: `tasks/${prefix}-${sid}.md`, content: withGovernance(serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), flushGovernance), reason: 'edited on the hub since your pull — edit beats delete; restore this file' })
+      hubWins.push({ path: `tasks/${prefix}-${sid}.md`, content: serializeTaskFile(dbRowToTaskerTask(hubRow!, prefix, maps)), reason: 'edited on the hub since your pull — edit beats delete; restore this file' })
       continue
     }
     if (!hubRow) { deleted.push(`${prefix}-${sid}`); continue } // already gone — idempotent
