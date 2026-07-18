@@ -4,7 +4,7 @@
 
 import { readFileSync, readdirSync } from 'node:fs'
 import { join } from 'node:path'
-import { parseTasker, serializeTasker, parseTaskFile, serializeTaskFile, contentHash, withGovernance } from './local_format.ts'
+import { parseTasker, serializeTasker, parseTaskFile, serializeTaskFile, contentHash, withGovernance, kbFileSlug } from './local_format.ts'
 
 const EXAMPLE = join(import.meta.dirname ?? '.', '..', '..', '..', 'examples', 'blog-post-workflow', '.tasker')
 
@@ -96,6 +96,13 @@ assert(withGovernance(serializeTaskFile(rich), '') === serializeTaskFile(rich), 
 
 // Hash determinism
 assert(contentHash('hello') === contentHash('hello') && contentHash('hello') !== contentHash('hello!'), 'contentHash deterministic and discriminating')
+
+// kbFileSlug: safe, stable, capped filenames from KB titles (grounding restructure)
+assert(kbFileSlug('MCP: resolveProject accepts slug, UUID, or prefix') === 'mcp-resolveproject-accepts-slug-uuid-or-prefix', 'kbFileSlug lowercases + dashes non-alnum')
+assert(kbFileSlug('  Trailing / leading!  ') === 'trailing-leading', 'kbFileSlug trims dashes at both ends')
+assert(kbFileSlug('') === 'untitled' && kbFileSlug('!!!') === 'untitled', 'kbFileSlug falls back to untitled')
+assert(kbFileSlug('x'.repeat(200)).length <= 60, 'kbFileSlug caps length')
+assert(!kbFileSlug('word '.repeat(20)).endsWith('-'), 'kbFileSlug does not end with a dash after capping')
 
 if (failures > 0) { console.error(`\n${failures} failure(s)`); process.exit(1) }
 console.log('\nALL PASS')

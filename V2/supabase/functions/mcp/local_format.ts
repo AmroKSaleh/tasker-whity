@@ -85,6 +85,19 @@ function parseInlineObject(raw: string): Record<string, unknown> | null {
   } catch { return null }
 }
 
+// ── kb filename slug ────────────────────────────────────────────────────────
+// Turn a KB entry title into a safe, stable .md filename stem. Lowercase, keep
+// alphanumerics, collapse everything else to single dashes, trim, cap length.
+// Collisions are disambiguated by the caller (append -2, -3…).
+export function kbFileSlug(title: string): string {
+  const s = title.toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 60)
+    .replace(/-+$/g, '')
+  return s || 'untitled'
+}
+
 // ── governance footer ─────────────────────────────────────────────────────────
 // FORCED IS exposure (parity with online get_task injection): every task file
 // carries the governing Instruction Set below this marker, auto-injected on
