@@ -1,0 +1,13 @@
+{
+  "name": "tasker-local-viewer",
+  "productName": "Tasker Local",
+  "version": "0.1.0",
+  "description": "Read-only desktop window into local .tasker/ projects",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^34.0.0"
+  }
+}

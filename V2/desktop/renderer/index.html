@@ -1,0 +1,55 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tasker Local v0.1.0</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app" class="board-surface">
+    <header class="masthead" id="masthead">
+      <div class="mast-left">
+        <div class="kicker" id="mast-kicker">TASKER LOCAL</div>
+        <h1 class="mast-title" id="mast-title">No project open</h1>
+        <div class="mast-sub" id="mast-sub"></div>
+      </div>
+      <div class="mast-right">
+        <span class="live-chip" id="live-chip" hidden><span class="dot dot-live-accent"></span>WATCHING</span>
+        <select id="project-select" class="proj-select" hidden></select>
+        <input id="search" class="search" type="text" placeholder="Filter tasks…" hidden />
+        <button id="pill-open" class="pill pill-active">Open</button>
+        <button id="pill-all" class="pill">All</button>
+        <button id="theme-btn" class="btn btn-sm" title="Toggle light/dark">◐</button>
+        <button id="add-btn" class="btn btn-sm">+ Add project folder</button>
+      </div>
+    </header>
+
+    <main id="board" class="board cols-scroll"></main>
+
+    <div id="empty" class="empty">
+      <div class="empty-card">
+        <div class="kicker">TASKER LOCAL · READ-ONLY</div>
+        <h2>A window into your local projects</h2>
+        <p>This viewer renders <code>.tasker/</code> folders straight from disk — the same files your AI agent works on. Nothing here writes, syncs, or talks to the cloud.</p>
+        <button id="empty-add" class="btn-primary">+ Add a project folder</button>
+        <p class="empty-hint">Pick a repo folder that contains a <code>.tasker/</code> directory.</p>
+      </div>
+    </div>
+
+    <aside id="detail" class="detail" hidden>
+      <div class="detail-head">
+        <span class="kicker" id="detail-id"></span>
+        <button class="icon-btn" id="detail-close" title="Close">✕</button>
+      </div>
+      <h2 class="detail-title" id="detail-title"></h2>
+      <div class="detail-chips" id="detail-chips"></div>
+      <div class="detail-meta" id="detail-meta"></div>
+      <div id="detail-review"></div>
+      <div class="docs-prose" id="detail-body"></div>
+    </aside>
+    <div id="scrim" class="scrim" hidden></div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
