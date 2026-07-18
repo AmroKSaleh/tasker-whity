@@ -787,7 +787,8 @@ async function applyFlush(
   sb: any, userId: string, project: any, deviceId: string, baseCursor: number,
   changed: Array<{ path?: string; content?: string }>, deletedIds: number[],
 ): Promise<{ error: string } | {
-  cursor: number; applied: string[]; created: string[]; deleted: string[]; created_groups: string[]
+  cursor: number; applied: string[]; created: string[]; deleted: string[]
+  created_groups: string[]; created_sections: string[]
   rejected: string[]; warnings: string[]; hub_wins: Array<{ path: string; content: string; reason: string }>
 }> {
   const [{ data: proj }, { data: sections }, { data: groups }, { data: taskRows }, { data: leaseRows }, { data: tombRows }] = await Promise.all([
@@ -817,13 +818,26 @@ async function applyFlush(
 
   const applied: string[] = [], created: string[] = [], deleted: string[] = [], rejected: string[] = [], warnings: string[] = []
   const createdGroups: string[] = []
+  const createdSections: string[] = []
   const hubWins: Array<{ path: string; content: string; reason: string }> = []
 
-  const slugToSectionId = (slug: string | undefined, current: string | null): { id: string | null; warn?: string } => {
-    if (!slug || slug === UNFILED_SLUG) return { id: slug === UNFILED_SLUG ? null : current }
-    const id = maps.sectionIdBySlug.get(slug)
-    if (id) return { id }
-    return { id: current, warn: `unknown section slug "${slug}" — kept the hub's section` }
+  // Section create-by-reference: an unknown `section:` slug creates that section
+  // (named verbatim = slug-is-name → round-trips exactly, same rationale as groups).
+  // Registered in maps immediately so sibling tasks in the same flush reuse it.
+  const resolveSectionForTask = async (t: ReturnType<typeof parseTaskFile>['task'] & object): Promise<string | null> => {
+    const slug = t.section
+    if (!slug || slug === UNFILED_SLUG) return null // unfiled → ungrouped/no section
+    const existing = maps.sectionIdBySlug.get(slug)
+    if (existing) return existing
+    const { data: maxRow } = await sb.from('sections').select('sort_order').eq('project_id', project.id).order('sort_order', { ascending: false }).limit(1)
+    const nextSort = (maxRow?.[0]?.sort_order ?? 0) + 1
+    const { data: ins, error } = await sb.from('sections').insert({
+      project_id: project.id, name: slug, sort_order: nextSort,
+    }).select('id').single()
+    if (error || !ins) { warnings.push(`${t.id}: could not create section "${slug}" — ${error?.message || 'insert failed'}; task left in the hub's section`); return null }
+    maps.sectionIdBySlug.set(slug, ins.id) // sibling tasks reuse it
+    createdSections.push(slug)
+    return ins.id
   }
 
   // Create-by-reference (TDE-581): an unknown `group:` slug on a task that has a
@@ -859,12 +873,11 @@ async function applyFlush(
   }
 
   const fileFields = async (t: ReturnType<typeof parseTaskFile>['task'] & object) => {
-    const sec = slugToSectionId(t.section, null)
-    const groupId = await resolveGroupForTask(t, sec.id)
-    if (sec.warn) warnings.push(`${t.id}: ${sec.warn}`)
+    const sectionId = await resolveSectionForTask(t)
+    const groupId = await resolveGroupForTask(t, sectionId)
     return {
       text: t.title, detail: t.body || null, status: t.status, priority: t.priority,
-      due_date: t.due || null, section_id: sec.id, group_id: groupId,
+      due_date: t.due || null, section_id: sectionId, group_id: groupId,
       sort_order: t.order ?? 0, updated_at: t.updated_at || new Date().toISOString(),
     }
   }
@@ -933,7 +946,7 @@ async function applyFlush(
   }
 
   const { data: after } = await sb.from('projects').select('local_revision').eq('id', project.id).maybeSingle()
-  return { cursor: after?.local_revision || 0, applied, created, deleted, created_groups: createdGroups, rejected, warnings, hub_wins: hubWins }
+  return { cursor: after?.local_revision || 0, applied, created, deleted, created_groups: createdGroups, created_sections: createdSections, rejected, warnings, hub_wins: hubWins }
 }
 
 function hydrateScript(bundleUrl: string): string {
@@ -1175,7 +1188,7 @@ const TOOLS = [
   },
   {
     name: 'flush_local_project',
-    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send the task files you changed (verbatim content) and any deleted short IDs. The hub applies per-task last-write-wins by updated_at (ties → hub), enforces edit-beats-delete, accepts new tasks only within this device\'s leased ID block, and records tombstones for deletions. STRUCTURAL: a task\'s `section:` and `group:` frontmatter are writable — set `section:` to move a task between sections; set `group:` to move it into a group. GROUP CREATE-BY-REFERENCE (TDE-581): if `group:` names a slug that does not exist yet AND the task has a section, the hub CREATES that group in that section (named exactly as the slug — rename later via the web app / rename_group). Returned as created_groups. Group rename/delete still go through MCP. Returns the new cursor plus hub_wins corrections — write those file contents back to disk, then update .sync.json\'s cursor. Call after each work unit (flush-after-work). Note: input/output/review fields in files are READ-ONLY carriage — contract/bar edits flow through the normal MCP ceremonies, not flush.',
+    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send the task files you changed (verbatim content) and any deleted short IDs. The hub applies per-task last-write-wins by updated_at (ties → hub), enforces edit-beats-delete, accepts new tasks only within this device\'s leased ID block, and records tombstones for deletions. STRUCTURAL: a task\'s `section:` and `group:` frontmatter are writable — set `section:` to move a task between sections; set `group:` to move it into a group. CREATE-BY-REFERENCE: if `section:` names a slug that does not exist yet, the hub CREATES that section (named exactly as the slug), returned as created_sections. Likewise if `group:` names an unknown slug AND the task has a section, the hub CREATES that group in that section, returned as created_groups. Created names = the slug verbatim (rename later via the web app / rename_group). Group/section RENAME, DELETE, and REORDER still go through MCP (create-only via files). Returns the new cursor plus hub_wins corrections — write those file contents back to disk, then update .sync.json\'s cursor. Call after each work unit (flush-after-work). Note: input/output/review fields in files are READ-ONLY carriage — contract/bar edits flow through the normal MCP ceremonies, not flush.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -4697,10 +4710,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       return JSON.stringify({
         status: 'flushed', project: project.name, cursor: res.cursor,
         applied: res.applied, created: res.created, deleted: res.deleted,
-        created_groups: res.created_groups,
+        created_groups: res.created_groups, created_sections: res.created_sections,
         rejected: res.rejected, warnings: res.warnings, hub_wins: res.hub_wins,
         how_to: 'Write every hub_wins content back to its path under .tasker/, then update the cursor field in .sync.json to the value above. Completion ceremonies (submit_validation_result / submit_task_review / complete_task) still run via MCP.',
         ...(res.created_groups.length ? { note_created_groups: `Created ${res.created_groups.length} group(s) by reference from a task's group: field: ${res.created_groups.join(', ')}. Named exactly as the slug (rename via the web app / rename_group if you want a prettier display name). If any of these was a typo, it made a stray group — delete it via the web app.` } : {}),
+        ...(res.created_sections.length ? { note_created_sections: `Created ${res.created_sections.length} section(s) by reference from a task's section: field: ${res.created_sections.join(', ')}. Named exactly as the slug. If any was a typo, it made a stray section — delete it via the web app.` } : {}),
       })
     }
 

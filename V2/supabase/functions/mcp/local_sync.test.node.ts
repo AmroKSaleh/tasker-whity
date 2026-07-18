@@ -172,5 +172,10 @@ for (const s of ['backend-work', 'bugs', 'q3-planning', 'a', 'group-2', 'ai-nati
 // And a raw pretty name does NOT round-trip — this is exactly why we chose slug-is-name over title-casing.
 assert(slugify('Backend Work') === 'backend-work' && slugify('Backend Work') !== 'Backend Work', 'a pretty name re-slugs (would drift) — justifies naming the created group the slug verbatim')
 
+// Section create-by-reference uses the identical slug-is-name guarantee (TDE section-create).
+for (const s of ['bugs', 'research-planning', 'agent-native-layer', 'q4']) {
+  assert(slugify(s) === s, `section slug "${s}" round-trips (slug-is-name stable for sections too)`)
+}
+
 if (failures > 0) { console.error(`\n${failures} failure(s)`); process.exit(1) }
 console.log('\nALL SCENARIOS PASS')
