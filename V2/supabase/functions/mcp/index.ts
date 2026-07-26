@@ -140,9 +140,9 @@ function toolFail(msg: string, id: any) { return rpcOk({ content: [{ type: 'text
 
 // ── Project resolver helper ───────────────────────────────────
 async function resolveProject(sb: any, userId: string, projectId: string, logContext?: { tool_name: string, raw_params: any }) {
-  let { data } = await sb.from('projects').select('id, name, slug, prefix, context').eq('slug', projectId).eq('user_id', userId).maybeSingle()
-  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context').eq('id', projectId).eq('user_id', userId).maybeSingle())
-  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context').ilike('prefix', projectId).eq('user_id', userId).maybeSingle())
+  let { data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('slug', projectId).eq('user_id', userId).maybeSingle()
+  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('id', projectId).eq('user_id', userId).maybeSingle())
+  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').ilike('prefix', projectId).eq('user_id', userId).maybeSingle())
   if (!data && logContext) {
     fireAndForget(sb.from('mcp_error_logs').insert({
       user_id: userId,
@@ -158,8 +158,29 @@ async function resolveProject(sb: any, userId: string, projectId: string, logCon
 async function resolveDefaultProject(sb: any, userId: string) {
   const { data } = await sb.from('user_settings').select('default_project_id').eq('user_id', userId).maybeSingle()
   if (!data?.default_project_id) return null
-  const { data: project } = await sb.from('projects').select('id, name, slug, prefix, context').eq('id', data.default_project_id).eq('user_id', userId).maybeSingle()
+  const { data: project } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('id', data.default_project_id).eq('user_id', userId).maybeSingle()
   return project ?? null
+}
+
+// ── Phase resolver (TDE-804) ──────────────────────────────────
+// Accepts a UUID, a slug, or an exact (case-insensitive) name, scoped to one project so
+// two projects may reuse "Phase 1" freely. Returns null for the literal "unphased" too —
+// callers that support it must check that sentinel BEFORE calling this.
+const PHASE_COLS = 'id, name, slug, sort_order, exit_condition, due_date'
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+
+async function resolvePhase(sb: any, projectId: string, ref: string) {
+  if (!ref) return null
+  const base = () => sb.from('phases').select(PHASE_COLS).eq('project_id', projectId)
+  // Guard the uuid probe: querying a uuid column with a non-uuid string is a PostgREST
+  // 400 that supabase-js swallows into data:null — correct, but a wasted round-trip.
+  if (UUID_RE.test(ref)) {
+    const { data } = await base().eq('id', ref).maybeSingle()
+    if (data) return data
+  }
+  let { data } = await base().eq('slug', ref).maybeSingle()
+  if (!data) ({ data } = await base().ilike('name', ref).maybeSingle())
+  return data ?? null
 }
 
 // ── GitHub helpers ────────────────────────────────────────────
@@ -1560,6 +1581,81 @@ const TOOLS = [
     },
   },
   {
+    name: 'list_phases',
+    description: 'TDE-804: list a project\'s PHASES — condition-bounded stages ("Phase 1 ends when we launch"), each with its task counts. A phase is bounded by an exit condition, NOT a date; a due date is optional. Phases are an ORTHOGONAL axis to sections: sections are categorical (kind of work), phases are temporal (when). The response marks the project\'s ACTIVE phase and reports how many tasks are UNPHASED — unphased is a legitimate permanent state, not a backlog to drain.',
+    inputSchema: {
+      type: 'object',
+      properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'create_phase',
+    description: 'TDE-804: create a phase in a project. ALWAYS set exit_condition — it is the honesty guardrail: stating what must be TRUE for the phase to end forces a statement of what is actually required, so unrequired work falls out to a later phase. A phase without one is just a bucket. due_date is optional and should stay empty unless the user genuinely has a deadline (a phase is bounded by achievement, not the calendar — that is what makes it not a sprint).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id:     { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        name:           { type: 'string', description: 'Phase name (e.g. "Phase 1 — Core app")' },
+        exit_condition: { type: 'string', description: 'What must be TRUE for this phase to be over (e.g. "the app is live and the MCP is documented"). Strongly recommended.' },
+        due_date:       { type: 'string', description: 'OPTIONAL ISO date YYYY-MM-DD. Leave unset unless there is a real deadline.' },
+      },
+      required: ['project_id', 'name'],
+    },
+  },
+  {
+    name: 'update_phase',
+    description: 'TDE-804: update a phase — rename it, revise its exit condition, set/clear its optional due date, or change its position. Non-destructive: task assignments are untouched.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id:     { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        phase_id:       { type: 'string', description: 'Phase UUID, slug, or exact name' },
+        name:           { type: 'string', description: 'New name' },
+        exit_condition: { type: 'string', description: 'New exit condition. Pass an empty string to clear.' },
+        due_date:       { type: 'string', description: 'New ISO date YYYY-MM-DD. Pass an empty string to clear the deadline.' },
+        sort_order:     { type: 'number', description: 'New position (lower comes first)' },
+      },
+      required: ['project_id', 'phase_id'],
+    },
+  },
+  {
+    name: 'delete_phase',
+    description: 'TDE-804: delete a phase. Its tasks are NOT deleted — they become UNPHASED (phase_id → null), which is a valid state. If this phase was the project\'s active phase, the pointer is cleared. Reports how many tasks were unphased.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        phase_id:   { type: 'string', description: 'Phase UUID, slug, or exact name' },
+      },
+      required: ['project_id', 'phase_id'],
+    },
+  },
+  {
+    name: 'set_active_phase',
+    description: 'TDE-804: set which phase the project is CURRENTLY in — the answer to "what is in scope right now". get_ready_work uses this to scope the queue, so keeping it accurate is what makes phases useful to an agent rather than decoration. Pass phase_id: null (or omit it) to clear the pointer.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        phase_id:   { type: 'string', description: 'Phase UUID, slug, or exact name. Omit or pass null to clear.' },
+      },
+      required: ['project_id'],
+    },
+  },
+  {
+    name: 'set_task_phase',
+    description: 'TDE-804: assign a task to a phase, or UNPHASE it (pass phase_id: null / omit). Unphasing is not a failure state — work that legitimately belongs to no stage (idea inventories, evergreen items) should stay unphased rather than be stamped with a phase that would then be a lie.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id:  { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
+        phase_id: { type: 'string', description: 'Phase UUID, slug, or exact name within the task\'s project. Omit or pass null to unphase.' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
     name: 'list_tasks',
     description: 'List tasks. Flow steps are NOT tasks and are excluded (TDE-320) — a task that belongs to a named flow is a STEP, listed only via the Flows tools (list_flows / get_flow_context), never here. Done tasks are also excluded by default — pass status: "all" to include them. If no project_id is provided, the user\'s default project is used when set; otherwise this requires confirmed: true to list across ALL projects. include_flow_steps is an explicit user override only: set it solely when the USER has explicitly asked to see flow steps here as if they were normal tasks — never flip it on your own initiative.',
     inputSchema: {
@@ -1570,6 +1666,7 @@ const TOOLS = [
         status:     { type: 'string', enum: ['pending', 'in_progress', 'done', 'all'], description: 'Filter by status. Defaults to excluding done tasks. Pass "all" to include everything.' },
         confirmed:  { type: 'boolean', description: 'Set to true to list tasks across ALL projects (only needed when project_id is omitted AND no default project is set).' },
         include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks — TDE-320). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own.' },
+        phase_id:   { type: 'string', description: 'TDE-804: show only tasks in this phase (UUID, slug, or exact name). Pass "unphased" to list only tasks belonging to NO phase. Requires project_id.' },
       },
       required: [],
     },
@@ -3208,9 +3305,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'get_project': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
-      const [{ data: sections }, { data: tasks }] = await Promise.all([
+      const [{ data: sections }, { data: tasks }, { data: projPhases }] = await Promise.all([
         sb.from('sections').select('*').eq('project_id', project.id).order('sort_order'),
         sb.from('tasks').select('*').eq('project_id', project.id).order('sort_order'),
+        sb.from('phases').select(PHASE_COLS).eq('project_id', project.id).order('sort_order'),
       ])
       // TDE-319/371: Notes (task detail) are the bulk of a large project's payload and are the
       // known context-overflow cause. Omit them by default (the IDs/titles/badges are the map);
@@ -3226,6 +3324,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         '',
       ]
       if (!includeNotes) lines.push('_Task Notes omitted — pass include_notes:true, or read one task via get_task._', '')
+
+      // TDE-804: phase roll-up, emitted only for projects that actually use phases. Flow steps
+      // leave the denominator (TDE-320) so these tallies match the board and list_sections.
+      if (projPhases?.length) {
+        const pc: Record<string, { open: number; total: number }> = {}
+        const unph = { open: 0, total: 0 }
+        for (const t of ((tasks ?? []) as any[])) {
+          if (t.flow_id) continue
+          const b = t.phase_id ? (pc[t.phase_id] ?? (pc[t.phase_id] = { open: 0, total: 0 })) : unph
+          b.total++
+          if (t.status !== 'done') b.open++
+        }
+        lines.push('## Phases')
+        for (const p of projPhases as any[]) {
+          const c = pc[p.id] ?? { open: 0, total: 0 }
+          const done = c.total - c.open
+          const pct = c.total ? Math.round((done / c.total) * 100) : 0
+          lines.push(`- ${p.name}${p.id === project.active_phase_id ? ' ● ACTIVE' : ''} — ${done}/${c.total} done (${pct}%)${p.exit_condition ? ` · ends when: ${p.exit_condition}` : ''}${p.due_date ? ` · due ${p.due_date}` : ''}`)
+        }
+        lines.push(`- (unphased) — ${unph.total - unph.open}/${unph.total} done`)
+        lines.push('')
+      }
 
       const renderTask = (t: any) => {
         const sid = (project.prefix && t.short_id != null) ? `${project.prefix}-${t.short_id}` : t.id
@@ -3607,9 +3727,126 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       return `Deleted section "${section.name}"${taskCount > 0 && args.delete_tasks ? ` and its ${taskCount} task${taskCount !== 1 ? 's' : ''}` : ''}.`
     }
 
+    case 'list_phases': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const [{ data: phases }, { data: tasks }] = await Promise.all([
+        sb.from('phases').select(PHASE_COLS).eq('project_id', project.id).order('sort_order'),
+        sb.from('tasks').select('phase_id, status, flow_id').eq('project_id', project.id),
+      ])
+      // TDE-320/TDE-806: flow steps leave every denominator — same rule the board and
+      // list_sections use, so the phase tallies reconcile with what the human sees.
+      const counts: Record<string, { open: number; total: number }> = {}
+      const unphased = { open: 0, total: 0 }
+      for (const t of ((tasks ?? []) as any[])) {
+        if (t.flow_id) continue
+        const bucket = t.phase_id ? (counts[t.phase_id] ?? (counts[t.phase_id] = { open: 0, total: 0 })) : unphased
+        bucket.total++
+        if (t.status !== 'done') bucket.open++
+      }
+      if (!phases?.length) {
+        return `No phases in "${project.name}" — every task is unphased (${unphased.open} open / ${unphased.total} total).\n`
+          + `Phases are optional; create one with create_phase when the project has stages worth separating.`
+      }
+      const lines = phases.map((p: any) => {
+        const c = counts[p.id] ?? { open: 0, total: 0 }
+        const active = p.id === project.active_phase_id ? ' ← ACTIVE' : ''
+        const exit = p.exit_condition ? `\n    ends when: ${p.exit_condition}` : `\n    ⚠ no exit condition set — this phase is just a bucket until it has one`
+        const due = p.due_date ? `\n    due: ${p.due_date} (optional)` : ''
+        return `[id: ${p.id}] ${p.name} — ${c.open} open / ${c.total} total${active}${exit}${due}`
+      })
+      lines.push(`\nUnphased — ${unphased.open} open / ${unphased.total} total. Not a backlog to drain: work that belongs to no stage (idea inventories, evergreen items) is correctly left unphased.`)
+      if (!project.active_phase_id) lines.push(`\n⚠ No active phase set — get_ready_work cannot scope to a phase. Set one with set_active_phase.`)
+      return lines.join('\n')
+    }
+
+    case 'create_phase': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const { data: existing } = await sb.from('phases')
+        .select('sort_order').eq('project_id', project.id).order('sort_order', { ascending: false }).limit(1).maybeSingle()
+      const { data, error } = await sb.from('phases').insert({
+        project_id: project.id,
+        name: args.name,
+        sort_order: (existing?.sort_order ?? -1) + 1,
+        exit_condition: args.exit_condition ?? null,
+        due_date: args.due_date || null,
+      }).select(PHASE_COLS).single()
+      if (error) throw new Error(error.message)
+      // First phase in a project becomes active — otherwise phases exist but nothing is
+      // "current", and get_ready_work has nothing to scope to.
+      let activated = ''
+      if (!project.active_phase_id) {
+        await sb.from('projects').update({ active_phase_id: data.id }).eq('id', project.id)
+        activated = '\nSet as the ACTIVE phase (it was the first one).'
+      }
+      const warn = args.exit_condition ? '' : '\n⚠ No exit_condition. Add one with update_phase — without it there is nothing to say when this phase is over, and phases without exit conditions just re-slice the same scope.'
+      return `Created phase "${data.name}" in "${project.name}"\nid: ${data.id}${activated}${warn}`
+    }
+
+    case 'update_phase': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const phase = await resolvePhase(sb, project.id, args.phase_id)
+      if (!phase) return `Phase "${args.phase_id}" not found in "${project.name}".`
+      const patch: Record<string, any> = {}
+      if (args.name !== undefined) patch.name = args.name
+      if (args.exit_condition !== undefined) patch.exit_condition = args.exit_condition || null
+      if (args.due_date !== undefined) patch.due_date = args.due_date || null
+      if (args.sort_order !== undefined) patch.sort_order = args.sort_order
+      if (!Object.keys(patch).length) return 'Nothing to update — pass at least one of name, exit_condition, due_date, sort_order.'
+      const { error } = await sb.from('phases').update(patch).eq('id', phase.id)
+      if (error) throw new Error(error.message)
+      return `Updated phase "${phase.name}"${patch.name ? ` → "${patch.name}"` : ''} in "${project.name}".`
+    }
+
+    case 'delete_phase': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      const phase = await resolvePhase(sb, project.id, args.phase_id)
+      if (!phase) return `Phase "${args.phase_id}" not found in "${project.name}".`
+      const { data: affected } = await sb.from('tasks').select('id').eq('phase_id', phase.id)
+      const n = affected?.length ?? 0
+      // tasks.phase_id is ON DELETE SET NULL and projects.active_phase_id likewise, so the
+      // DB unphases and clears the pointer for us — no manual cleanup, no lost tasks.
+      const { error } = await sb.from('phases').delete().eq('id', phase.id)
+      if (error) throw new Error(error.message)
+      const wasActive = project.active_phase_id === phase.id ? ' The active-phase pointer is now clear — set another with set_active_phase.' : ''
+      return `Deleted phase "${phase.name}". ${n} task${n !== 1 ? 's are' : ' is'} now unphased (nothing was deleted).${wasActive}`
+    }
+
+    case 'set_active_phase': {
+      const project = await resolveProject(sb, userId, args.project_id, logCtx)
+      if (!project) return `Project "${args.project_id}" not found.`
+      if (!args.phase_id) {
+        await sb.from('projects').update({ active_phase_id: null }).eq('id', project.id)
+        return `Cleared the active phase on "${project.name}". get_ready_work will no longer scope by phase.`
+      }
+      const phase = await resolvePhase(sb, project.id, args.phase_id)
+      if (!phase) return `Phase "${args.phase_id}" not found in "${project.name}".`
+      const { error } = await sb.from('projects').update({ active_phase_id: phase.id }).eq('id', project.id)
+      if (error) throw new Error(error.message)
+      return `"${project.name}" is now in phase "${phase.name}".${phase.exit_condition ? `\nEnds when: ${phase.exit_condition}` : ''}`
+    }
+
+    case 'set_task_phase': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      if (!args.phase_id) {
+        const { error } = await sb.from('tasks').update({ phase_id: null, updated_at: new Date().toISOString() }).eq('id', task.id)
+        if (error) throw new Error(error.message)
+        return `Unphased "${task.text}". That is a valid resting state — not every task belongs to a stage.`
+      }
+      const phase = await resolvePhase(sb, task.project_id, args.phase_id)
+      if (!phase) return `Phase "${args.phase_id}" not found in this task's project.`
+      const { error } = await sb.from('tasks').update({ phase_id: phase.id, updated_at: new Date().toISOString() }).eq('id', task.id)
+      if (error) throw new Error(error.message)
+      return `Moved "${task.text}" into phase "${phase.name}".`
+    }
+
     case 'list_tasks': {
       const { project_id, section_id, status, confirmed, include_flow_steps } = args
-      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, project:projects(prefix), section:sections(name)').eq('user_id', userId)
+      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId)
       if (project_id) {
         const p = await resolveProject(sb, userId, project_id)
         if (p) query = query.eq('project_id', p.id)
@@ -3622,6 +3859,21 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
       }
       if (section_id) query = query.eq('section_id', section_id)
+      // TDE-804 phase filter. "unphased" is a first-class selector, not an absence of one.
+      let phaseLabel = ''
+      if (args.phase_id) {
+        if (!project_id) return 'phase_id requires project_id — a phase belongs to one project.'
+        const p = await resolveProject(sb, userId, project_id)
+        if (String(args.phase_id).toLowerCase() === 'unphased') {
+          query = query.is('phase_id', null)
+          phaseLabel = 'unphased'
+        } else {
+          const ph = p ? await resolvePhase(sb, p.id, args.phase_id) : null
+          if (!ph) return `Phase "${args.phase_id}" not found in that project.`
+          query = query.eq('phase_id', ph.id)
+          phaseLabel = ph.name
+        }
+      }
       // TDE-320: flow steps are not tasks. Exclude any task that belongs to a named
       // flow unless the user explicitly asked to see them via include_flow_steps.
       if (!include_flow_steps) query = query.is('flow_id', null)
@@ -3629,14 +3881,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       else if (status)        query = query.eq('status', status)
       else                    query = query.neq('status', 'done')
       const { data } = await query.order('sort_order')
-      if (!data?.length) return 'No tasks found.'
-      return data.map((t: any) => {
+      if (!data?.length) return phaseLabel ? `No tasks found in phase "${phaseLabel}".` : 'No tasks found.'
+      const body = data.map((t: any) => {
         const shortRef = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id
         const sectionName = t.section?.name ?? 'no section'
         const added = t.created_at ? t.created_at.slice(0, 10) : null
-        const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.status !== 'pending' ? t.status : null].filter(Boolean).join(', ')
+        // Phase is omitted when the list is already scoped to one — it would repeat on every
+        // line for no information (cf. the token-economy work in TDE-371).
+        const phaseBadge = !phaseLabel && t.phase?.name ? t.phase.name : null
+        const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.status !== 'pending' ? t.status : null, phaseBadge].filter(Boolean).join(', ')
         return `${shortRef} — ${t.text}${badges ? ` [${badges}]` : ''} · ${sectionName}${added ? ` · added ${added}` : ''}`
       }).join('\n')
+      return phaseLabel ? `Phase: ${phaseLabel}\n\n${body}` : body
     }
 
     case 'create_task': {
@@ -3967,7 +4223,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return 'Task not found.'
       const { data: full } = await sb.from('tasks')
-        .select('*, section:sections(name), project:projects(name, prefix)')
+        .select('*, section:sections(name), project:projects(name, prefix, active_phase_id), phase:phases(name, exit_condition)')
         .eq('id', task.id)
         .maybeSingle()
       if (!full) return 'Task not found.'
@@ -4013,6 +4269,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
       ]
       if (branchName) lines.push(`Branch: ${branchName}`)
+      // TDE-804: the phase answers "is this in scope right now" — the question an agent
+      // otherwise has to be told in prose every session.
+      // Stays silent for projects not using phases at all (the common case) rather than
+      // spending a line on every get_task to say "no phases here".
+      if (full.phase?.name) lines.push(`Phase: ${full.phase.name}${full.phase.exit_condition ? ` (ends when: ${full.phase.exit_condition})` : ''}`)
+      else if (full.project?.active_phase_id) lines.push(`Phase: unphased — this project uses phases but this task is in none. Valid, but it will rank last in a phase-scoped queue.`)
       if (full.delegated_to) lines.push(`Delegated to: ${full.delegated_to} (you remain the owner and own the gate)`)
       // Relay (TDE-324): a handed-off task carries a curated rationale layer authored by the
       // person who relayed it. Surface it LOUD and FIRST — its whole point is that the assignee
@@ -4730,12 +4992,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'get_ready_work': {
       let q = sb.from('tasks')
-        .select('id, text, short_id, priority, sort_order, project_id, project:projects(prefix, name)')
+        .select('id, text, short_id, priority, sort_order, project_id, phase_id, project:projects(prefix, name)')
         .eq('user_id', userId).eq('agent_ready', true).eq('status', 'pending')
+      let activePhase: any = null
       if (args.project_id) {
         const p = await resolveProject(sb, userId, args.project_id)
         if (!p) return `Project "${args.project_id}" not found.`
         q = q.eq('project_id', p.id)
+        // TDE-804: scope the queue to the project's active phase. Partitioned in JS rather
+        // than filtered in SQL so the response can REPORT what it left out — silently
+        // dropping out-of-phase work would make it unreachable with no trace.
+        if (p.active_phase_id) activePhase = await resolvePhase(sb, p.id, p.active_phase_id)
       }
       // ALSO fetch confirmed proposals ready to EXECUTE (human reviewed + approved in the web).
       let xq = sb.from('tasks').select('id, text, short_id, agent_proposal, project:projects(prefix)')
@@ -4743,10 +5010,33 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (args.project_id) { const p2 = await resolveProject(sb, userId, args.project_id); if (p2) xq = xq.eq('project_id', p2.id) }
       const [{ data: readyData }, { data: execData }] = await Promise.all([q, xq])
       const prio: Record<string, number> = { rush: 0, high: 1, medium: 2, low: 3 }
-      const prep = (readyData || []).sort((a: any, b: any) => (prio[a.priority] ?? 2) - (prio[b.priority] ?? 2) || (a.sort_order ?? 0) - (b.sort_order ?? 0))
+      let readyRows = readyData || []
+      // TDE-804 phase scoping. Unphased tasks are ALWAYS kept, whatever the active phase:
+      // a task in no phase is in no queue otherwise, and the phase view hides it from the
+      // human too — so it would become silently unreachable by both. They rank last.
+      let outOfPhase = 0
+      let unphasedIncluded = 0
+      if (activePhase) {
+        const kept: any[] = []
+        for (const t of readyRows as any[]) {
+          if (t.phase_id === activePhase.id) kept.push(t)
+          else if (!t.phase_id) { unphasedIncluded++; kept.push(t) }
+          else outOfPhase++
+        }
+        readyRows = kept
+      }
+      const prep = readyRows.sort((a: any, b: any) =>
+        Number(!a.phase_id) - Number(!b.phase_id) ||
+        (prio[a.priority] ?? 2) - (prio[b.priority] ?? 2) ||
+        (a.sort_order ?? 0) - (b.sort_order ?? 0))
       const exec = execData || []
       const ref = (t: any) => t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id.slice(0, 8)
-      if (!prep.length && !exec.length) return 'Nothing to do: no handed-over tasks to prepare and no confirmed proposals to execute. (In the web app, flip "Hand to agent" on a task to add one.)'
+      if (!prep.length && !exec.length) {
+        // Never report an empty queue when phase scoping is what emptied it — that is the
+        // silent-unreachability failure the partition above exists to prevent.
+        if (outOfPhase) return `Nothing to do IN THE ACTIVE PHASE "${activePhase.name}" — but ${outOfPhase} handed-over task${outOfPhase !== 1 ? 's belong' : ' belongs'} to another phase. Switch with set_active_phase, or inspect via list_tasks(phase_id:…).`
+        return 'Nothing to do: no handed-over tasks to prepare and no confirmed proposals to execute. (In the web app, flip "Hand to agent" on a task to add one.)'
+      }
       const lines: string[] = []
       if (exec.length) {
         lines.push(`✓ CONFIRMED — EXECUTE NOW (${exec.length}): the human reviewed + approved the proposal. get_task(id), DO exactly what agent_proposal says (it may have been human-edited), verify, then clear it — update_task(id, agent_proposal:"") — and complete_task.`)
@@ -4755,7 +5045,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       if (prep.length) {
         lines.push(`▶ TO PREPARE (${prep.length}): the human handed these over. get_task(id) to start + load context, prepare the work FULLY, set update_task(id, agent_proposal:"…"), then STOP and let the human confirm/edit it in the web. Do NOT execute until it comes back confirmed.`)
-        for (const t of prep) lines.push(`  ${ref(t)} [${t.priority}] ${t.text}`)
+        for (const t of prep) lines.push(`  ${ref(t)} [${t.priority}]${!t.phase_id ? ' (unphased)' : ''} ${t.text}`)
+      }
+      if (activePhase) {
+        lines.push(`\nPhase scope: "${activePhase.name}"${activePhase.exit_condition ? ` — ends when: ${activePhase.exit_condition}` : ''}.`)
+        if (unphasedIncluded) lines.push(`Includes ${unphasedIncluded} unphased task${unphasedIncluded !== 1 ? 's' : ''} (ranked last) — unphased work stays reachable regardless of phase.`)
+        if (outOfPhase) lines.push(`Hid ${outOfPhase} ready task${outOfPhase !== 1 ? 's' : ''} belonging to another phase. Use set_active_phase to switch scope, or list_tasks(phase_id:…) to see them.`)
       }
       return lines.join('\n')
     }
@@ -7944,7 +8239,7 @@ Deno.serve(async (req: Request) => {
       })
     }
     const sb = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, { auth: { persistSession: false } })
-    const { data: project } = await sb.from('projects').select('id, name, slug, prefix, context')
+    const { data: project } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id')
       .eq('id', claim.p).eq('user_id', claim.u).maybeSingle()
     if (!project) {
       return new Response(JSON.stringify({ error: 'Project not found.' }), {
