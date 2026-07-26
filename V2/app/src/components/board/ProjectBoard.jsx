@@ -33,6 +33,9 @@ import ProjectContextPanel from './ProjectContextPanel'
 import SectionContextSidebar from './SectionContextSidebar'
 import FrontPage, { MastheadSky } from './FrontPage'
 import BlueprintView from './BlueprintView'
+import PhaseBar, { phaseTally } from './PhaseBar'
+import PhasesModal from './PhasesModal'
+import { usePhases, phaseTint } from '../../hooks/usePhases'
 
 function matchFilter(t, statusFilter, priorityFilter) {
   const statusOk = statusFilter === 'all' ||
@@ -102,7 +105,7 @@ function dueLabel(due_date) {
 }
 
 // ── Editorial board card ──
-function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete }) {
+function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, showUnphased = false }) {
   const done = task.status === 'done'
   const ip = task.status === 'in_progress'
   const seed = task.kind === 'seed'
@@ -194,6 +197,14 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
         )}
         {task.priority && task.priority !== 'medium' && <span className={`dot dot-${prio}`} />}
         {task.priority && task.priority !== 'medium' && <span className="uppercase">{task.priority}</span>}
+        {/* TDE-804: only shown on the whole-project view of a phased project. Phase views hide
+            unphased tasks entirely, so without this marker (and the Unphased tab beside it) a
+            launch-critical task in no phase would be invisible on every surface you work in. */}
+        {showUnphased && !task.phase_id && (
+          <span className="rounded border border-line-2 px-1 py-px text-[9px] tracking-[0.06em] text-mute-2" title="No phase — not shown in any phase view">
+            UNPHASED
+          </span>
+        )}
         {task.due_date && <><span className="text-mute-2">·</span><span>{dueLabel(task.due_date)}</span></>}
         {task.agent_proposal
           ? (task.agent_proposal_confirmed
@@ -335,7 +346,7 @@ function SectionViewControls({ prefs, sorted, onChange }) {
   )
 }
 
-function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection, onDeleteSection, onUpdateViewPrefs }) {
+function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection, onDeleteSection, onUpdateViewPrefs, showUnphased = false }) {
   const dim = /done|complete/i.test(section.name)
   const prefs = readViewPrefs(section)
   const sorted = prefs.sort !== 'manual'
@@ -432,7 +443,7 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
         <DroppableList sectionId={section.id} groupId={null} items={ungrouped.map(t => t.id)}>
           {ungrouped.map(t => (
             <SortableCard key={t.id} task={t} sectionId={section.id} groupId={null} prefix={prefix} sortLocked={sorted}
-              onOpen={onOpen} onToggle={onToggle} onToggleIP={onToggleIP} onFocus={onFocus} onPin={onPin} onDelete={onDelete} />
+              onOpen={onOpen} onToggle={onToggle} onToggleIP={onToggleIP} onFocus={onFocus} onPin={onPin} onDelete={onDelete} showUnphased={showUnphased} />
           ))}
         </DroppableList>
 
@@ -446,7 +457,7 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
               <DroppableList sectionId={section.id} groupId={g.id} items={g.tasks.map(t => t.id)}>
                 {g.tasks.map(t => (
                   <SortableCard key={t.id} task={t} sectionId={section.id} groupId={g.id} prefix={prefix} sortLocked={sorted}
-                    onOpen={onOpen} onToggle={onToggle} onToggleIP={onToggleIP} onFocus={onFocus} onPin={onPin} onDelete={onDelete} />
+                    onOpen={onOpen} onToggle={onToggle} onToggleIP={onToggleIP} onFocus={onFocus} onPin={onPin} onDelete={onDelete} showUnphased={showUnphased} />
                 ))}
               </DroppableList>
               <AddTaskInline label={`Add to ${g.name.toLowerCase()}`} sectionId={section.id} groupId={g.id} onAdd={onAddTask} onAddDetailed={onAddDetailed} />
@@ -493,6 +504,15 @@ export default function ProjectBoard({ project }) {
   const [showSectionContext, setShowSectionContext] = useState(false)
   const [blueprintMode, setBlueprintMode] = useState(false)
   const [flowNames, setFlowNames] = useState(() => project.context?.flow_names ?? {})
+  // TDE-804: which phase the user is LOOKING at — null = whole project, 'unphased' = the
+  // no-phase bucket. Distinct from the project's ACTIVE phase (what the agent queue scopes
+  // to), which is a durable fact on the project, not a view preference.
+  const [viewingPhaseId, setViewingPhaseId] = useState(null)
+  const [showPhases, setShowPhases] = useState(false)
+
+  const {
+    phases, activePhaseId, createPhase, updatePhase, deletePhase, setActivePhase, reorderPhases,
+  } = usePhases(project.id)
 
   const isDesktop = useIsDesktop()
   const { selectedTaskId, openTask, closeTask } = useTaskPanelState()
@@ -664,7 +684,18 @@ export default function ProjectBoard({ project }) {
   // TDE-320: a flow STEP is any task named into a flow (flow_id set) — the canonical
   // "belongs to a flow" predicate, shared with MCP list_tasks. A wired-but-unnamed edge
   // does NOT hide a task; it only leaves the board once the flow is named.
-  const boardTasks = useMemo(() => tasks.filter(t => !t.flow_id), [tasks])
+  // Every non-flow task in the project, whatever its phase — the aggregate bar needs the
+  // unscoped set to compute per-phase segments.
+  const allBoardTasks = useMemo(() => tasks.filter(t => !t.flow_id), [tasks])
+
+  // TDE-804: phase scoping rides on the SAME choke point as the flow filter, so entering a
+  // phase re-scopes columns, Pulse %, filter counts, section x/y and the Now Band together —
+  // there is no second place where a denominator could drift out of agreement.
+  const boardTasks = useMemo(() => {
+    if (!viewingPhaseId) return allBoardTasks
+    if (viewingPhaseId === 'unphased') return allBoardTasks.filter(t => !t.phase_id)
+    return allBoardTasks.filter(t => t.phase_id === viewingPhaseId)
+  }, [allBoardTasks, viewingPhaseId])
 
   const enrichedSections = useMemo(() =>
     sections.map(section => {
@@ -714,6 +745,19 @@ export default function ProjectBoard({ project }) {
     )
 
 
+  // 'unphased' is a valid view but not a phase, so it gets no tint — a wash implies a stage.
+  const viewingPhase = (viewingPhaseId && viewingPhaseId !== 'unphased')
+    ? phases.find(p => p.id === viewingPhaseId) ?? null
+    : null
+
+  // A phase deleted elsewhere (another tab, an agent) must not leave the board filtered to
+  // nothing with no way back — fall out to the whole project.
+  useEffect(() => {
+    if (viewingPhaseId && viewingPhaseId !== 'unphased' && phases.length && !phases.some(p => p.id === viewingPhaseId)) {
+      setViewingPhaseId(null)
+    }
+  }, [phases, viewingPhaseId])
+
   const focusedSection = focusedSectionId ? enrichedSections.find(s => s.id === focusedSectionId) : null
 
   const focusedUngrouped = focusedSection ? focusedSection.ungroupedTasks.filter(t => matchFilter(t, statusFilter, priorityFilter)) : []
@@ -735,7 +779,14 @@ export default function ProjectBoard({ project }) {
         }
         hideSidebar={!!focusedSectionId || blueprintMode}
       >
-        <div className="h-full flex flex-col board-surface">
+        {/* TDE-804: the ambient phase wash. A hue shift held at paper's luminance (index.css)
+            so the contrast ramp from TDE-353 still holds — this signals "different context"
+            the way a staging banner does, without touching project or Environment identity
+            colour. Only for a real phase; the unphased bucket is not a context of its own. */}
+        <div
+          className="h-full flex flex-col board-surface"
+          style={viewingPhase ? { background: phaseTint(phases.findIndex(p => p.id === viewingPhase.id)) } : undefined}
+        >
           {/* Section-focus header (unchanged surface, own chrome) */}
           {!blueprintMode && focusedSectionId && (
             <header className="px-7 pt-6 pb-4 border-b border-line-2 bg-paper shrink-0">
@@ -828,17 +879,31 @@ export default function ProjectBoard({ project }) {
                     )}
                     <p className="m-0 mt-2 text-[13px] text-ink-2 max-w-[62ch]">{lede}</p>
                   </div>
-                  <div className="text-right shrink-0 pb-0.5" title={`${doneCount} of ${boardTasks.length} standalone tasks complete`}>
-                    <div className="font-display font-semibold text-[36px] leading-none tracking-[-0.02em] tabular-nums">{pct}%</div>
-                    <span className="inline-block h-[5px] w-44 rounded-full bg-surf overflow-hidden mt-2.5 mb-1.5">
-                      <span
-                        className="block h-full bg-ink rounded-full transition-[width] duration-1000 ease-out"
-                        style={{ width: pulseIn ? `${pct}%` : '0%' }}
-                      />
-                    </span>
-                    <div className="font-mono text-[9.5px] text-mute tracking-[0.08em]">{doneCount} / {boardTasks.length} STANDALONE TASKS</div>
-                  </div>
+                  {/* With phases in play the PhaseBar below owns the readout — showing both
+                      would put two progress numbers side by side saying different things. */}
+                  {!phases.length && (
+                    <div className="text-right shrink-0 pb-0.5" title={`${doneCount} of ${boardTasks.length} standalone tasks complete`}>
+                      <div className="font-display font-semibold text-[36px] leading-none tracking-[-0.02em] tabular-nums">{pct}%</div>
+                      <span className="inline-block h-[5px] w-44 rounded-full bg-surf overflow-hidden mt-2.5 mb-1.5">
+                        <span
+                          className="block h-full bg-ink rounded-full transition-[width] duration-1000 ease-out"
+                          style={{ width: pulseIn ? `${pct}%` : '0%' }}
+                        />
+                      </span>
+                      <div className="font-mono text-[9.5px] text-mute tracking-[0.08em]">{doneCount} / {boardTasks.length} STANDALONE TASKS</div>
+                    </div>
+                  )}
                 </div>
+
+                <PhaseBar
+                  phases={phases}
+                  tasks={allBoardTasks}
+                  viewingPhaseId={viewingPhaseId}
+                  activePhaseId={activePhaseId}
+                  onSelectPhase={(key) => setViewingPhaseId(key === 'all' ? null : key)}
+                  onManage={() => setShowPhases(true)}
+                  animate={pulseIn}
+                />
 
                 <nav className="flex gap-7" aria-label="Board views">
                   <button
@@ -1013,6 +1078,7 @@ export default function ProjectBoard({ project }) {
                       onAddTask={createTask} onAddDetailed={createAndOpen} onAddGroup={createGroup} onOpen={openTask} onToggle={toggleDone} onToggleIP={toggleInProgressWithWarning}
                       onFocus={() => {}} /* DISABLED */ onPin={pinTask} onDelete={handleDeleteTask} onFocusSection={setFocusedSectionId}
                       onDeleteSection={deleteSection} onUpdateViewPrefs={handleUpdateViewPrefs}
+                      showUnphased={!viewingPhaseId && phases.length > 0}
                     />
                   ))
                 )}
@@ -1057,6 +1123,19 @@ export default function ProjectBoard({ project }) {
         <AgentQueuePanel projectId={project.id} prefix={project.prefix} onClose={() => setShowQueue(false)} onOpenTask={openTask} />
       )}
       {showContext && <ProjectContextPanel project={project} onClose={() => setShowContext(false)} onContextUpdate={handleContextUpdate} />}
+      {showPhases && (
+        <PhasesModal
+          phases={phases}
+          activePhaseId={activePhaseId}
+          taskCounts={phaseTally(allBoardTasks, phases).byPhase}
+          onClose={() => setShowPhases(false)}
+          onCreate={createPhase}
+          onUpdate={updatePhase}
+          onDelete={deletePhase}
+          onSetActive={setActivePhase}
+          onReorder={reorderPhases}
+        />
+      )}
 
       {/* FocusOverlay DISABLED 2026-07-02 (TDE-351)
       {showFocus && (
