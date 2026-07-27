@@ -41,6 +41,17 @@
   --scroll-thumb: var(--color-line);
   --scroll-thumb-hover: var(--color-mute-2);
   --grain-opacity: 0.05;
+
+  /* TDE-804 phase tints: the ambient "you are inside a phase" wash. Deliberately a HUE shift
+     at near-identical luminance to paper (#FBFAF6, L≈98) — every text color in the ramp is
+     contrast-tuned against paper's luminance (TDE-353), so shifting lightness here would
+     silently break legibility. Five only: beyond that the washes stop being distinguishable
+     and the phase badge carries identity instead. */
+  --phase-tint-1: #F6F9FC;
+  --phase-tint-2: #F7FAF6;
+  --phase-tint-3: #FBF7FB;
+  --phase-tint-4: #FAF9F2;
+  --phase-tint-5: #F5FAFA;
 }
 
 [data-theme="dark"] {
@@ -66,6 +77,13 @@
   --scroll-thumb: var(--color-line);
   --scroll-thumb-hover: var(--color-mute-2);
   --grain-opacity: 0.035;
+
+  /* Phase tints, mirrored: same hue families, luminance held at dark paper (#16151B). */
+  --phase-tint-1: #14161D;
+  --phase-tint-2: #141913;
+  --phase-tint-3: #19141A;
+  --phase-tint-4: #1A1814;
+  --phase-tint-5: #131A1A;
 }
 
 /* Focus mode — always-dark, regardless of light/dark theme.
