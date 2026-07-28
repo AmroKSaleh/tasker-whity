@@ -178,6 +178,32 @@ async function recordTaskEvent(
   }
 }
 
+// TDE-821: record a task LIFECYCLE change (status / location / closure) made by a handler that
+// writes to `tasks` directly instead of going through update_task. Without this, get_task_history
+// was blind to the most basic question a reader asks — a task being COMPLETED left no trace.
+// Reuses kind='fields_changed' rather than adding a kind, so the CHECK constraint in migration
+// 20260728120000 does not need altering; `meta.via` carries which handler did it.
+async function recordLifecycleChange(
+  sb: any,
+  userId: string,
+  ev: { taskId: string; via: string; summary: string; before?: any; after?: any; actor?: string | null; extra?: any },
+): Promise<void> {
+  await recordTaskEvent(sb, userId, {
+    taskId: ev.taskId,
+    kind: 'fields_changed',
+    entity: 'task',
+    actor: ev.actor,
+    summary: ev.summary,
+    before: ev.before ?? null,
+    after: ev.after ?? null,
+    meta: {
+      via: ev.via,
+      fields: Object.keys(ev.after && typeof ev.after === 'object' ? ev.after : {}),
+      ...(ev.extra ?? {}),
+    },
+  })
+}
+
 // Compact a contract for storage in task_events: keep the shape and the blessing provenance,
 // drop nothing that matters for answering "what was the bar, and had a human blessed it?".
 function contractSnapshot(contract: any) {
@@ -3908,15 +3934,30 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'set_task_phase': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
+      // phase_id is not in resolveTask's projection — fetch the prior phase so both branches
+      // below can record a real before-state rather than asserting null (TDE-821).
+      const { data: priorPhaseRow } = await sb.from('tasks').select('phase_id').eq('id', task.id).maybeSingle()
+      const priorPhaseId = priorPhaseRow?.phase_id ?? null
       if (!args.phase_id) {
         const { error } = await sb.from('tasks').update({ phase_id: null, updated_at: new Date().toISOString() }).eq('id', task.id)
         if (error) throw new Error(error.message)
+        await recordLifecycleChange(sb, userId, {
+          taskId: task.id, via: 'set_task_phase', actor: tokenActor,
+          summary: 'Unphased — removed from its project phase',
+          before: { phase_id: priorPhaseId }, after: { phase_id: null },
+        })
         return `Unphased "${task.text}". That is a valid resting state — not every task belongs to a stage.`
       }
       const phase = await resolvePhase(sb, task.project_id, args.phase_id)
       if (!phase) return `Phase "${args.phase_id}" not found in this task's project.`
       const { error } = await sb.from('tasks').update({ phase_id: phase.id, updated_at: new Date().toISOString() }).eq('id', task.id)
       if (error) throw new Error(error.message)
+      await recordLifecycleChange(sb, userId, {
+        taskId: task.id, via: 'set_task_phase', actor: tokenActor,
+        summary: `Moved into phase "${phase.name}"`,
+        before: { phase_id: priorPhaseId }, after: { phase_id: phase.id },
+        extra: { phase_name: phase.name },
+      })
       return `Moved "${task.text}" into phase "${phase.name}".`
     }
 
@@ -4078,7 +4119,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
 
       // Close the dup with a DISTINCT outcome — duplicate_of set = MERGED, not a plain "done".
-      await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString(), duplicate_of: canon.id }).eq('id', dup.id)
+      const mergedAt = new Date().toISOString()
+      await sb.from('tasks').update({ status: 'done', completed_at: mergedAt, duplicate_of: canon.id }).eq('id', dup.id)
+      // TDE-821: record on BOTH tasks. On the dup, so its closure is not indistinguishable from a
+      // plain completion; on the canonical, so it shows it absorbed another task's scope.
+      await recordLifecycleChange(sb, userId, {
+        taskId: dup.id, via: 'merge_task_as_duplicate', actor: tokenActor,
+        summary: `Closed as MERGED into "${canon.text}" — not a plain completion`
+          + (moved ? `; ${moved} open milestone(s) transferred` : '')
+          + (dupDetail ? '; context appended to the canonical task' : ''),
+        before: { status: dup.status ?? null, duplicate_of: null },
+        after: { status: 'done', completed_at: mergedAt, duplicate_of: canon.id },
+        extra: { canonical_task_id: canon.id, canonical_text: canon.text, milestones_transferred: moved },
+      })
+      await recordLifecycleChange(sb, userId, {
+        taskId: canon.id, via: 'merge_task_as_duplicate', actor: tokenActor,
+        summary: `Absorbed duplicate "${dup.text}"`
+          + (moved ? ` — ${moved} open milestone(s) added` : '')
+          + (dupDetail ? ', context appended to detail' : ''),
+        before: null,
+        after: { absorbed_task_id: dup.id },
+        extra: { duplicate_task_id: dup.id, duplicate_text: dup.text, milestones_transferred: moved },
+      })
 
       return `⧉ Merged "${dup.text}" into "${canon.text}" — ${moved} open milestone(s) transferred${dupDetail ? ', context appended' : ''}. The duplicate is closed as MERGED (duplicate_of → canonical), not plain done.`
     }
@@ -4131,6 +4193,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         await sb.rpc('append_milestone', { p_task_id: newTask.id, p_user_id: userId, p_text: m })
       }
       await sb.from('tasks').update({ status: 'done' }).eq('id', seed.id)
+      // TDE-821: a seed closing is a resolution, not a completion — record what it became so the
+      // seed's own history explains where its scope went.
+      await recordLifecycleChange(sb, userId, {
+        taskId: seed.id, via: 'resolve_seed', actor: tokenActor,
+        summary: `Seed RESOLVED into "${spec.text ?? newTask.text}" — closed, not completed as work`,
+        before: { status: seed.status ?? null },
+        after: { status: 'done', resolved_into_task_id: newTask.id },
+        extra: { resolved_into_task_id: newTask.id, resolved_into_text: spec.text ?? newTask.text },
+      })
       return `Resolved seed "${seed.text}" → created task "${spec.text}" (id: ${newTask.id}). Seed closed and linked (provenance).`
     }
 
@@ -4255,7 +4326,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         }
       }
 
-      await sb.from('tasks').update({ status: 'done', completed_at: new Date().toISOString() }).eq('id', task.id)
+      const completedAt = new Date().toISOString()
+      await sb.from('tasks').update({ status: 'done', completed_at: completedAt }).eq('id', task.id)
+      // TDE-821: completion is the single most important thing that can happen to a task and it
+      // was absent from the task's own history until now (this handler bypasses update_task).
+      await recordLifecycleChange(sb, userId, {
+        taskId: task.id, via: 'complete_task', actor: tokenActor,
+        summary: `Completed — status ${task.status ?? '?'} → done`,
+        // completed_at is NOT in resolveTask's projection, so it is omitted from before rather
+        // than asserted as null — a wrong prior value is worse than an absent one.
+        before: { status: task.status ?? null },
+        after: { status: 'done', completed_at: completedAt },
+        extra: { proceed_anyway: proceed_anyway === true },
+      })
       // TDE-377: outbound task.completed event (fire-and-forget).
       fireAndForget(emitWebhook(sb, userId, {
         projectId: (task as any).project_id ?? null,
@@ -4287,7 +4370,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'uncomplete_task': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return 'Task not found.'
+      // Fetch the completion stamp we are about to discard — it is not in resolveTask's
+      // projection, and "this was completed at X, then reopened" is the point of the record.
+      const { data: priorDone } = await sb.from('tasks').select('completed_at').eq('id', task.id).maybeSingle()
       await sb.from('tasks').update({ status: 'pending', completed_at: null }).eq('id', task.id)
+      // TDE-821: reopening is as consequential as completing — record the undo too.
+      await recordLifecycleChange(sb, userId, {
+        taskId: task.id, via: 'uncomplete_task', actor: tokenActor,
+        summary: `Reopened — status ${task.status ?? '?'} → pending`
+          + (priorDone?.completed_at ? ` (had been completed ${priorDone.completed_at})` : ''),
+        before: { status: task.status ?? null, completed_at: priorDone?.completed_at ?? null },
+        after: { status: 'pending', completed_at: null },
+      })
       return `↩ Marked "${task.text}" as not done.`
     }
 
@@ -4355,6 +4449,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           await sb.from('tasks').update({ status: 'in_progress' }).eq('id', full.id)
           full.status = 'in_progress'
           justStarted = true
+          // TDE-821: get_task SILENTLY flips a pending task to in_progress. That is convenient for
+          // real pickups but invisible for read-only inspection — a survey of N tasks marks all N
+          // as started with no trace. Recording it makes the flip auditable (and reversible with
+          // evidence). Bounded: only fires on the pending→in_progress transition, not every read.
+          await recordLifecycleChange(sb, userId, {
+            taskId: full.id, via: 'get_task_autostart', actor: tokenActor,
+            summary: 'Auto-started on pickup — status pending → in_progress (side effect of get_task, not an explicit start)',
+            before: { status: 'pending' },
+            after: { status: 'in_progress' },
+            extra: { auto: true },
+          })
         }
       }
 
@@ -6037,8 +6142,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const updates: any = { group_id: targetGroup }
       if (args.section_id) updates.section_id = args.section_id
 
+      // group_id is not in resolveTask's projection — fetch it so the before-state is real.
+      const { data: priorLoc } = await sb.from('tasks').select('group_id').eq('id', task.id).maybeSingle()
       const { error } = await sb.from('tasks').update(updates).eq('id', task.id)
       if (error) throw new Error(error.message)
+
+      // TDE-821: location changes bypass update_task, so the board move left no trace.
+      await recordLifecycleChange(sb, userId, {
+        taskId: task.id, via: 'move_task_to_group', actor: tokenActor,
+        summary: targetGroup ? `Moved into a group` : `Moved to ungrouped`
+          + (args.section_id ? ' (section also changed)' : ''),
+        before: { group_id: priorLoc?.group_id ?? null, ...(args.section_id ? { section_id: (task as any).section_id ?? null } : {}) },
+        after: updates,
+      })
 
       if (targetGroup) {
         const { data: group } = await sb.from('groups').select('name').eq('id', targetGroup).single()
@@ -6100,6 +6216,30 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       const newShortId = moved?.short_id
       const newRef = target.prefix && newShortId != null ? `${target.prefix}-${newShortId}` : task.id
+      // TDE-821: the most destructive non-delete operation on a task — it changes project, drops
+      // every input edge, leaves any flow, and REASSIGNS the short_id. Without a record, the old
+      // reference (e.g. TDE-42) becomes unresolvable with nothing explaining where it went.
+      await recordLifecycleChange(sb, userId, {
+        taskId: task.id, via: 'move_task', actor: tokenActor,
+        summary: `Moved across projects: ${oldRef} → ${newRef}`
+          + ` ("${srcProj?.name ?? task.project_id}" → "${target.name}")`
+          + (ownEdges.length ? `, dropped ${ownEdges.length} input edge(s)` : '')
+          + (consumers.length ? `, stripped from ${consumers.length} downstream consumer(s)` : '')
+          + (wasInFlow ? ', removed from its flow' : ''),
+        before: {
+          project_id: task.project_id, section_id: (task as any).section_id ?? null,
+          short_id: (task as any).short_id ?? null, flow_id: (task as any).flow_id ?? null,
+          flow_step: (task as any).flow_step ?? null, input: task.input ?? null,
+        },
+        after: {
+          project_id: target.id, section_id: landingSection, group_id: null,
+          short_id: newShortId ?? null, flow_id: null, flow_step: null, input: { edges: [] },
+        },
+        extra: {
+          old_ref: oldRef, new_ref: newRef,
+          dropped_input_edges: ownEdges.length, stripped_consumers: consumers.length, was_in_flow: wasInFlow,
+        },
+      })
       const notes: string[] = []
       if (ownEdges.length) notes.push(`dropped ${ownEdges.length} input edge${ownEdges.length !== 1 ? 's' : ''} (sources stayed behind)`)
       if (consumers.length) notes.push(`removed this task as a source from ${consumers.length} downstream task${consumers.length !== 1 ? 's' : ''}`)
@@ -6936,7 +7076,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         artifact_format: 'text',
         artifact_stored_at: new Date().toISOString(),
       }
-      await sb.from('tasks').update({ output: updatedOut, status: 'done', completed_at: new Date().toISOString() }).eq('id', stepToAdvance.id)
+      const advancedAt = new Date().toISOString()
+      await sb.from('tasks').update({ output: updatedOut, status: 'done', completed_at: advancedAt }).eq('id', stepToAdvance.id)
+      // TDE-821: a guide step completed by a HUMAN is exactly the kind of provenance the history
+      // exists for — it records that a person, not an agent, cleared this step and on what evidence.
+      await recordLifecycleChange(sb, userId, {
+        taskId: stepToAdvance.id, via: 'advance_guide', actor: tokenActor,
+        summary: `Guide step completed by ${stepToAdvance.executor || 'user'} — status ${stepToAdvance.status ?? '?'} → done, evidence stored`,
+        before: { status: stepToAdvance.status ?? null },
+        after: { status: 'done', completed_at: advancedAt },
+        extra: { executor: stepToAdvance.executor ?? null, flow_step: stepToAdvance.flow_step ?? null, evidence_chars: String(args.evidence ?? '').length },
+      })
 
       // Find next pending human step
       const nextHumanStep = guideSorted.find((t: any) =>
