@@ -129,6 +129,68 @@ async function emitWebhook(
   } catch (_) { /* outbound notification is best-effort — never affect the mutation */ }
 }
 
+// ── Durable gate history (TDE-818) ────────────────────────────
+// Append a row to task_events, the immutable record of what changed on a task's
+// contract / gate / review state. Every gate ceremony used to be an in-place overwrite:
+// a later set_task_output erased that a human had confirmed, each review attempt
+// overwrote the previous verdict, and validation ledgers were keyed per edge rather than
+// per attempt. This is the write path that makes that history durable.
+//
+// AWAITED, unlike emitWebhook. A webhook is a notification and may be dropped; this is the
+// audit record, so it is ordered before the tool's response rather than fired into the void.
+// It still NEVER fails the mutation — a lost audit row must not block a human confirming a
+// contract — but a drop is recorded in mcp_error_logs so it is detectable rather than silent.
+async function recordTaskEvent(
+  sb: any,
+  userId: string,
+  ev: {
+    taskId: string
+    kind: 'contract_set' | 'contract_cleared' | 'contract_confirmed' | 'review_bar_frozen'
+        | 'review_bar_cleared' | 'review_submitted' | 'validation_submitted' | 'fields_changed'
+    entity: 'output_contract' | 'input_contract' | 'review' | 'validation' | 'task'
+    summary: string
+    actor?: string | null
+    before?: any
+    after?: any
+    meta?: any
+  },
+): Promise<void> {
+  try {
+    const { error } = await sb.from('task_events').insert({
+      task_id: ev.taskId,
+      user_id: userId,
+      kind: ev.kind,
+      entity: ev.entity,
+      actor: ev.actor ?? null,
+      summary: ev.summary,
+      before: ev.before ?? null,
+      after: ev.after ?? null,
+      meta: ev.meta ?? null,
+    })
+    if (error) throw new Error(error.message)
+  } catch (e) {
+    fireAndForget(sb.from('mcp_error_logs').insert({
+      user_id: userId,
+      tool_name: `recordTaskEvent:${ev.kind}`,
+      raw_params: { task_id: ev.taskId, entity: ev.entity, summary: ev.summary },
+      error_msg: `task_events insert dropped: ${e instanceof Error ? e.message : String(e)}`,
+    }))
+  }
+}
+
+// Compact a contract for storage in task_events: keep the shape and the blessing provenance,
+// drop nothing that matters for answering "what was the bar, and had a human blessed it?".
+function contractSnapshot(contract: any) {
+  if (!contract || typeof contract !== 'object') return null
+  return {
+    rule_count: Array.isArray(contract.rules) ? contract.rules.length : 0,
+    rules: Array.isArray(contract.rules) ? contract.rules : [],
+    confirmed: contract.confirmed === true,
+    ...(contract.confirmed_at ? { confirmed_at: contract.confirmed_at } : {}),
+    ...(contract.confirmed_by ? { confirmed_by: contract.confirmed_by } : {}),
+  }
+}
+
 // ── JSON-RPC helpers ─────────────────────────────────────────
 function json(body: any, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
@@ -1980,6 +2042,20 @@ const TOOLS = [
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         limit:   { type: 'number', description: 'Max activities per session (default 20, max 100).' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'get_task_history',
+    description: "Read a task's DURABLE GATE HISTORY (TDE-818) — the append-only record of what changed on its contract / review bar / gate verdicts, with before+after state. This is a real log, unlike get_flow_audit (which renders the CURRENT validation snapshot). Use it to answer questions the task row cannot: what the contract said before it was replaced, whether a human confirmation was silently erased by a later edit, what attempt 1 of a review actually said before attempt 2 overwrote it, and what each gate retry failed on. Kinds: contract_set, contract_cleared, contract_confirmed, review_bar_frozen, review_bar_cleared, review_submitted, validation_submitted, fields_changed.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
+        kind:    { type: 'string', enum: ['contract_set', 'contract_cleared', 'contract_confirmed', 'review_bar_frozen', 'review_bar_cleared', 'review_submitted', 'validation_submitted', 'fields_changed'], description: 'Optional: show only this kind of event.' },
+        limit:   { type: 'number', description: 'Max events (default 30, max 200), newest first.' },
+        verbose: { type: 'boolean', description: 'Include the full before/after JSON per event. Default false (summaries + key flags only) to keep the response cheap.' },
       },
       required: ['task_id'],
     },
@@ -4110,11 +4186,41 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         if (!patch.agent_proposal) patch.agent_proposal_confirmed = false   // clearing the proposal clears confirmation
       }
 
+      // TDE-818: resolveTask selects a FIXED column list (no priority/due_date/pinned/executor/…),
+      // so the pre-update snapshot below would silently omit those fields — an audit row claiming
+      // "changed priority" with no prior priority is worse than no row. Fetch the missing changed
+      // columns before the write. Costs one indexed PK lookup, and only when a field outside
+      // resolveTask's projection is actually being changed.
+      const missingCols = Object.keys(patch).filter((k) => k !== 'completed_at' && !(k in task))
+      let priorExtra: Record<string, any> = {}
+      if (missingCols.length) {
+        const { data: priorRow } = await sb.from('tasks')
+          .select(missingCols.join(', ')).eq('id', task.id).maybeSingle()
+        if (priorRow) priorExtra = priorRow
+      }
+
       await sb.from('tasks').update(patch).eq('id', task.id)
 
       // TDE-377: fire an outbound task.updated event (fire-and-forget; never blocks the write).
-      const changedFrom: Record<string, any> = {}
+      const changedFrom: Record<string, any> = { ...priorExtra }
       for (const k of Object.keys(patch)) if (k in task) changedFrom[k] = (task as any)[k]
+
+      // TDE-818: until now this before-state existed ONLY to populate the webhook payload and
+      // was discarded whenever no webhook matched — so field history was lost on overwrite,
+      // leaving just tasks.updated_at (a timestamp with no indication of what changed).
+      // Skip detail-only appends: they are additive by construction and the text is already durable.
+      const changedKeys = Object.keys(patch).filter((k) => k !== 'completed_at')
+      if (changedKeys.length && !(appended && changedKeys.length === 1 && changedKeys[0] === 'detail')) {
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'fields_changed', entity: 'task', actor: tokenActor,
+          summary: `Changed ${changedKeys.join(', ')}`
+            + (patch.status ? ` — status ${(task as any).status ?? '?'} → ${patch.status}` : ''),
+          before: changedFrom,
+          after: patch,
+          meta: { fields: changedKeys, appended_detail: appended },
+        })
+      }
+
       fireAndForget(emitWebhook(sb, userId, {
         projectId: (task as any).project_id ?? null,
         event: 'task.updated', action: 'update', type: 'Task', actor: tokenActor,
@@ -4929,6 +5035,49 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         lines.push(`\n▸ Session${s.actor ? ` by ${s.actor}` : ''} · ${state} · opened ${s.opened_at}`)
         for (const a of (acts || [])) lines.push(`  [${a.type}] ${a.body}`)
       }
+      return lines.join('\n')
+    }
+
+    case 'get_task_history': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return 'Task not found.'
+      const limit = Math.min(Math.max(parseInt(String(args.limit ?? 30), 10) || 30, 1), 200)
+      let q = sb.from('task_events')
+        .select('kind, entity, actor, summary, before, after, meta, created_at')
+        .eq('task_id', task.id)
+      if (args.kind) q = q.eq('kind', args.kind)
+      const { data: events, error } = await q.order('created_at', { ascending: false }).limit(limit)
+      if (error) throw new Error(error.message)
+      if (!events?.length) {
+        return `No gate history on "${task.text}"${args.kind ? ` for kind "${args.kind}"` : ''} yet.`
+          + `\n\nNOTE: task_events records forward from TDE-818 (2026-07-28). Contract/review/gate changes made BEFORE that are not recoverable — they were overwritten in place.`
+      }
+      const GLYPH: Record<string, string> = {
+        contract_set: '✎', contract_cleared: '⌫', contract_confirmed: '✓',
+        review_bar_frozen: '❄', review_bar_cleared: '⌫', review_submitted: '⚖',
+        validation_submitted: '⚖', fields_changed: '·',
+      }
+      const lines: string[] = [`# Gate history — ${task.text}  (${events.length} event${events.length !== 1 ? 's' : ''}, newest first)`]
+      const erased = events.filter((e: any) => e.meta?.erased_confirmation === true)
+      if (erased.length) {
+        lines.push(``, `⚠ ${erased.length} event${erased.length !== 1 ? 's' : ''} DESTROYED A HUMAN CONFIRMATION on this task — a blessed contract was replaced or cleared. The prior contract is preserved in the before-state below.`)
+      }
+      for (const e of events) {
+        lines.push(``, `${GLYPH[e.kind] ?? '·'} [${e.kind}] ${e.created_at}${e.actor ? ` · by ${e.actor}` : ''}`)
+        lines.push(`  ${e.summary}`)
+        const flags: string[] = []
+        if (e.meta?.erased_confirmation) flags.push('erased_confirmation')
+        if (e.meta?.overwrote_frozen_bar) flags.push('overwrote_frozen_bar')
+        if (e.meta?.attempt !== undefined) flags.push(`attempt=${e.meta.attempt}`)
+        if (e.meta?.edge_key) flags.push(`edge=${e.meta.edge_key}`)
+        if (e.meta?.via) flags.push(`via=${e.meta.via}`)
+        if (flags.length) lines.push(`  ⚑ ${flags.join(' · ')}`)
+        if (args.verbose === true) {
+          if (e.before) lines.push(`  before: ${JSON.stringify(e.before)}`)
+          if (e.after) lines.push(`  after:  ${JSON.stringify(e.after)}`)
+        }
+      }
+      if (args.verbose !== true) lines.push(``, `(Pass verbose:true for full before/after state per event.)`)
       return lines.join('\n')
     }
 
@@ -6135,7 +6284,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const SEP = '─'.repeat(56)
 
       const lines: string[] = [
-        `Audit Trail — ${flowName ? `"${flowName}"` : `${project?.name || projectId} (unnamed flow)`}`,
+        `Gate Snapshot — ${flowName ? `"${flowName}"` : `${project?.name || projectId} (unnamed flow)`}`,
+        // TDE-818: this renders the CURRENT value of each task's validation ledger. It is a
+        // snapshot, not a log — earlier attempts are not here (a retry_count of 3 with only the
+        // latest body visible is this tool's shape, not missing data). The real per-attempt
+        // history lives in task_events → get_task_history.
+        `(Current state per step. For per-attempt history — what an earlier attempt failed on, or a contract that was replaced — use get_task_history.)`,
         ...(flowContext ? [`Context: ${flowContext}`] : []),
         '',
       ]
@@ -6967,6 +7121,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       const rules = (args.contract?.rules || []).map(normalizeRule)
       const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+      const prevContract = prev.contract || {}
       const output = {
         ...prev,
         contract: { rules, confirmed: false },
@@ -6976,8 +7131,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
+      // TDE-818: this overwrite silently resets confirmed:false. If a human HAD blessed the
+      // prior contract, that fact is destroyed on the row — so record it here or it is gone.
+      const erasedConfirmation = prevContract.confirmed === true
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'contract_set', entity: 'output_contract', actor: tokenActor,
+        summary: `Output contract replaced: ${prevContract.rules?.length ?? 0} → ${rules.length} rule(s)`
+          + (erasedConfirmation ? ` — ERASED a human confirmation by ${prevContract.confirmed_by || 'human'}` : ''),
+        before: contractSnapshot(prevContract),
+        after: contractSnapshot({ rules, confirmed: false }),
+        meta: {
+          erased_confirmation: erasedConfirmation,
+          ...(erasedConfirmation ? { prior_confirmed_by: prevContract.confirmed_by ?? null, prior_confirmed_at: prevContract.confirmed_at ?? null } : {}),
+        },
+      })
+
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is AI-QA'd (QA is performed by AI, not a meat sack) until a human confirms it via confirm_contract. Consumers are derived from tasks that list this as a source.`
+        + (erasedConfirmation ? `\n\n⚠ This replaced a HUMAN-CONFIRMED contract — the blessing is now void (confirmed reset to false). The prior contract and its confirmation are preserved in the task's gate history (get_task_history).` : '')
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
     }
 
@@ -6997,11 +7168,26 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (args.apply && derived.rules.length) {
         const rules = derived.rules.map(normalizeRule)
         const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+        const prevContract = prev.contract || {}
         const { error } = await sb.from('tasks').update({
           output: { ...prev, contract: { rules, confirmed: false }, validation_status: prev.validation_status || 'pending' },
         }).eq('id', task.id)
         if (error) throw new Error(error.message)
         applied = true
+        // TDE-818: same overwrite hazard as set_task_output — record before the prior blessing is gone.
+        const erasedConfirmation = prevContract.confirmed === true
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'contract_set', entity: 'output_contract', actor: tokenActor,
+          summary: `Output contract derived from ${derived.sources.length} consumer(s): ${prevContract.rules?.length ?? 0} → ${rules.length} rule(s)`
+            + (erasedConfirmation ? ` — ERASED a human confirmation by ${prevContract.confirmed_by || 'human'}` : ''),
+          before: contractSnapshot(prevContract),
+          after: contractSnapshot({ rules, confirmed: false }),
+          meta: {
+            via: 'derive_output_contract',
+            erased_confirmation: erasedConfirmation,
+            ...(erasedConfirmation ? { prior_confirmed_by: prevContract.confirmed_by ?? null, prior_confirmed_at: prevContract.confirmed_at ?? null } : {}),
+          },
+        })
       }
 
       return JSON.stringify({
@@ -7068,6 +7254,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const review_bar = { rules, frozen_at: new Date().toISOString(), source: 'task_text+IS+KB' }
         const { error } = await sb.from('tasks').update({ review_bar, review_enabled: true }).eq('id', task.id)
         if (error) throw new Error(error.message)
+        // TDE-818: "frozen" means frozen-until-force. When force overwrites a prior bar, the
+        // bar the work was actually judged against would otherwise vanish — keep it.
+        const overwroteFrozenBar = !!existing?.rules?.length
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'review_bar_frozen', entity: 'review', actor: tokenActor,
+          summary: `Review bar frozen with ${rules.length} rule(s)`
+            + (overwroteFrozenBar ? ` — OVERWROTE a prior frozen bar of ${existing.rules.length} rule(s) (force)` : ''),
+          before: overwroteFrozenBar ? { rule_count: existing.rules.length, rules: existing.rules, frozen_at: existing.frozen_at ?? null } : null,
+          after: { rule_count: rules.length, rules, frozen_at: review_bar.frozen_at },
+          meta: { overwrote_frozen_bar: overwroteFrozenBar, forced: args.force === true },
+        })
         const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
         return `Review enabled on "${task.text}" — bar frozen with ${rules.length} rule(s).`
           + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}` : '')
@@ -7156,6 +7353,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (overall === 'fail') update.status = 'in_progress'   // reopen the producer
       const { error } = await sb.from('tasks').update(update).eq('id', task.id)
       if (error) throw new Error(error.message)
+      // TDE-818: tasks.review_verdict is ONE SLOT — attempt 2 overwrote attempt 1's critique,
+      // leaving only a counter. One immutable row PER ATTEMPT is what makes the retry
+      // history actually retrievable.
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'review_submitted', entity: 'review', actor: tokenActor,
+        summary: `Review ${overall.toUpperCase()} (attempt ${attempt}) by ${args.validator || 'self'} — ${results.length} rule(s) graded, ${fails.length} fail(s)`
+          + (escalate ? ' — ESCALATED to human' : ''),
+        before: task.review_verdict ? { overall: task.review_verdict.overall ?? null, attempt: task.review_verdict.attempt ?? 0 } : null,
+        after: review_verdict,
+        meta: { attempt, overall, escalated: escalate, validator: args.validator || 'self', fail_count: fails.length, blocker_fail: blockerFail },
+      })
       // TDE-377: outbound review.submitted event (fire-and-forget) — the "task entered/cleared the gate" trigger.
       fireAndForget(emitWebhook(sb, userId, {
         projectId: (task as any).project_id ?? null,
@@ -7180,6 +7388,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .update({ review_enabled: false, review_bar: null, review_verdict: cleared_verdict })
         .eq('id', task.id)
       if (error) throw new Error(error.message)
+      // TDE-818: this handler was already written in the right spirit (it leaves a superseding
+      // tombstone rather than nulling) but the tombstone still destroyed the verdict it
+      // tombstoned, keeping only prior_overall. Preserve the full bar + verdict here.
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'review_bar_cleared', entity: 'review', actor: tokenActor,
+        summary: `Review disabled — bar (${task.review_bar?.rules?.length ?? 0} rule(s)) and verdict removed`
+          + (args.reason ? ` (reason: ${args.reason})` : '')
+          + (wasEscalated ? ' — cleared an ESCALATED verdict' : ''),
+        before: { bar: task.review_bar ?? null, verdict: task.review_verdict ?? null },
+        after: cleared_verdict,
+        meta: { reason: args.reason || null, was_escalated: wasEscalated, prior_overall: task.review_verdict?.overall ?? null },
+      })
       const note = wasEscalated ? ' Escalation cleared — the "NEEDS REVIEW" card will drop.' : ''
       return `Disabled review on "${task.text}". Frozen bar removed; verdict replaced with a cleared record${args.reason ? ` (reason: ${args.reason})` : ''}.${note}`
     }
@@ -7212,6 +7432,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const output = { ...prev, contract: { rules: [], confirmed: false } }
       const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
       if (error) throw new Error(error.message)
+      // TDE-818: preserve the bar that was cleared, and whether it had been blessed.
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'contract_cleared', entity: 'output_contract', actor: tokenActor,
+        summary: `Output contract cleared (${prev.contract.rules.length} rule(s) removed)`
+          + (prev.contract.confirmed === true ? ` — was human-confirmed by ${prev.contract.confirmed_by || 'human'}` : ''),
+        before: contractSnapshot(prev.contract),
+        after: contractSnapshot({ rules: [], confirmed: false }),
+        meta: { erased_confirmation: prev.contract.confirmed === true },
+      })
       return `Cleared the output contract on "${task.text}". Stored artifact and validation status were kept.`
     }
 
@@ -7641,6 +7870,29 @@ Call submit_validation_result with:
         },
       }).eq('id', producer.id)
 
+      // TDE-818: validation_ledgers is keyed per EDGE, not per ATTEMPT — so attempt N replaced
+      // attempt N-1 and retry_count could report 3 failures with all 3 bodies gone. This is the
+      // row that gives the retry counter retrievable content behind it.
+      await recordTaskEvent(sb, userId, {
+        taskId: producer.id, kind: 'validation_submitted', entity: 'validation', actor: tokenActor,
+        summary: `Gate ${String(validationStatus).toUpperCase()} on edge ${edgeKey} (attempt ${valid ? 1 : newRetryCount}) by ${validator || 'unverified'}`
+          + ` — ${ledger.filter((l: any) => l.status === 'fail').length} fail(s) of ${ledger.length} rule(s)`
+          + (action === 'ask_human' ? ' — RETRY LIMIT reached, escalated to human' : ''),
+        before: Object.keys(prevEdgeLedger).length
+          ? { validation_status: prevEdgeLedger.validation_status ?? null, validated_at: prevEdgeLedger.validated_at ?? null, retry_count: prevEdgeLedger.retry_count ?? 0 }
+          : null,
+        after: { ledger: edgeLedgerEntry, critique: critiqueEntry },
+        meta: {
+          edge_key: edgeKey,
+          attempt: valid ? 1 : newRetryCount,
+          overall: validationStatus,
+          action,
+          validator: validator || 'unverified',
+          contract_blessed: allBlessed,
+          retry_blocked: action === 'ask_human',
+        },
+      })
+
       const fmt = (l: any) => `  ${l.status === 'pass' ? '✓' : '✗'} [${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`
       return JSON.stringify({
         status: validationStatus,
@@ -8022,6 +8274,15 @@ Call submit_validation_result with:
         await sb.from('tasks').update({
           output: { ...prev, contract: { ...prevContract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy } },
         }).eq('id', task.id)
+        // TDE-818: the highest-trust act in the system. On the row it is three mutable fields
+        // that the next set_task_output wipes; here it is a permanent record that it happened.
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'contract_confirmed', entity: 'output_contract', actor: tokenActor,
+          summary: `Output contract confirmed by ${confirmedBy} — ${prevContract.rules.length} rule(s) human-blessed`,
+          before: contractSnapshot(prevContract),
+          after: contractSnapshot({ ...prevContract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy }),
+          meta: { confirmed_by: confirmedBy, confirmed_at: confirmedAt },
+        })
         return `Output contract on "${task.text}" confirmed by ${confirmedBy}. ${prevContract.rules.length} rule${prevContract.rules.length !== 1 ? 's' : ''} are now human-blessed — future validation ledger entries will be stamped contract_blessed: true.`
       }
 
@@ -8052,6 +8313,14 @@ Call submit_validation_result with:
             : e
         )
         await sb.from('tasks').update({ input: { edges: updatedEdges } }).eq('id', task.id)
+        // TDE-818: same durability gap on the input side — set_task_input replaces the whole edge.
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'contract_confirmed', entity: 'input_contract', actor: tokenActor,
+          summary: `Input contract (from ${targetEdge.source_task_id}) confirmed by ${confirmedBy} — ${targetEdge.contract.rules.length} rule(s) human-blessed`,
+          before: contractSnapshot(targetEdge.contract),
+          after: contractSnapshot({ ...targetEdge.contract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy }),
+          meta: { confirmed_by: confirmedBy, confirmed_at: confirmedAt, source_task_id: targetEdge.source_task_id },
+        })
         return `Input contract on "${task.text}" (from ${targetEdge.source_task_id}) confirmed by ${confirmedBy}. ${targetEdge.contract.rules.length} rule${targetEdge.contract.rules.length !== 1 ? 's' : ''} are now human-blessed.`
       }
 
