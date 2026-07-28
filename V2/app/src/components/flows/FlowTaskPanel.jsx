@@ -231,7 +231,7 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
                     <div key={i} className="rounded-lg border border-line-2 px-3 py-2.5">
                       {rules.length
                         ? rules.map((r, j) => <RuleRow key={j} rule={r} />)
-                        : <p className="text-[11px] text-mute-2">No acceptance rules set.</p>}
+                        : <p className="text-[11px] text-mute-2">Ungated — this step takes the handoff as-is.</p>}
                       <BlessRow
                         confirmed={isConfirmed(e.contract)}
                         confirmedBy={e.contract?.confirmed_by}
@@ -268,7 +268,7 @@ export default function FlowTaskPanel({ task, stepIndex, totalSteps, prefix, onC
                   />
                 </div>
               ) : (
-                <p className="text-[12px] text-mute-2">No output contract set.</p>
+                <p className="text-[12px] text-mute-2">No definition of done — fine unless a later step builds on this without re-checking it.</p>
               )}
             </div>
           )}

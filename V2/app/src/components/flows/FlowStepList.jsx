@@ -164,7 +164,7 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
                       <Kicker className="mb-1">INPUT{srcStep ? ` · FROM STEP ${String(srcStep).padStart(2, '0')}` : ''}</Kicker>
                       {rules.length
                         ? rules.map((r, j) => <RuleRow key={j} rule={r} />)
-                        : <p className="text-[11px] text-mute-2">No acceptance rules set.</p>}
+                        : <p className="text-[11px] text-mute-2">Ungated — this step takes the handoff as-is.</p>}
                       <BlessTag contract={e.contract} hasRules={rules.length > 0} />
                     </div>
                   )
@@ -173,7 +173,7 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
                   <Kicker className="mb-1">OUTPUT · DEFINITION OF DONE</Kicker>
                   {oRules.length
                     ? oRules.map((r, j) => <RuleRow key={j} rule={r} />)
-                    : <p className="text-[11px] text-mute-2">No output contract set.</p>}
+                    : <p className="text-[11px] text-mute-2">No definition of done — fine unless a later step builds on this without re-checking it.</p>}
                   <BlessTag contract={task.output?.contract} hasRules={oRules.length > 0} />
                 </div>
                 {critiques.map(([edgeKey, c]) => (

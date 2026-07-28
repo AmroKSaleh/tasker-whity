@@ -12,8 +12,9 @@ import FlowTaskPanel from '../components/flows/FlowTaskPanel'
 const STATUS_LABEL = { done: 'DONE', in_progress: 'IN PROGRESS', pending: 'PENDING' }
 const STATUS_DOT = { done: 'bg-[#4ade80]', in_progress: 'bg-accent', pending: 'bg-line' }
 
-// Contract-gate trust badge (TDE-287). Three states: bypassed (recorded weak),
-// blessed (gate would pass), or N contract issues (gate would block).
+// Contract-gate trust badge (TDE-287). Four states: bypassed (recorded weak),
+// ungated (nothing declared to gate), blessed (gate would pass), or N contract
+// issues (gate would block).
 function GateBadge({ flow, size = 'sm' }) {
   const { gate, gateBypassed, gateBypassReason } = flow
   if (!gate) return null
@@ -23,6 +24,16 @@ function GateBadge({ flow, size = 'sm' }) {
       <span title={gateBypassReason || 'Contract gate bypassed'}
         className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-[#C0432D]/40 text-[#C0432D] bg-[#C0432D]/5', pad)}>
         ⛔ Gate bypassed
+      </span>
+    )
+  }
+  // No declared handoffs — a legitimate state, not a pass and not a failure. Showing
+  // "Contracts blessed" here would claim a guarantee nothing is actually providing.
+  if (gate.edgeCount === 0) {
+    return (
+      <span title="No gates — nothing here hands work over in a way the next step takes on trust. Gates belong only at seams, so a flow can hold none."
+        className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-line text-mute bg-surf-2', pad)}>
+        ○ Ungated
       </span>
     )
   }
@@ -548,7 +559,9 @@ export default function FlowsPage() {
               <div className="px-2 py-12 text-center">
                 <p className="text-[24px] mb-2">◇</p>
                 <p className="text-[13px] font-semibold text-ink mb-1">No flows yet</p>
-                <p className="text-[12px] text-mute leading-relaxed">Link tasks with input/output, or run <span className="font-mono">build_new_flow</span> via the MCP.</p>
+                <p className="text-[12px] text-mute leading-relaxed">
+                  A flow is one operation too big for a single sitting. Run <span className="font-mono">build_new_flow</span> via the MCP — contracts are optional, so it does not need gates to be a flow.
+                </p>
               </div>
             ) : filtered.map(f => (
               <FlowCard key={f.id} flow={f} active={selected?.id === f.id} onClick={() => setSelectedId(f.id)} />
