@@ -12,18 +12,23 @@ import FlowTaskPanel from '../components/flows/FlowTaskPanel'
 const STATUS_LABEL = { done: 'DONE', in_progress: 'IN PROGRESS', pending: 'PENDING' }
 const STATUS_DOT = { done: 'bg-[#4ade80]', in_progress: 'bg-accent', pending: 'bg-line' }
 
-// Contract-gate trust badge (TDE-287). Four states: bypassed (recorded weak),
-// ungated (nothing declared to gate), blessed (gate would pass), or N contract
-// issues (gate would block).
+// Contract-gate trust badge (TDE-287). Four states: legacy pre-TDE-820 finalization,
+// ungated (nothing declared to gate), blessed (every declared contract is blessed), or
+// N contracts still to sharpen/bless.
 function GateBadge({ flow, size = 'sm' }) {
   const { gate, gateBypassed, gateBypassReason } = flow
   if (!gate) return null
   const pad = size === 'lg' ? 'px-2 py-0.5 text-[11px]' : 'px-1.5 py-px text-[10px]'
+  // TDE-820: contracts no longer block finalization, so nothing is "bypassed" any more.
+  // This flag only survives on flows named BEFORE that change, and back then the sole way
+  // to create a legitimately ungated flow WAS to bypass — so most of these are not
+  // wrongdoing. Kept visible for provenance (and TDE-784 analytics) but no longer styled
+  // as a violation: neutral, not alarm-red, and worded as history rather than weakness.
   if (gateBypassed) {
     return (
-      <span title={gateBypassReason || 'Contract gate bypassed'}
-        className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-[#C0432D]/40 text-[#C0432D] bg-[#C0432D]/5', pad)}>
-        ⛔ Gate bypassed
+      <span title={`Finalized before contracts became optional (TDE-820)${gateBypassReason ? ` — recorded reason: ${gateBypassReason}` : ''}. Under the current definition an ungated flow is valid, so this is history, not a defect.`}
+        className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-line text-mute bg-surf-2', pad)}>
+        ◷ Pre-gate-change
       </span>
     )
   }
@@ -46,10 +51,12 @@ function GateBadge({ flow, size = 'sm' }) {
     )
   }
   const label = gate.weak > 0
-    ? `${gate.total} contract issue${gate.total !== 1 ? 's' : ''}`
+    ? `${gate.total} contract${gate.total !== 1 ? 's' : ''} to sharpen`
     : `${gate.unblessed} to bless`
   return (
-    <span title={`${gate.unblessed} unblessed, ${gate.weak} vague/empty — the gate would block this flow`}
+    // TDE-820: these no longer block anything — the flow exists and runs. Worded as
+    // outstanding work on declared contracts, not as a gate refusing the flow.
+    <span title={`${gate.unblessed} AI-QA'd but not human-blessed, ${gate.weak} vague or empty. Nothing is blocked — bless a contract before relying on it as a gate.`}
       className={clsx('inline-flex items-center gap-1 rounded border font-semibold border-accent/40 text-accent bg-surf-2', pad)}>
       ⊘ {label}
     </span>
@@ -322,8 +329,8 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
           <GateBadge flow={flow} size="lg" />
         </div>
         {flow.gateBypassed && flow.gateBypassReason && (
-          <p className="text-[11px] text-[#C0432D] mt-1.5 leading-snug">
-            Gate bypassed — <span className="italic">{flow.gateBypassReason}</span>
+          <p className="text-[11px] text-mute mt-1.5 leading-snug">
+            Finalized before contracts became optional — recorded reason: <span className="italic">{flow.gateBypassReason}</span>
           </p>
         )}
         {/* Short ID row */}

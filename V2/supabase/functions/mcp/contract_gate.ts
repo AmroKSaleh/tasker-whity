@@ -88,41 +88,90 @@ export function deriveOutputFromConsumers(producerId: string, consumerTasks: any
   return { rules: draft, assumptions, sources }
 }
 
-// ── TDE-287 / finishes TDE-203: the verifiable contract gate ─────────────────
-// A flow may only be finalized (name_flow) when every INTERNAL handoff carries a
-// non-trivial, human-blessed contract — on BOTH sides: the producer's output
-// definition-of-done and the consumer's input acceptance criteria. Returns a list
-// of human-readable violations; an empty list means the gate passes.
-export function contractGateViolations(flowTasks: any[]): string[] {
+// ── TDE-287 / TDE-203, RESEMANTICISED by TDE-820 ─────────────────────────────
+// This used to be contractGateViolations(): a flow could only be finalized when EVERY
+// internal handoff carried a non-trivial, human-blessed contract on both sides, and
+// anything else hard-blocked name_flow.
+//
+// That contradicted the Flows definition settled 2026-07-28: "CONTRACTS ARE OPTIONAL —
+// they are a property of certain joins, never the definition; a flow with no contracts
+// anywhere is still a flow", and "gate only at SEAMS — not every handoff is a seam;
+// prefer DISSOLVING a seam over gating it." Under the old gate, building a correctly
+// ungated flow required bypass:true and got the flow permanently stamped gate-bypassed —
+// a false record that would also have poisoned the moat analytics in TDE-784.
+//
+// The old code collapsed THREE different states into one "violation". They are now
+// separated, because they mean different things:
+//   ungated    — no contract on this handoff. LEGITIMATE and common. Informational only.
+//   vague      — a contract EXISTS but trips the vagueness linter. Someone authored a bar
+//                badly. A warning; already surfaced at authoring time by set_task_output /
+//                set_task_input, so it does not need to block again here.
+//   unblessed  — sharp rules, no human confirmation yet. A warning at NAMING time; the
+//                place a missing blessing should actually bite is when the gate RUNS
+//                (validation) — see TDE-216.
+// NOTHING here blocks. name_flow's job is identity ("these steps are one operation"), not
+// quality enforcement.
+export type ContractAdvisory = { kind: 'ungated' | 'vague' | 'unblessed', where: string, detail: string }
+
+export function contractAdvisories(flowTasks: any[]): ContractAdvisory[] {
   const inFlow = new Set(flowTasks.map((t: any) => t.id))
   const ref = (t: any) => `${t.short_id != null ? `#${t.short_id}` : t.id.slice(0, 8)} "${t.text}"`
   const refId = (id: string) => {
     const t = flowTasks.find((x: any) => x.id === id)
     return t ? (t.short_id != null ? `#${t.short_id}` : id.slice(0, 8)) : id.slice(0, 8)
   }
-  // A contract's rules must exist and none may trip the vagueness linter.
-  const ruleIssue = (rules: any[]): string | null => {
-    if (!rules || !rules.length) return 'no rules (empty contract)'
+  const out: ContractAdvisory[] = []
+  const classify = (rules: any[], confirmed: boolean, where: string) => {
+    if (!rules || !rules.length) {
+      out.push({ kind: 'ungated', where, detail: 'no contract on this handoff' })
+      return
+    }
     const flagged = rules.map((r: any) => (lintRule(r) ? `"${r.label}"` : null)).filter(Boolean)
-    if (flagged.length) return `vague/uncheckable rule(s): ${flagged.join(', ')}`
-    return null
+    if (flagged.length) {
+      out.push({ kind: 'vague', where, detail: `vague/uncheckable rule(s): ${flagged.join(', ')}` })
+      return
+    }
+    if (confirmed !== true) {
+      out.push({ kind: 'unblessed', where, detail: 'contract not human-blessed (confirm_contract)' })
+    }
   }
-  const violations: string[] = []
   for (const t of flowTasks) {
     const edges = inputEdges(t.input).filter((e: any) => inFlow.has(e.source_task_id))
     for (const e of edges) {
       const c: any = e.contract || {}
-      const issue = ruleIssue(c.rules)
-      if (issue) violations.push(`${ref(t)} ← input from ${refId(e.source_task_id)}: ${issue}`)
-      else if (c.confirmed !== true) violations.push(`${ref(t)} ← input from ${refId(e.source_task_id)}: contract not human-blessed (run confirm_contract)`)
+      classify(c.rules, c.confirmed === true, `${ref(t)} ← input from ${refId(e.source_task_id)}`)
     }
     const feedsInFlow = flowTasks.some((o: any) => inputEdges(o.input).some((e: any) => e.source_task_id === t.id))
     if (feedsInFlow) {
       const oc = outputContract(t.output)
-      const issue = ruleIssue(oc.rules)
-      if (issue) violations.push(`${ref(t)} → output def-of-done: ${issue}`)
-      else if (oc.confirmed !== true) violations.push(`${ref(t)} → output def-of-done: contract not human-blessed (run confirm_contract)`)
+      classify(oc.rules, oc.confirmed === true, `${ref(t)} → output def-of-done`)
     }
   }
-  return violations
+  return out
+}
+
+// Render the advisories as an operator-facing note. Returns '' when there is nothing worth
+// saying. Deliberately does NOT frame ungated handoffs as a defect — under the current
+// definition most handoffs are not seams and should carry no contract at all.
+export function renderContractAdvisory(advisories: ContractAdvisory[]): string {
+  if (!advisories.length) return ''
+  const by = (k: ContractAdvisory['kind']) => advisories.filter(a => a.kind === k)
+  const ungated = by('ungated'), vague = by('vague'), unblessed = by('unblessed')
+  const lines: string[] = []
+  if (vague.length) {
+    lines.push(`⚠ ${vague.length} authored contract${vague.length !== 1 ? 's' : ''} may be unusable as written:`)
+    vague.forEach(a => lines.push(`    ${a.where}: ${a.detail}`))
+    lines.push(`  Sharpen or remove them — a bar nobody can apply is worse than no bar.`)
+  }
+  if (unblessed.length) {
+    lines.push(`○ ${unblessed.length} contract${unblessed.length !== 1 ? 's are' : ' is'} AI-QA'd, not yet human-blessed:`)
+    unblessed.forEach(a => lines.push(`    ${a.where}`))
+    lines.push(`  Fine for now. confirm_contract before relying on it as a gate.`)
+  }
+  if (ungated.length) {
+    lines.push(`· ${ungated.length} handoff${ungated.length !== 1 ? 's carry' : ' carries'} no contract — normal, gates belong only at seams:`)
+    ungated.forEach(a => lines.push(`    ${a.where}`))
+    lines.push(`  Only gate one if the receiving step would NOT notice a wrong input.`)
+  }
+  return lines.join('\n')
 }
