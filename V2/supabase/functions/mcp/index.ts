@@ -129,6 +129,68 @@ async function emitWebhook(
   } catch (_) { /* outbound notification is best-effort — never affect the mutation */ }
 }
 
+// ── Durable gate history (TDE-818) ────────────────────────────
+// Append a row to task_events, the immutable record of what changed on a task's
+// contract / gate / review state. Every gate ceremony used to be an in-place overwrite:
+// a later set_task_output erased that a human had confirmed, each review attempt
+// overwrote the previous verdict, and validation ledgers were keyed per edge rather than
+// per attempt. This is the write path that makes that history durable.
+//
+// AWAITED, unlike emitWebhook. A webhook is a notification and may be dropped; this is the
+// audit record, so it is ordered before the tool's response rather than fired into the void.
+// It still NEVER fails the mutation — a lost audit row must not block a human confirming a
+// contract — but a drop is recorded in mcp_error_logs so it is detectable rather than silent.
+async function recordTaskEvent(
+  sb: any,
+  userId: string,
+  ev: {
+    taskId: string
+    kind: 'contract_set' | 'contract_cleared' | 'contract_confirmed' | 'review_bar_frozen'
+        | 'review_bar_cleared' | 'review_submitted' | 'validation_submitted' | 'fields_changed'
+    entity: 'output_contract' | 'input_contract' | 'review' | 'validation' | 'task'
+    summary: string
+    actor?: string | null
+    before?: any
+    after?: any
+    meta?: any
+  },
+): Promise<void> {
+  try {
+    const { error } = await sb.from('task_events').insert({
+      task_id: ev.taskId,
+      user_id: userId,
+      kind: ev.kind,
+      entity: ev.entity,
+      actor: ev.actor ?? null,
+      summary: ev.summary,
+      before: ev.before ?? null,
+      after: ev.after ?? null,
+      meta: ev.meta ?? null,
+    })
+    if (error) throw new Error(error.message)
+  } catch (e) {
+    fireAndForget(sb.from('mcp_error_logs').insert({
+      user_id: userId,
+      tool_name: `recordTaskEvent:${ev.kind}`,
+      raw_params: { task_id: ev.taskId, entity: ev.entity, summary: ev.summary },
+      error_msg: `task_events insert dropped: ${e instanceof Error ? e.message : String(e)}`,
+    }))
+  }
+}
+
+// Compact a contract for storage in task_events: keep the shape and the blessing provenance,
+// drop nothing that matters for answering "what was the bar, and had a human blessed it?".
+function contractSnapshot(contract: any) {
+  if (!contract || typeof contract !== 'object') return null
+  return {
+    rule_count: Array.isArray(contract.rules) ? contract.rules.length : 0,
+    rules: Array.isArray(contract.rules) ? contract.rules : [],
+    confirmed: contract.confirmed === true,
+    ...(contract.confirmed_at ? { confirmed_at: contract.confirmed_at } : {}),
+    ...(contract.confirmed_by ? { confirmed_by: contract.confirmed_by } : {}),
+  }
+}
+
 // ── JSON-RPC helpers ─────────────────────────────────────────
 function json(body: any, status = 200): Response {
   return new Response(JSON.stringify(body), { status, headers: { ...cors, 'Content-Type': 'application/json' } })
@@ -1264,7 +1326,7 @@ const ASSISTANT_DIRECTIVES = [
   'Only pause to ask the user to clarify or confirm when the action is destructive or outward-facing (deleting, bulk-completing, pushing to GitHub, or anything hard to reverse), OR when the request genuinely cannot be resolved from the conversation and context.',
   'NEVER be sycophantic. When you have a different or better view on a design, plan, scope, or contract, push back and argue it — challenge vague, contradictory, unrealistic, or over-scoped input. Pushback exists to improve the input and the result, not disagreement for its own sake; when the user is right, say so plainly and proceed. Applies everywhere: bootstrap_project, build_new_flow, reviews, planning.',
   'When the user wants to CREATE / SET UP A NEW PROJECT, call bootstrap_project FIRST (before create_project) and FOLLOW THE PHASES IT RETURNS — do NOT run your own multiple-choice quiz. The interview is THREE PHASES: (1) ELICIT in open PROSE — plain free-text questions about vision / why / taste / fears, NOT AskUserQuestion tiles; (2) DRAFT the Foundation brief, show it, then probe its gaps (tiles OK only for genuine expertise forks like platform/scope); (3) BLESS — show the full written brief for line-level edit, and persist via create_project ONLY after the user blesses it. Challenge weak / contradictory / over-scoped input at every phase — never sycophantic (e.g. if they pick two big features for v1, question it, don\'t just accept it). Then populate the board INCLUDING seeds for the deferred scope.',
-  'FLOW vs AD-HOC — when to reach for a flow: use a flow only when ALL THREE hold — (1) multiple steps drive toward ONE goal, (2) steps HAND OFF to each other (one step\'s output is the next step\'s input), and (3) at least one handoff carries a real quality risk worth gating. If steps are independent, one-shot, or trivial, use plain tasks — do NOT manufacture a flow for a simple checklist; the gate overhead (contracts, validators, revision loop) is pure cost with no payoff there. Proactively SUGGEST a flow when you notice work that fits all three, even if the user framed it as loose tasks. OPTIMIZING flow usage: keep flows short — only the steps with genuine handoffs belong in the chain; attach an output contract ONLY where a handoff has real quality risk, not on every step; prefer kind=check rules (deterministic, no validator subagent, 1 call) over kind=judgment whenever a check can express the bar; reserve multi-vote judgment validation for high-stakes blockers. A flow with no contracts is just ordered tasks — if nothing needs gating, it should not be a flow.',
+  'FLOW vs AD-HOC — when to reach for a flow. DEFINITION: a flow is a single operation too big for one sitting — cut into steps so it holds together across its length, and gated only where one step\'s output becomes the next step\'s unexamined premise. TWO MOTIVES, either one sufficient: RUN IT RIGHT (the operation is sensitive → gate the seams) and HOLD IT TOGETHER (the operation is big → durable structure, resumability, legible progress, protection from drift and the context wall). Neither motive applies → it is plain tasks, not a flow. SCALE IS THE FLOOR and it carries the whole boundary: if the work splits fairly into about two tasks without leaving a wall of context, it is not a flow. CONNECTION IS OPTIONAL — big sequential and even homogeneous batch operations (clean 300 tasks, migrate 80 files) are flows. CONTRACTS ARE OPTIONAL — they are a property of certain joins, never the definition; a flow with no contracts anywhere is still a flow. A flow RUNS AND TERMINATES: anything that never terminates is a CONTAINER (project / section / phase), not a flow, however big — if you later want to add unrelated work to it, you built a container and mislabelled it. STEP GRANULARITY: promote a boundary to its own step only when it must do one of four things a milestone cannot — hand an artifact over, change executor, permit a gate, or permit a clean cold stop. Otherwise it is a MILESTONE inside a step. Size calibrates, it never locates. This means FEWER steps, not more: a 40-step flow rebuilds the very context wall flows exist to prevent, and milestones piling up on a step are a smell that the flow is under-resolved. THERE ARE NO FLOW TYPES — executor, gate kind and shape all vary WITHIN a single flow, so none of them is a type; do not label or branch on one. WHERE TO GATE: only at SEAMS — a handoff the receiving step will NOT re-derive (test: would the next step notice if this input were wrong?). Not every handoff is a seam. Prefer DISSOLVING a seam over gating it — make the receiver re-derive, or put the context in durable state so it is read rather than passed; the cheapest gate is no seam. Then prefer kind=check (deterministic, no validator subagent) over kind=judgment. Order gates by BLAST RADIUS: early seams in long flows and irreversible actions first. The bar is authored from what the RECEIVER needs to safely build on the input, not from what the producer intends to make. DO NOT manufacture a flow because contracts feel rigorous, and do NOT make something a flow when you need it visible on the board — flow steps leave the board entirely (TDE-320), which is a real and under-named cost. Proactively SUGGEST a flow when work fits a motive, even if the user framed it as loose tasks.',
   'When the user wants to BUILD A NEW FLOW (a multi-step process toward a goal, with quality checks between the steps), call build_new_flow to get the interview playbook + project grounding — do NOT free-form a plan. You then run the grill-me-style interview yourself (one question at a time, always recommend a path), propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
   'REVISION LOOP: When submit_validation_result returns action="regenerate" — redo the producing task (apply the specific gate failures as revision instructions), complete it, then call validate_output + submit_validation_result again. Continue until action="pass" or action="ask_human". When action="ask_human" — the retry limit (3) has been reached; STOP and call get_task_critique on the producer task to get the clean validator notes, then use AskUserQuestion to present those findings to the human and ask how to proceed. UPSTREAM CASCADE: if the root cause is in the input the producer received (not fixable by redoing the producer alone), you may re-run at most 2 tasks further upstream from the original failure; beyond that depth, stop and ask the human.',
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
@@ -1980,6 +2042,20 @@ const TOOLS = [
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         limit:   { type: 'number', description: 'Max activities per session (default 20, max 100).' },
+      },
+      required: ['task_id'],
+    },
+  },
+  {
+    name: 'get_task_history',
+    description: "Read a task's DURABLE GATE HISTORY (TDE-818) — the append-only record of what changed on its contract / review bar / gate verdicts, with before+after state. This is a real log, unlike get_flow_audit (which renders the CURRENT validation snapshot). Use it to answer questions the task row cannot: what the contract said before it was replaced, whether a human confirmation was silently erased by a later edit, what attempt 1 of a review actually said before attempt 2 overwrote it, and what each gate retry failed on. Kinds: contract_set, contract_cleared, contract_confirmed, review_bar_frozen, review_bar_cleared, review_submitted, validation_submitted, fields_changed.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
+        kind:    { type: 'string', enum: ['contract_set', 'contract_cleared', 'contract_confirmed', 'review_bar_frozen', 'review_bar_cleared', 'review_submitted', 'validation_submitted', 'fields_changed'], description: 'Optional: show only this kind of event.' },
+        limit:   { type: 'number', description: 'Max events (default 30, max 200), newest first.' },
+        verbose: { type: 'boolean', description: 'Include the full before/after JSON per event. Default false (summaries + key flags only) to keep the response cheap.' },
       },
       required: ['task_id'],
     },
@@ -4110,11 +4186,41 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         if (!patch.agent_proposal) patch.agent_proposal_confirmed = false   // clearing the proposal clears confirmation
       }
 
+      // TDE-818: resolveTask selects a FIXED column list (no priority/due_date/pinned/executor/…),
+      // so the pre-update snapshot below would silently omit those fields — an audit row claiming
+      // "changed priority" with no prior priority is worse than no row. Fetch the missing changed
+      // columns before the write. Costs one indexed PK lookup, and only when a field outside
+      // resolveTask's projection is actually being changed.
+      const missingCols = Object.keys(patch).filter((k) => k !== 'completed_at' && !(k in task))
+      let priorExtra: Record<string, any> = {}
+      if (missingCols.length) {
+        const { data: priorRow } = await sb.from('tasks')
+          .select(missingCols.join(', ')).eq('id', task.id).maybeSingle()
+        if (priorRow) priorExtra = priorRow
+      }
+
       await sb.from('tasks').update(patch).eq('id', task.id)
 
       // TDE-377: fire an outbound task.updated event (fire-and-forget; never blocks the write).
-      const changedFrom: Record<string, any> = {}
+      const changedFrom: Record<string, any> = { ...priorExtra }
       for (const k of Object.keys(patch)) if (k in task) changedFrom[k] = (task as any)[k]
+
+      // TDE-818: until now this before-state existed ONLY to populate the webhook payload and
+      // was discarded whenever no webhook matched — so field history was lost on overwrite,
+      // leaving just tasks.updated_at (a timestamp with no indication of what changed).
+      // Skip detail-only appends: they are additive by construction and the text is already durable.
+      const changedKeys = Object.keys(patch).filter((k) => k !== 'completed_at')
+      if (changedKeys.length && !(appended && changedKeys.length === 1 && changedKeys[0] === 'detail')) {
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'fields_changed', entity: 'task', actor: tokenActor,
+          summary: `Changed ${changedKeys.join(', ')}`
+            + (patch.status ? ` — status ${(task as any).status ?? '?'} → ${patch.status}` : ''),
+          before: changedFrom,
+          after: patch,
+          meta: { fields: changedKeys, appended_detail: appended },
+        })
+      }
+
       fireAndForget(emitWebhook(sb, userId, {
         projectId: (task as any).project_id ?? null,
         event: 'task.updated', action: 'update', type: 'Task', actor: tokenActor,
@@ -4929,6 +5035,49 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         lines.push(`\n▸ Session${s.actor ? ` by ${s.actor}` : ''} · ${state} · opened ${s.opened_at}`)
         for (const a of (acts || [])) lines.push(`  [${a.type}] ${a.body}`)
       }
+      return lines.join('\n')
+    }
+
+    case 'get_task_history': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return 'Task not found.'
+      const limit = Math.min(Math.max(parseInt(String(args.limit ?? 30), 10) || 30, 1), 200)
+      let q = sb.from('task_events')
+        .select('kind, entity, actor, summary, before, after, meta, created_at')
+        .eq('task_id', task.id)
+      if (args.kind) q = q.eq('kind', args.kind)
+      const { data: events, error } = await q.order('created_at', { ascending: false }).limit(limit)
+      if (error) throw new Error(error.message)
+      if (!events?.length) {
+        return `No gate history on "${task.text}"${args.kind ? ` for kind "${args.kind}"` : ''} yet.`
+          + `\n\nNOTE: task_events records forward from TDE-818 (2026-07-28). Contract/review/gate changes made BEFORE that are not recoverable — they were overwritten in place.`
+      }
+      const GLYPH: Record<string, string> = {
+        contract_set: '✎', contract_cleared: '⌫', contract_confirmed: '✓',
+        review_bar_frozen: '❄', review_bar_cleared: '⌫', review_submitted: '⚖',
+        validation_submitted: '⚖', fields_changed: '·',
+      }
+      const lines: string[] = [`# Gate history — ${task.text}  (${events.length} event${events.length !== 1 ? 's' : ''}, newest first)`]
+      const erased = events.filter((e: any) => e.meta?.erased_confirmation === true)
+      if (erased.length) {
+        lines.push(``, `⚠ ${erased.length} event${erased.length !== 1 ? 's' : ''} DESTROYED A HUMAN CONFIRMATION on this task — a blessed contract was replaced or cleared. The prior contract is preserved in the before-state below.`)
+      }
+      for (const e of events) {
+        lines.push(``, `${GLYPH[e.kind] ?? '·'} [${e.kind}] ${e.created_at}${e.actor ? ` · by ${e.actor}` : ''}`)
+        lines.push(`  ${e.summary}`)
+        const flags: string[] = []
+        if (e.meta?.erased_confirmation) flags.push('erased_confirmation')
+        if (e.meta?.overwrote_frozen_bar) flags.push('overwrote_frozen_bar')
+        if (e.meta?.attempt !== undefined) flags.push(`attempt=${e.meta.attempt}`)
+        if (e.meta?.edge_key) flags.push(`edge=${e.meta.edge_key}`)
+        if (e.meta?.via) flags.push(`via=${e.meta.via}`)
+        if (flags.length) lines.push(`  ⚑ ${flags.join(' · ')}`)
+        if (args.verbose === true) {
+          if (e.before) lines.push(`  before: ${JSON.stringify(e.before)}`)
+          if (e.after) lines.push(`  after:  ${JSON.stringify(e.after)}`)
+        }
+      }
+      if (args.verbose !== true) lines.push(``, `(Pass verbose:true for full before/after state per event.)`)
       return lines.join('\n')
     }
 
@@ -6135,7 +6284,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const SEP = '─'.repeat(56)
 
       const lines: string[] = [
-        `Audit Trail — ${flowName ? `"${flowName}"` : `${project?.name || projectId} (unnamed flow)`}`,
+        `Gate Snapshot — ${flowName ? `"${flowName}"` : `${project?.name || projectId} (unnamed flow)`}`,
+        // TDE-818: this renders the CURRENT value of each task's validation ledger. It is a
+        // snapshot, not a log — earlier attempts are not here (a retry_count of 3 with only the
+        // latest body visible is this tool's shape, not missing data). The real per-attempt
+        // history lives in task_events → get_task_history.
+        `(Current state per step. For per-attempt history — what an earlier attempt failed on, or a contract that was replaced — use get_task_history.)`,
         ...(flowContext ? [`Context: ${flowContext}`] : []),
         '',
       ]
@@ -6870,7 +7024,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         mode: 'create',
         goal: args.goal || null,
         seed: seedBlock,
-        instruction: 'You are building a NEW flow with the user. Run the interview below YOURSELF using your interactive question tool (AskUserQuestion / ask_question). A flow = a chain of contract-linked tasks; sections/groups are just filing and do not define the flow. Do NOT create or wire any tasks until the user confirms the whole proposed flow at the end.',
+        instruction: 'You are building a NEW flow with the user. Run the interview below YOURSELF using your interactive question tool (AskUserQuestion / ask_question). A flow is a single operation too big for one sitting, cut into steps so it holds together across its length; contracts at the joins are OPTIONAL and belong only at seams (a handoff the receiving step will not re-derive). A flow with no contracts anywhere is still a flow — do NOT interview for handoffs and gates as if they were prerequisites. Sections/groups are just filing and do not define the flow. Do NOT create or wire any tasks until the user confirms the whole proposed flow at the end.',
         grill_me_rules: [
           'Ask ONE question at a time; each answer determines the next question.',
           'Every question carries a recommended option, prefixed "(Recommended)", based on best practice + what you can already see.',
@@ -6880,16 +7034,16 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         playbook: [
           '1. GROUND THE START: use project_context below and read the repo if relevant, then ask the user what they already have / where they are starting from. Do not ask about things you can already see.',
           '2. PIN THE GOAL' + (args.goal ? ` (stated: "${args.goal}")` : '') + ': confirm the end goal and treat it as the FINAL task\'s output contract.',
-          '3. FORWARD-DECOMPOSE one step at a time toward the goal, recommending a path each time, building the ordered chain of tasks. FOR EACH STEP, ask: who executes this — agent (AI does it), user (human does it, AI coaches), or external (third party like a web admin or client)? A single flow can be hybrid. For user/external steps, ask for human_guidance: what the person must do, where, and how to verify it worked.',
-          '4. AUTHOR INPUTS FIRST, THEN DERIVE OUTPUTS (TDE-287): the consumer\'s input requirement is the BASE of the producer\'s contract. For each handoff, first pin the next task\'s input contract (its acceptance criteria) as structured, CONTEXT-FREE rules — the shape of acceptable output, never this run\'s subject. The producer\'s output def-of-done is then DERIVED from what its consumers demand (call derive_output_contract on the producer once edges are wired). RULE QUALITY: push toward sharp, checkable rules. Prefer kind=check with concrete params (word count, test command, file existence). For kind=judgment, require an objective criterion ("each sentence under 25 words" not "readable") and a stated way to verify it. Actively push back on vague rules like "good quality", "clear", "comprehensive" — ask the user what SPECIFICALLY makes it pass. Only make a step its own task if it produces a distinct, checkable output a later step depends on (a contract-worthy handoff).',
+          '3. FORWARD-DECOMPOSE one step at a time toward the goal, recommending a path each time, building the ordered chain of tasks. GRANULARITY — promote a boundary to its own step ONLY when it must do one of four things a milestone cannot: hand an artifact over, change executor, permit a gate, or permit a clean cold stop. Everything else is a MILESTONE inside a step, however substantial the work is. Size calibrates, it never locates. Aim for FEW steps: a 40-step flow rebuilds the context wall the flow exists to prevent. FOR EACH STEP, ask: who executes this — agent (AI does it), user (human does it, AI coaches), or external (third party like a web admin or client)? A single flow can be hybrid, and executor is a per-step attribute, never a kind of flow. For user/external steps, ask for human_guidance: what the person must do, where, and how to verify it worked.',
+          '4. FIND THE SEAMS, THEN GATE ONLY THOSE. Most joins need no contract at all — first ask, for each join, whether the receiving step would NOTICE if the input were wrong. If it re-derives the material anyway, the error dies there: that is a handoff, not a seam, and it gets NO gate. Prefer DISSOLVING a seam over gating it (make the receiver re-derive, or put the context in durable state so it is read rather than passed). Where a real seam remains, order by BLAST RADIUS — early seams in long flows and irreversible actions first. AUTHOR INPUTS FIRST, THEN DERIVE OUTPUTS (TDE-287): the bar states what the RECEIVER needs in order to build on the input safely, not what the producer intends to make, so pin the consumer\'s input contract first as structured, CONTEXT-FREE rules — the shape of acceptable output, never this run\'s subject — and DERIVE the producer\'s def-of-done from it (derive_output_contract once edges are wired). RULE QUALITY: every criterion you make checkable is one the human never has to look at again, so push hard toward kind=check with concrete params (word count, test command, file existence). For kind=judgment, require an objective criterion ("each sentence under 25 words" not "readable") and a stated way to verify it. Actively push back on vague rules like "good quality", "clear", "comprehensive" — ask the user what SPECIFICALLY makes it pass.',
           '5. SURFACE ASSUMPTIONS, DON\'T INTERROGATE (TDE-287): present the WHOLE proposed flow (tasks + edges + derived contracts) AND the explicit list of assumptions/uncertainties you made deriving them (vague inherited rules, multi-consumer merges, handoffs with no criteria to derive from). Ask the human to confirm or correct — ONE pass. Assumption-surfacing on a concrete draft beats a cold questionnaire.',
-          '6. ON CONFIRM, PERSIST then BLESS (see persistence). The name_flow gate will BLOCK finalize until every handoff has a non-trivial, human-blessed contract — so confirm_contract is a required step, not optional.',
+          '6. ON CONFIRM, PERSIST then BLESS (see persistence). The name_flow gate applies ONLY to handoffs you actually declare: every DECLARED input edge needs a non-trivial, human-blessed contract on both sides, so confirm_contract is required for each edge you wire. A flow with no declared edges has nothing to gate and finalizes cleanly — that is intended, not a loophole. Declare an edge when you want the seam gated; do not wire edges you have no intention of gating.',
         ],
         persistence: {
           when: 'ONLY after the user confirms the whole flow.',
           steps: [
             'create_task for each step (pass section_id from project_context if it belongs in an existing section). For user/external steps, pass executor:"user"/"external" and human_guidance with the human-facing action directive.',
-            'set_task_input(task_id, source_task_id, contract) on each consuming task — call once per upstream source (fan-in supported). The input contract is the consumer\'s acceptance criteria. Author these FIRST — they are the base of the producer\'s contract.',
+            'set_task_input(task_id, source_task_id, contract) on each consuming task whose join is a real SEAM — call once per upstream source (fan-in supported). The input contract is the consumer\'s acceptance criteria. Author these FIRST — they are the base of the producer\'s contract. Skip this entirely for joins that are not seams; an ungated flow is a valid flow.',
             'derive_output_contract(task_id, apply:true) on each producing task to derive its def-of-done from its consumers\' input criteria (or set_task_output directly if you must). Surface the returned assumptions to the human.',
             'confirm_contract(task_id, contract_type) on each side the human has blessed — REQUIRED: name_flow blocks on unblessed contracts (TDE-287 gate).',
             'name_flow(project_id, name, task_ids, context?) — names + finalizes the flow. If the gate blocks, fix the listed violations and retry; bypass:true only on explicit human command.',
@@ -6967,6 +7121,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       const rules = (args.contract?.rules || []).map(normalizeRule)
       const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+      const prevContract = prev.contract || {}
       const output = {
         ...prev,
         contract: { rules, confirmed: false },
@@ -6976,8 +7131,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
       if (error) throw new Error(error.message)
 
+      // TDE-818: this overwrite silently resets confirmed:false. If a human HAD blessed the
+      // prior contract, that fact is destroyed on the row — so record it here or it is gone.
+      const erasedConfirmation = prevContract.confirmed === true
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'contract_set', entity: 'output_contract', actor: tokenActor,
+        summary: `Output contract replaced: ${prevContract.rules?.length ?? 0} → ${rules.length} rule(s)`
+          + (erasedConfirmation ? ` — ERASED a human confirmation by ${prevContract.confirmed_by || 'human'}` : ''),
+        before: contractSnapshot(prevContract),
+        after: contractSnapshot({ rules, confirmed: false }),
+        meta: {
+          erased_confirmation: erasedConfirmation,
+          ...(erasedConfirmation ? { prior_confirmed_by: prevContract.confirmed_by ?? null, prior_confirmed_at: prevContract.confirmed_at ?? null } : {}),
+        },
+      })
+
       const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
       return `Set output contract on ${args.task_id}: ${rules.length} rule${rules.length !== 1 ? 's' : ''} (definition-of-done). Contract is AI-QA'd (QA is performed by AI, not a meat sack) until a human confirms it via confirm_contract. Consumers are derived from tasks that list this as a source.`
+        + (erasedConfirmation ? `\n\n⚠ This replaced a HUMAN-CONFIRMED contract — the blessing is now void (confirmed reset to false). The prior contract and its confirmation are preserved in the task's gate history (get_task_history).` : '')
         + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}\nPrefer kind=check with concrete params. For kind=judgment, specify an objective criterion + a stated way to verify it.` : '')
     }
 
@@ -6997,11 +7168,26 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (args.apply && derived.rules.length) {
         const rules = derived.rules.map(normalizeRule)
         const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+        const prevContract = prev.contract || {}
         const { error } = await sb.from('tasks').update({
           output: { ...prev, contract: { rules, confirmed: false }, validation_status: prev.validation_status || 'pending' },
         }).eq('id', task.id)
         if (error) throw new Error(error.message)
         applied = true
+        // TDE-818: same overwrite hazard as set_task_output — record before the prior blessing is gone.
+        const erasedConfirmation = prevContract.confirmed === true
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'contract_set', entity: 'output_contract', actor: tokenActor,
+          summary: `Output contract derived from ${derived.sources.length} consumer(s): ${prevContract.rules?.length ?? 0} → ${rules.length} rule(s)`
+            + (erasedConfirmation ? ` — ERASED a human confirmation by ${prevContract.confirmed_by || 'human'}` : ''),
+          before: contractSnapshot(prevContract),
+          after: contractSnapshot({ rules, confirmed: false }),
+          meta: {
+            via: 'derive_output_contract',
+            erased_confirmation: erasedConfirmation,
+            ...(erasedConfirmation ? { prior_confirmed_by: prevContract.confirmed_by ?? null, prior_confirmed_at: prevContract.confirmed_at ?? null } : {}),
+          },
+        })
       }
 
       return JSON.stringify({
@@ -7068,6 +7254,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const review_bar = { rules, frozen_at: new Date().toISOString(), source: 'task_text+IS+KB' }
         const { error } = await sb.from('tasks').update({ review_bar, review_enabled: true }).eq('id', task.id)
         if (error) throw new Error(error.message)
+        // TDE-818: "frozen" means frozen-until-force. When force overwrites a prior bar, the
+        // bar the work was actually judged against would otherwise vanish — keep it.
+        const overwroteFrozenBar = !!existing?.rules?.length
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'review_bar_frozen', entity: 'review', actor: tokenActor,
+          summary: `Review bar frozen with ${rules.length} rule(s)`
+            + (overwroteFrozenBar ? ` — OVERWROTE a prior frozen bar of ${existing.rules.length} rule(s) (force)` : ''),
+          before: overwroteFrozenBar ? { rule_count: existing.rules.length, rules: existing.rules, frozen_at: existing.frozen_at ?? null } : null,
+          after: { rule_count: rules.length, rules, frozen_at: review_bar.frozen_at },
+          meta: { overwrote_frozen_bar: overwroteFrozenBar, forced: args.force === true },
+        })
         const lintWarnings = rules.map((r: any) => { const w = lintRule(r); return w ? `  "${r.label}": ${w}` : null }).filter(Boolean)
         return `Review enabled on "${task.text}" — bar frozen with ${rules.length} rule(s).`
           + (lintWarnings.length ? `\n\n⚠ Rule quality warnings (${lintWarnings.length}):\n${lintWarnings.join('\n')}` : '')
@@ -7156,6 +7353,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (overall === 'fail') update.status = 'in_progress'   // reopen the producer
       const { error } = await sb.from('tasks').update(update).eq('id', task.id)
       if (error) throw new Error(error.message)
+      // TDE-818: tasks.review_verdict is ONE SLOT — attempt 2 overwrote attempt 1's critique,
+      // leaving only a counter. One immutable row PER ATTEMPT is what makes the retry
+      // history actually retrievable.
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'review_submitted', entity: 'review', actor: tokenActor,
+        summary: `Review ${overall.toUpperCase()} (attempt ${attempt}) by ${args.validator || 'self'} — ${results.length} rule(s) graded, ${fails.length} fail(s)`
+          + (escalate ? ' — ESCALATED to human' : ''),
+        before: task.review_verdict ? { overall: task.review_verdict.overall ?? null, attempt: task.review_verdict.attempt ?? 0 } : null,
+        after: review_verdict,
+        meta: { attempt, overall, escalated: escalate, validator: args.validator || 'self', fail_count: fails.length, blocker_fail: blockerFail },
+      })
       // TDE-377: outbound review.submitted event (fire-and-forget) — the "task entered/cleared the gate" trigger.
       fireAndForget(emitWebhook(sb, userId, {
         projectId: (task as any).project_id ?? null,
@@ -7180,6 +7388,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .update({ review_enabled: false, review_bar: null, review_verdict: cleared_verdict })
         .eq('id', task.id)
       if (error) throw new Error(error.message)
+      // TDE-818: this handler was already written in the right spirit (it leaves a superseding
+      // tombstone rather than nulling) but the tombstone still destroyed the verdict it
+      // tombstoned, keeping only prior_overall. Preserve the full bar + verdict here.
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'review_bar_cleared', entity: 'review', actor: tokenActor,
+        summary: `Review disabled — bar (${task.review_bar?.rules?.length ?? 0} rule(s)) and verdict removed`
+          + (args.reason ? ` (reason: ${args.reason})` : '')
+          + (wasEscalated ? ' — cleared an ESCALATED verdict' : ''),
+        before: { bar: task.review_bar ?? null, verdict: task.review_verdict ?? null },
+        after: cleared_verdict,
+        meta: { reason: args.reason || null, was_escalated: wasEscalated, prior_overall: task.review_verdict?.overall ?? null },
+      })
       const note = wasEscalated ? ' Escalation cleared — the "NEEDS REVIEW" card will drop.' : ''
       return `Disabled review on "${task.text}". Frozen bar removed; verdict replaced with a cleared record${args.reason ? ` (reason: ${args.reason})` : ''}.${note}`
     }
@@ -7212,6 +7432,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const output = { ...prev, contract: { rules: [], confirmed: false } }
       const { error } = await sb.from('tasks').update({ output }).eq('id', task.id)
       if (error) throw new Error(error.message)
+      // TDE-818: preserve the bar that was cleared, and whether it had been blessed.
+      await recordTaskEvent(sb, userId, {
+        taskId: task.id, kind: 'contract_cleared', entity: 'output_contract', actor: tokenActor,
+        summary: `Output contract cleared (${prev.contract.rules.length} rule(s) removed)`
+          + (prev.contract.confirmed === true ? ` — was human-confirmed by ${prev.contract.confirmed_by || 'human'}` : ''),
+        before: contractSnapshot(prev.contract),
+        after: contractSnapshot({ rules: [], confirmed: false }),
+        meta: { erased_confirmation: prev.contract.confirmed === true },
+      })
       return `Cleared the output contract on "${task.text}". Stored artifact and validation status were kept.`
     }
 
@@ -7641,6 +7870,29 @@ Call submit_validation_result with:
         },
       }).eq('id', producer.id)
 
+      // TDE-818: validation_ledgers is keyed per EDGE, not per ATTEMPT — so attempt N replaced
+      // attempt N-1 and retry_count could report 3 failures with all 3 bodies gone. This is the
+      // row that gives the retry counter retrievable content behind it.
+      await recordTaskEvent(sb, userId, {
+        taskId: producer.id, kind: 'validation_submitted', entity: 'validation', actor: tokenActor,
+        summary: `Gate ${String(validationStatus).toUpperCase()} on edge ${edgeKey} (attempt ${valid ? 1 : newRetryCount}) by ${validator || 'unverified'}`
+          + ` — ${ledger.filter((l: any) => l.status === 'fail').length} fail(s) of ${ledger.length} rule(s)`
+          + (action === 'ask_human' ? ' — RETRY LIMIT reached, escalated to human' : ''),
+        before: Object.keys(prevEdgeLedger).length
+          ? { validation_status: prevEdgeLedger.validation_status ?? null, validated_at: prevEdgeLedger.validated_at ?? null, retry_count: prevEdgeLedger.retry_count ?? 0 }
+          : null,
+        after: { ledger: edgeLedgerEntry, critique: critiqueEntry },
+        meta: {
+          edge_key: edgeKey,
+          attempt: valid ? 1 : newRetryCount,
+          overall: validationStatus,
+          action,
+          validator: validator || 'unverified',
+          contract_blessed: allBlessed,
+          retry_blocked: action === 'ask_human',
+        },
+      })
+
       const fmt = (l: any) => `  ${l.status === 'pass' ? '✓' : '✗'} [${l.severity}] ${l.label}${l.note ? ` — ${l.note}` : ''}`
       return JSON.stringify({
         status: validationStatus,
@@ -8022,6 +8274,15 @@ Call submit_validation_result with:
         await sb.from('tasks').update({
           output: { ...prev, contract: { ...prevContract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy } },
         }).eq('id', task.id)
+        // TDE-818: the highest-trust act in the system. On the row it is three mutable fields
+        // that the next set_task_output wipes; here it is a permanent record that it happened.
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'contract_confirmed', entity: 'output_contract', actor: tokenActor,
+          summary: `Output contract confirmed by ${confirmedBy} — ${prevContract.rules.length} rule(s) human-blessed`,
+          before: contractSnapshot(prevContract),
+          after: contractSnapshot({ ...prevContract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy }),
+          meta: { confirmed_by: confirmedBy, confirmed_at: confirmedAt },
+        })
         return `Output contract on "${task.text}" confirmed by ${confirmedBy}. ${prevContract.rules.length} rule${prevContract.rules.length !== 1 ? 's' : ''} are now human-blessed — future validation ledger entries will be stamped contract_blessed: true.`
       }
 
@@ -8052,6 +8313,14 @@ Call submit_validation_result with:
             : e
         )
         await sb.from('tasks').update({ input: { edges: updatedEdges } }).eq('id', task.id)
+        // TDE-818: same durability gap on the input side — set_task_input replaces the whole edge.
+        await recordTaskEvent(sb, userId, {
+          taskId: task.id, kind: 'contract_confirmed', entity: 'input_contract', actor: tokenActor,
+          summary: `Input contract (from ${targetEdge.source_task_id}) confirmed by ${confirmedBy} — ${targetEdge.contract.rules.length} rule(s) human-blessed`,
+          before: contractSnapshot(targetEdge.contract),
+          after: contractSnapshot({ ...targetEdge.contract, confirmed: true, confirmed_at: confirmedAt, confirmed_by: confirmedBy }),
+          meta: { confirmed_by: confirmedBy, confirmed_at: confirmedAt, source_task_id: targetEdge.source_task_id },
+        })
         return `Input contract on "${task.text}" (from ${targetEdge.source_task_id}) confirmed by ${confirmedBy}. ${targetEdge.contract.rules.length} rule${targetEdge.contract.rules.length !== 1 ? 's' : ''} are now human-blessed.`
       }
 
