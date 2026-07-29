@@ -1,5 +1,5 @@
 // TDE-287 — unit tests for the contract logic (run: deno test contract_gate.test.ts)
-import { lintRule, deriveOutputFromConsumers, contractGateViolations } from './contract_gate.ts'
+import { lintRule, deriveOutputFromConsumers, contractAdvisories, renderContractAdvisory } from './contract_gate.ts'
 
 function assert(cond: any, msg: string) {
   if (!cond) throw new Error('FAIL: ' + msg)
@@ -56,37 +56,62 @@ Deno.test('derive: flags vague language inherited from the consumer', () => {
   assert(d.assumptions.some(a => a.includes('vague language')), 'vague-inheritance assumption surfaced')
 })
 
-// ── contractGateViolations ────────────────────────────────────────────────────
-// Flow A → B: A produces, B consumes. A's output + B's input edge must both be blessed.
+// ── contractAdvisories (TDE-820) ──────────────────────────────────────────────
+// Replaces contractGateViolations. Nothing here blocks — the three states a handoff can be
+// in are now DISTINGUISHED rather than collapsed into one "violation":
+//   ungated   = no contract (legitimate; gates belong only at seams)
+//   vague     = a contract exists but trips the linter
+//   unblessed = sharp rules, not yet human-confirmed
+// Flow A → B: A produces, B consumes.
 const flowAB = (aOut: any, bIn: any) => ([
   { id: 'a', short_id: 1, text: 'Producer', input: { edges: [] }, output: { contract: aOut } },
   { id: 'b', short_id: 2, text: 'Consumer', input: { edges: [{ source_task_id: 'a', contract: bIn }] }, output: {} },
 ])
+const kinds = (as: any[]) => as.map(a => a.kind).sort()
 
-Deno.test('gate: passes when both sides are non-trivial and blessed', () => {
-  const v = contractGateViolations(flowAB(blessed([goodRule('o')]), blessed([goodRule('i')])))
-  eq(v.length, 0, 'no violations on a fully-blessed flow')
+Deno.test('advisory: silent when both sides are non-trivial and blessed', () => {
+  const a = contractAdvisories(flowAB(blessed([goodRule('o')]), blessed([goodRule('i')])))
+  eq(a.length, 0, 'a fully-blessed flow produces no advisories')
+  eq(renderContractAdvisory(a), '', 'nothing rendered when there is nothing to say')
 })
-Deno.test('gate: blocks an unblessed input edge', () => {
-  const v = contractGateViolations(flowAB(blessed([goodRule('o')]), unblessed([goodRule('i')])))
-  assert(v.some(x => x.includes('input') && x.includes('not human-blessed')), 'unblessed input flagged')
+Deno.test('advisory: an unblessed input edge is unblessed, not a violation', () => {
+  const a = contractAdvisories(flowAB(blessed([goodRule('o')]), unblessed([goodRule('i')])))
+  eq(kinds(a).join(','), 'unblessed', 'only the input edge is flagged, as unblessed')
+  assert(a[0].where.includes('input'), 'points at the input edge')
 })
-Deno.test('gate: blocks an unblessed output def-of-done', () => {
-  const v = contractGateViolations(flowAB(unblessed([goodRule('o')]), blessed([goodRule('i')])))
-  assert(v.some(x => x.includes('output') && x.includes('not human-blessed')), 'unblessed output flagged')
+Deno.test('advisory: an unblessed output def-of-done is unblessed', () => {
+  const a = contractAdvisories(flowAB(unblessed([goodRule('o')]), blessed([goodRule('i')])))
+  eq(kinds(a).join(','), 'unblessed', 'only the output side is flagged')
+  assert(a[0].where.includes('output'), 'points at the output def-of-done')
 })
-Deno.test('gate: blocks an empty contract', () => {
-  const v = contractGateViolations(flowAB(blessed([]), blessed([goodRule('i')])))
-  assert(v.some(x => x.includes('no rules')), 'empty output contract flagged')
+// THE REGRESSION THIS TASK EXISTS TO PREVENT: an absent contract used to be reported as
+// "no rules (empty contract)" and hard-blocked name_flow, forcing bypass on a valid flow.
+Deno.test('advisory: an ABSENT contract is ungated — never an error', () => {
+  const a = contractAdvisories(flowAB(blessed([]), blessed([goodRule('i')])))
+  eq(kinds(a).join(','), 'ungated', 'empty output contract is ungated, not a violation')
+  assert(!/violation|issue|blocked/i.test(renderContractAdvisory(a)), 'wording does not imply failure')
 })
-Deno.test('gate: blocks a vague rule even when blessed', () => {
-  const v = contractGateViolations(flowAB(blessed([vagueRule('o')]), blessed([goodRule('i')])))
-  assert(v.some(x => x.includes('vague/uncheckable')), 'vague rule flagged despite blessing')
+Deno.test('advisory: a fully ungated flow yields only ungated advisories', () => {
+  const a = contractAdvisories(flowAB(blessed([]), blessed([])))
+  eq(kinds(a).join(','), 'ungated,ungated', 'both sides ungated, nothing else')
 })
-Deno.test('gate: ignores edges to tasks outside the flow', () => {
-  // B consumes 'external' which is NOT in the flow → that edge is not gated.
+Deno.test('advisory: a vague rule is vague even when blessed', () => {
+  const a = contractAdvisories(flowAB(blessed([vagueRule('o')]), blessed([goodRule('i')])))
+  eq(kinds(a).join(','), 'vague', 'vague rule surfaced despite blessing')
+  assert(a[0].detail.includes('vague/uncheckable'), 'names the flagged rule')
+})
+Deno.test('advisory: the three kinds are reported independently, not collapsed', () => {
+  const tasks = [
+    { id: 'a', short_id: 1, text: 'A', input: { edges: [] }, output: { contract: blessed([]) } },                 // ungated output
+    { id: 'b', short_id: 2, text: 'B', input: { edges: [{ source_task_id: 'a', contract: blessed([vagueRule('i')]) }] }, output: { contract: unblessed([goodRule('o')]) } },
+    { id: 'c', short_id: 3, text: 'C', input: { edges: [{ source_task_id: 'b', contract: blessed([goodRule('i')]) }] }, output: {} },
+  ]
+  // kinds() sorts alphabetically: unblessed < ungated < vague.
+  eq(kinds(contractAdvisories(tasks)).join(','), 'unblessed,ungated,vague', 'one of each, distinguishable')
+})
+Deno.test('advisory: ignores edges to tasks outside the flow', () => {
   const tasks = [
     { id: 'b', short_id: 2, text: 'Consumer', input: { edges: [{ source_task_id: 'external', contract: unblessed([goodRule('i')]) }] }, output: {} },
   ]
-  eq(contractGateViolations(tasks).length, 0, 'external edge not gated')
+  eq(contractAdvisories(tasks).length, 0, 'external edge not advised on')
 })

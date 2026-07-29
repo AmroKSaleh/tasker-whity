@@ -1,5 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
-import { inputEdges, inputSourceIds, outputContract, lintRule, deriveOutputFromConsumers, contractGateViolations } from './contract_gate.ts'
+import { inputEdges, inputSourceIds, outputContract, lintRule, deriveOutputFromConsumers, contractAdvisories, renderContractAdvisory } from './contract_gate.ts'
 import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash, kbFileSlug, serializeStructure, parseStructure } from './local_format.ts'
 import {
   buildPullMaps, buildProjectMeta, dbRowToTaskerTask, resolveFlushChange, resolveFlushDelete,
@@ -178,7 +178,7 @@ async function recordTaskEvent(
   }
 }
 
-// TDE-821: record a task LIFECYCLE change (status / location / closure) made by a handler that
+// TDE-819: record a task LIFECYCLE change (status / location / closure) made by a handler that
 // writes to `tasks` directly instead of going through update_task. Without this, get_task_history
 // was blind to the most basic question a reader asks — a task being COMPLETED left no trace.
 // Reuses kind='fields_changed' rather than adding a kind, so the CHECK constraint in migration
@@ -2924,7 +2924,7 @@ const TOOLS = [
   },
   {
     name: 'name_flow',
-    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). CONTRACT GATE (TDE-287): finalizing is BLOCKED unless every internal handoff has a non-trivial, human-blessed contract on both sides (producer output def-of-done + consumer input criteria). If it blocks, it returns the specific violations — sharpen the flagged rules and run confirm_contract, then retry. Override only with bypass:true (records the flow as visibly gate-bypassed). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided. To RENAME an already-named flow, do NOT re-call name_flow with the full task list — call update_flow_context(task_id, name) with any one task in the flow.',
+    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). CONTRACTS DO NOT BLOCK THIS (TDE-820): a flow with no contracts anywhere is still a flow — gates belong only at seams, and naming a flow is about identity, not quality. The response includes an ADVISORY on internal handoffs: which carry no contract (normal), which have vague/unusable rules (worth sharpening), and which are AI-QA\'d but not yet human-blessed (fine until you rely on them as a gate — confirm_contract then). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided. To RENAME an already-named flow, do NOT re-call name_flow with the full task list — call update_flow_context(task_id, name) with any one task in the flow.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2933,8 +2933,8 @@ const TOOLS = [
         task_ids: { type: 'array', items: { type: 'string' }, description: 'All task IDs in the flow (UUIDs or short IDs).' },
         context: { type: 'string', description: 'Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow.' },
         short_id: { type: 'string', description: 'Optional custom short ID (e.g. "BKT-F3"). Must be unique across all your flows. Auto-generated if omitted.' },
-        bypass: { type: 'boolean', description: 'TDE-287: finalize the flow even if the contract gate fails. Use ONLY on explicit human command — the flow is permanently recorded as gate-bypassed.' },
-        bypass_reason: { type: 'string', description: 'Why the gate was bypassed (recorded on the flow). Provide when bypass:true.' },
+        bypass: { type: 'boolean', description: 'DEPRECATED (TDE-820) — ignored. Contracts no longer block finalization, so there is nothing to bypass. Accepted only so older callers do not error; passing it does NOT mark the flow gate-bypassed.' },
+        bypass_reason: { type: 'string', description: 'DEPRECATED (TDE-820) — ignored, kept for backward compatibility.' },
       },
       required: ['project_id', 'name', 'task_ids'],
     },
@@ -3935,7 +3935,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return `Task "${args.task_id}" not found.`
       // phase_id is not in resolveTask's projection — fetch the prior phase so both branches
-      // below can record a real before-state rather than asserting null (TDE-821).
+      // below can record a real before-state rather than asserting null (TDE-819).
       const { data: priorPhaseRow } = await sb.from('tasks').select('phase_id').eq('id', task.id).maybeSingle()
       const priorPhaseId = priorPhaseRow?.phase_id ?? null
       if (!args.phase_id) {
@@ -4121,7 +4121,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       // Close the dup with a DISTINCT outcome — duplicate_of set = MERGED, not a plain "done".
       const mergedAt = new Date().toISOString()
       await sb.from('tasks').update({ status: 'done', completed_at: mergedAt, duplicate_of: canon.id }).eq('id', dup.id)
-      // TDE-821: record on BOTH tasks. On the dup, so its closure is not indistinguishable from a
+      // TDE-819: record on BOTH tasks. On the dup, so its closure is not indistinguishable from a
       // plain completion; on the canonical, so it shows it absorbed another task's scope.
       await recordLifecycleChange(sb, userId, {
         taskId: dup.id, via: 'merge_task_as_duplicate', actor: tokenActor,
@@ -4193,7 +4193,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         await sb.rpc('append_milestone', { p_task_id: newTask.id, p_user_id: userId, p_text: m })
       }
       await sb.from('tasks').update({ status: 'done' }).eq('id', seed.id)
-      // TDE-821: a seed closing is a resolution, not a completion — record what it became so the
+      // TDE-819: a seed closing is a resolution, not a completion — record what it became so the
       // seed's own history explains where its scope went.
       await recordLifecycleChange(sb, userId, {
         taskId: seed.id, via: 'resolve_seed', actor: tokenActor,
@@ -4328,7 +4328,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       const completedAt = new Date().toISOString()
       await sb.from('tasks').update({ status: 'done', completed_at: completedAt }).eq('id', task.id)
-      // TDE-821: completion is the single most important thing that can happen to a task and it
+      // TDE-819: completion is the single most important thing that can happen to a task and it
       // was absent from the task's own history until now (this handler bypasses update_task).
       await recordLifecycleChange(sb, userId, {
         taskId: task.id, via: 'complete_task', actor: tokenActor,
@@ -4374,7 +4374,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       // projection, and "this was completed at X, then reopened" is the point of the record.
       const { data: priorDone } = await sb.from('tasks').select('completed_at').eq('id', task.id).maybeSingle()
       await sb.from('tasks').update({ status: 'pending', completed_at: null }).eq('id', task.id)
-      // TDE-821: reopening is as consequential as completing — record the undo too.
+      // TDE-819: reopening is as consequential as completing — record the undo too.
       await recordLifecycleChange(sb, userId, {
         taskId: task.id, via: 'uncomplete_task', actor: tokenActor,
         summary: `Reopened — status ${task.status ?? '?'} → pending`
@@ -4449,7 +4449,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           await sb.from('tasks').update({ status: 'in_progress' }).eq('id', full.id)
           full.status = 'in_progress'
           justStarted = true
-          // TDE-821: get_task SILENTLY flips a pending task to in_progress. That is convenient for
+          // TDE-819: get_task SILENTLY flips a pending task to in_progress. That is convenient for
           // real pickups but invisible for read-only inspection — a survey of N tasks marks all N
           // as started with no trace. Recording it makes the flip auditable (and reversible with
           // evidence). Bounded: only fires on the pending→in_progress transition, not every read.
@@ -6147,7 +6147,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const { error } = await sb.from('tasks').update(updates).eq('id', task.id)
       if (error) throw new Error(error.message)
 
-      // TDE-821: location changes bypass update_task, so the board move left no trace.
+      // TDE-819: location changes bypass update_task, so the board move left no trace.
       await recordLifecycleChange(sb, userId, {
         taskId: task.id, via: 'move_task_to_group', actor: tokenActor,
         summary: targetGroup ? `Moved into a group` : `Moved to ungrouped`
@@ -6216,7 +6216,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       const newShortId = moved?.short_id
       const newRef = target.prefix && newShortId != null ? `${target.prefix}-${newShortId}` : task.id
-      // TDE-821: the most destructive non-delete operation on a task — it changes project, drops
+      // TDE-819: the most destructive non-delete operation on a task — it changes project, drops
       // every input edge, leaves any flow, and REASSIGNS the short_id. Without a record, the old
       // reference (e.g. TDE-42) becomes unresolvable with nothing explaining where it went.
       await recordLifecycleChange(sb, userId, {
@@ -7078,7 +7078,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       const advancedAt = new Date().toISOString()
       await sb.from('tasks').update({ output: updatedOut, status: 'done', completed_at: advancedAt }).eq('id', stepToAdvance.id)
-      // TDE-821: a guide step completed by a HUMAN is exactly the kind of provenance the history
+      // TDE-819: a guide step completed by a HUMAN is exactly the kind of provenance the history
       // exists for — it records that a person, not an agent, cleared this step and on what evidence.
       await recordLifecycleChange(sb, userId, {
         taskId: stepToAdvance.id, via: 'advance_guide', actor: tokenActor,
@@ -8230,22 +8230,17 @@ Call submit_validation_result with:
       const skipped = taskIds.length - valid.length
       if (!valid.length) return 'No valid tasks found in task_ids.'
 
-      // TDE-287 / finishes TDE-203: the verifiable contract gate. A flow cannot be
-      // finalized unless every internal handoff carries a non-trivial, human-blessed
-      // contract. Override only by explicit bypass:true — recorded so it is visibly weak.
-      const violations = contractGateViolations(valid)
-      if (violations.length && args.bypass !== true) {
-        return JSON.stringify({
-          status: 'contract_gate_failed',
-          blocked: true,
-          message: `Cannot finalize flow "${args.name}": ${violations.length} contract issue${violations.length !== 1 ? 's' : ''}. Each internal handoff needs a non-trivial, human-blessed contract on both sides. Sharpen the flagged rules, then run confirm_contract on each side, and retry. To finalize anyway against your own judgment, re-call with bypass: true (and bypass_reason) — the flow will be permanently recorded as gate-bypassed.`,
-          violations,
-        })
-      }
-      const gateBypassed = violations.length > 0 && args.bypass === true
-      const gateFields = gateBypassed
-        ? { gate_bypassed: true, gate_bypass_reason: args.bypass_reason || 'No reason given.', gate_bypassed_at: new Date().toISOString() }
-        : { gate_bypassed: false, gate_bypass_reason: null, gate_bypassed_at: null }
+      // TDE-820: naming a flow NO LONGER BLOCKS on contracts. It used to require a
+      // non-trivial, human-blessed contract on every internal handoff, which contradicted
+      // the settled definition (contracts are optional; gate only at seams) and forced
+      // legitimately-ungated flows through bypass:true — permanently mislabelling them as
+      // gate-bypassed. name_flow's job is identity, not quality enforcement; the advisory
+      // below informs without gatekeeping, and a missing blessing bites at validation time.
+      const advisories = contractAdvisories(valid)
+      const advisoryNote = renderContractAdvisory(advisories)
+      // bypass/bypass_reason are retained ONLY so old callers do not error. Nothing is
+      // bypassed any more, so a flow finalized today is never stamped gate_bypassed.
+      const gateFields = { gate_bypassed: false, gate_bypass_reason: null, gate_bypassed_at: null }
 
       // Compute short_id: use provided, or auto-generate
       let shortId: string | null = args.short_id || null
@@ -8312,10 +8307,10 @@ Call submit_validation_result with:
         const ref = t.short_id != null ? `#${t.short_id}` : t.id.slice(0, 8)
         return `  Step ${i + 1}: ${ref} — ${t.text}`
       }).join('\n')
-      const bypassNote = gateBypassed
-        ? `\n\n⚠ CONTRACT GATE BYPASSED — this flow was finalized with ${violations.length} unresolved contract issue${violations.length !== 1 ? 's' : ''} (reason: "${gateFields.gate_bypass_reason}"). It is recorded as gate-bypassed and is visibly weaker than a fully-blessed flow.`
-        : ''
-      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…  Short ID: ${shortId}${bypassNote}`
+      // TDE-820: an advisory, not a verdict. Ungated handoffs are listed as normal, not as
+      // failures, so nothing here implies the flow is weak for lacking contracts.
+      const contractNote = advisoryNote ? `\n\n── Contracts on internal handoffs ──\n${advisoryNote}` : ''
+      return `Flow "${args.name}" ${existingFlowId ? 'updated' : 'created'} — ${valid.length} task${valid.length !== 1 ? 's' : ''} assigned step numbers.${skipped ? ` (${skipped} task ID(s) not resolved, skipped)` : ''}\n\n${stepList}\n\nFlow ID: ${flowId.slice(0, 8)}…  Short ID: ${shortId}${contractNote}`
     }
 
     case 'recompute_flow_steps': {
