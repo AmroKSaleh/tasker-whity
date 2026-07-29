@@ -394,12 +394,12 @@ function AntigravityTab({ apiKey, onSwitchToKey }) {
       </p>
       <PlatformLink href="https://antigravity.google" label="antigravity.google" />
       <KeyBanner apiKey={apiKey} onSwitchToKey={onSwitchToKey} />
-      <Step n="1">Open or create <span className="font-mono text-[11px]">~/.gemini/antigravity-ide/mcp_config.json</span>.</Step>
-      <Step n="2">Add the Tasker server. Note the key is <span className="font-mono text-[11px]">httpUrl</span> — Antigravity does not use <span className="font-mono text-[11px]">url</span> or <span className="font-mono text-[11px]">serverUrl</span> like the other clients, and the server will silently fail to load if you use the wrong one:</Step>
+      <Step n="1">Open Antigravity's MCP settings and edit the config file (<span className="font-mono text-[11px]">mcp_config.json</span>, under your <span className="font-mono text-[11px]">~/.gemini/</span> folder).</Step>
+      <Step n="2">Add the Tasker server:</Step>
       <CodeSnip>{`{
   "mcpServers": {
     "tasker": {
-      "httpUrl": "${MCP_URL}",
+      "url": "${MCP_URL}",
       "headers": {
         "Authorization": "Bearer ${key}"
       }
@@ -408,9 +408,6 @@ function AntigravityTab({ apiKey, onSwitchToKey }) {
 }`}</CodeSnip>
       <Step n="3">Restart Antigravity fully (not just reload the window).</Step>
       <Step n="4">Ask the agent: <span className="font-mono text-[11px]">"List my Tasker projects"</span> to verify.</Step>
-      <p className="text-[11px] text-mute-2 mt-3 leading-relaxed">
-        If it doesn't connect, check whether your install reads <span className="font-mono">~/.gemini/config/mcp_config.json</span> instead — some versions keep the file there. The contents are identical either way.
-      </p>
     </div>
   )
 }
