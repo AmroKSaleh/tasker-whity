@@ -1358,6 +1358,7 @@ const ASSISTANT_DIRECTIVES = [
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
   'FLOW IDENTITY: After persisting a new flow (after all create_task + set_task_output + set_task_input calls), call name_flow with all task IDs and a descriptive name (e.g. "Blog Post Publication Flow"). Optionally add a context string — the goal, constraints, or background that applies to all tasks. At the start of any flow run, call get_flow_context to orient yourself. Use update_flow_context to log progress or decisions that future agents in the flow should know.',
   'RUN FLOW: When the user asks you to run, execute, or start a flow — call run_flow first (with flow_id or any task_id in the flow). Read the playbook it returns. Then self-sequence through every step in order: execute → store_artifact → complete_task → validate → handle action. Do NOT prompt the user between steps unless action=ask_human. The flow runs to completion (or human intervention) in one session.',
+  'NEVER ASK A HUMAN TO REVIEW OUTPUTS — SHOW THEM EXCEPTIONS (TDE-382 / Q7). When a person needs to review a flow, call get_flow_exceptions and present THAT. Do not walk them through steps, do not paste artifacts for approval, do not ask "does this look right?" per step. The reason is not brevity: human attention DEGRADES with volume — anyone shown 29 step outputs is rubber-stamping by the sixth, and a rubber-stamped output is WORSE than an ungated one, because it then carries confidence it never earned. So the only sustainable shape is review load that scales with problems found, not with flow length. What a human is shown: failed checks WITH the observed value (what was seen, never your claim that it passed), criteria that could not be reduced to a deterministic check (nothing verified those, so they are the human list by design), and the terminal output unconditionally (nothing downstream exists to catch it). What they are NOT shown: passing checks, step artifacts, progress. Corollary when AUTHORING a contract: every criterion you can turn into a kind=check is one the human never looks at again, on every seam, on every run — interrogate each one with "how would we actually check this?" and only record kind=judgment when the answer is genuinely nothing. The contract\'s job is to shrink the residue.',
   'STEP LIST OPEN — do not let a flow claim it finished when it only ran out of known steps (TDE-811). Some operations genuinely cannot know their full step list up front: research, investigation, debugging, anything whose next move depends on what the last one found. This is NOT a flow "type" (there are none) — it is a fact about what you currently know, and it changes during the run. WHEN AUTHORING: if you cannot list the steps to the end, pass step_list_open:true to name_flow. WHEN RUNNING: the moment you realise the remaining work is not yet knowable, call update_flow_context(task_id, step_list_open:true) — do not wait until the readout is already lying. While it is open, run_flow will NOT declare COMPLETE and will not stop early when the known steps are done; it tells you to decide and create the next step instead. CLOSE IT the moment the extent becomes known — update_flow_context(task_id, step_list_open:false) — because an open list permanently withholds the flow\'s ability to report itself finished. The denominator itself is always live (it counts current steps), so adding a step mid-run is expected and safe; what needs declaring is only whether more are coming.',
   'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. Submit two fields: (1) observed_value — the raw datum from running it: exact word count ("1,542 words"), command output ("exit 0: All 24 tests passed"), file path ("/src/index.ts found"), pattern match ("keyword \'auth\' found at line 47"). Submitting without observed_value is REJECTED by the server. (2) note — interpretation of the observed_value against the rule (e.g. "1,542 words — exceeds the 1,000-word minimum"). How to produce observed_value: word/char count → run `echo "..." | wc -w` via Bash; command check → run it via Bash, capture stdout + exit code; file existence → Glob/Read, record the path; pattern → Grep/Read and record the match. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) ALSO requires a note — the specific deficiency. This applies to the validator subagent too.',
   'SELF-CONTAINED TASK CONTEXT: When creating any task — via create_task, resolve_seed, or as flow tasks — write the detail field so a cold reader (no access to this chat, session memory, or external notes) can pick it up and act. Include: the goal/why of this specific task, any key decisions or open questions, and pointers to load-bearing context (relevant files, KB entries, prior decisions). Not a transcript dump — the minimum a cold reader needs to act. DETAIL vs MILESTONES — DIVIDE THE LABOR (do this AT CREATION, not as a fix-up pass): detail = the WHY, background, and key decisions; milestones = the ordered, checkable ACTION STEPS. Do NOT dump step-by-step actions as prose into detail — the moment a task has more than one action step, pass them as the create_task `milestones` array (one step per entry, never a checklist inside a note, no numbering — the app orders them). Reach for the milestones array by default whenever the work has discrete steps; writing the steps into detail instead is the wrong default. Applies to ALL creation paths: direct create_task calls, bootstrap_project populate phase, flow task creation, and resolve_seed outputs.',
@@ -2903,13 +2904,26 @@ const TOOLS = [
   },
   {
     name: 'get_flow_audit',
-    description: 'Full validation audit trail for a flow — who validated, when, which rules passed/failed, evidence notes, retry counts, and contract blessing status. Returns a step-by-step report across all tasks in the flow. Use for compliance review, debugging a failed run, or understanding what the flow produced and why.',
+    description: 'Full validation audit trail for a flow — who validated, when, which rules passed/failed, evidence notes, retry counts, and contract blessing status. Returns a step-by-step report across all tasks in the flow. Use for compliance review, debugging a failed run, or understanding what the flow produced and why. NOTE: this is the EVERYTHING view. To present a flow to a HUMAN for review, use get_flow_exceptions instead — showing a person every step is what makes them rubber-stamp.',
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Any task in the flow (UUID or short ID). The tool finds all other tasks in the same flow automatically.' },
       },
       required: ['task_id'],
+    },
+  },
+  {
+    name: 'get_flow_exceptions',
+    description: "THE HUMAN REVIEW SURFACE for a flow (TDE-382 / Q7). Returns ONLY what needs a person's judgment — never the flow's outputs, never passing checks, never progress. Q7 settled that human attention DEGRADES with volume: anyone shown 29 step outputs is rubber-stamping by the sixth, and a rubber-stamped output is worse than an ungated one because it then carries confidence. So review load must scale with PROBLEMS FOUND, not with flow length. Three categories come back, ordered by BLAST RADIUS (how much downstream work builds on the step, so early seams in long flows surface first): (1) FAILED CHECKS with their observed evidence — what was actually seen, not a claim; (2) JUDGMENT RESIDUE — criteria that could not be reduced to a deterministic check, which are the human's list BY DESIGN even when nothing failed; (3) the TERMINAL OUTPUT, always listed unconditionally, because no step downstream exists to catch it. Use this when a human asks 'what needs me on this flow?' or before asking anyone to sign off. Pass include_history to also pull earlier failed attempts from the durable gate history.",
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Any task in the flow (UUID or short ID).' },
+        flow_id: { type: 'string', description: 'Alternatively, the flow UUID or name.' },
+        include_history: { type: 'boolean', description: 'Also include EARLIER failed attempts from task_events (TDE-818), not just the current state of each gate. Default false. Useful when a step passed only after several tries and you want to see what it failed on first.' },
+      },
+      required: [],
     },
   },
   {
@@ -6350,6 +6364,187 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       ]
 
       return insights.filter(l => l && l !== '').join('\n')
+    }
+
+    case 'get_flow_exceptions': {
+      // TDE-382, promoted to STRUCTURAL by Q7 (TDE-799). The human review surface for a flow.
+      //
+      // Q7's finding is the whole design: human attention DEGRADES with volume — 29 step
+      // outputs means rubber-stamping by the sixth, and a rubber-stamped output is worse than
+      // an ungated one because it propagates with confidence behind it. So a human is shown
+      // EXCEPTIONS, never outputs, and the review load scales with problems found rather than
+      // with flow length. Everything this tool deliberately omits (passing checks, artifacts,
+      // progress) is omission on purpose, not missing features — get_flow_audit is the
+      // everything view when you genuinely want it.
+      let exFlow: any = null
+      let exTasks: any[] = []
+      if (args.flow_id) {
+        const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
+        const { data } = looksLikeUuid
+          ? await sb.from('flows').select('id, name, short_id, step_list_open').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+          : await sb.from('flows').select('id, name, short_id, step_list_open').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
+        exFlow = data
+      } else if (args.task_id) {
+        const anchor = await resolveTask(sb, userId, args.task_id)
+        if (!anchor) return `Task "${args.task_id}" not found.`
+        if (!anchor.flow_id) return `"${anchor.text}" is not part of a named flow. Task-level review lives on the task itself — use get_task_critique.`
+        const { data } = await sb.from('flows').select('id, name, short_id, step_list_open').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+        exFlow = data
+      } else {
+        return 'Pass task_id (any task in the flow) or flow_id.'
+      }
+      if (!exFlow) return 'Flow not found. Pass task_id or flow_id.'
+
+      const { data: exRows } = await sb.from('tasks')
+        .select('id, text, status, short_id, flow_step, input, output, executor, project:projects(prefix)')
+        .eq('flow_id', exFlow.id).eq('user_id', userId)
+      exTasks = exRows || []
+      if (!exTasks.length) return `Flow "${exFlow.name}" has no steps.`
+
+      const exById = new Map(exTasks.map((t: any) => [t.id, t]))
+      const exRef = (t: any) => t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : `#${t.short_id ?? t.id.slice(0, 8)}`
+
+      // BLAST RADIUS (Q7's placement rule: early seams in long flows first). Computable proxy =
+      // how many steps transitively depend on this one. A bad output early in a long chain
+      // contaminates everything downstream; the last step contaminates nothing but itself.
+      const childrenOf = new Map<string, string[]>()
+      for (const t of exTasks) {
+        for (const e of inputEdges(t.input)) {
+          if (!exById.has(e.source_task_id)) continue
+          if (!childrenOf.has(e.source_task_id)) childrenOf.set(e.source_task_id, [])
+          childrenOf.get(e.source_task_id)!.push(t.id)
+        }
+      }
+      const blastOf = (id: string): number => {
+        const seen = new Set<string>()
+        const queue = [...(childrenOf.get(id) || [])]
+        while (queue.length) {
+          const c = queue.shift()!
+          if (seen.has(c)) continue
+          seen.add(c)
+          for (const g of (childrenOf.get(c) || [])) if (!seen.has(g)) queue.push(g)
+        }
+        return seen.size
+      }
+
+      // TERMINAL steps: nothing inside the flow consumes them, so no downstream receiver can
+      // catch a bad output. Q7 makes this the one unconditional gate.
+      const terminalIds = new Set(exTasks.filter((t: any) => !(childrenOf.get(t.id)?.length)).map((t: any) => t.id))
+
+      type Exc = { kind: 'failed_check' | 'judgment_residue' | 'terminal'; taskId: string; blast: number; lines: string[] }
+      const excs: Exc[] = []
+
+      for (const t of exTasks) {
+        const out = (t.output && typeof t.output === 'object') ? t.output : {}
+        const ledgers = (out.validation_ledgers && typeof out.validation_ledgers === 'object') ? out.validation_ledgers : {}
+        const blast = blastOf(t.id)
+
+        // (1) FAILED CHECKS — with the observed value, which is the point. A claim that
+        // something failed is not reviewable; what was actually seen is.
+        const seenFail = new Set<string>()
+        for (const [edgeKey, entry] of Object.entries<any>(ledgers)) {
+          for (const l of (entry?.ledger || [])) {
+            if (l.status !== 'fail') continue
+            const key = `${edgeKey}:${l.rule_id}`
+            if (seenFail.has(key)) continue
+            seenFail.add(key)
+            const consumer = exById.get(edgeKey)
+            excs.push({
+              kind: 'failed_check', taskId: t.id, blast,
+              lines: [
+                `  ✗ ${exRef(t)} "${t.text}" — failed ${l.kind === 'check' ? 'check' : 'judgment rule'} [${l.severity || 'blocker'}]: ${l.label || l.rule_id}`,
+                ...(l.observed_value ? [`      observed: ${l.observed_value}`] : ['      observed: (none recorded — the check was asserted, not run)']),
+                ...(l.note ? [`      note: ${l.note}`] : []),
+                `      gate into: ${consumer ? `${exRef(consumer)} "${consumer.text}"` : edgeKey}${entry.retry_count ? ` · ${entry.retry_count} retr${entry.retry_count === 1 ? 'y' : 'ies'} so far` : ''}`,
+              ],
+            })
+          }
+        }
+
+        // (2) JUDGMENT RESIDUE — criteria no deterministic check could cover. Q7: "What cannot
+        // be reduced to a check IS the human's review list." These belong here even when
+        // nothing has failed, because nothing has actually VERIFIED them either.
+        const oc = outputContract(out)
+        const judgmentRules = (oc.rules || []).filter((r: any) => r.kind === 'judgment')
+        for (const r of judgmentRules) {
+          // Skip if a human or independent validator already ruled on this rule.
+          const ruled = Object.values<any>(ledgers).some((entry: any) =>
+            (entry?.ledger || []).some((l: any) => l.rule_id === r.id && l.status === 'pass' &&
+              l.validator && l.validator !== 'self' && l.validator !== 'unverified'))
+          if (ruled) continue
+          excs.push({
+            kind: 'judgment_residue', taskId: t.id, blast,
+            lines: [
+              `  ? ${exRef(t)} "${t.text}" — judgment criterion with no deterministic check: ${r.label || r.id}`,
+              `      rule: ${r.rule}`,
+              `      why you: this could not be reduced to a check, so no check has verified it.`,
+            ],
+          })
+        }
+
+        // (3) TERMINAL OUTPUT — unconditional, regardless of what the checks said.
+        if (terminalIds.has(t.id)) {
+          excs.push({
+            kind: 'terminal', taskId: t.id, blast,
+            lines: [
+              `  ◆ ${exRef(t)} "${t.text}" — TERMINAL output [${t.status}]${t.executor && t.executor !== 'agent' ? ` · executor: ${t.executor}` : ''}`,
+              `      why you: nothing downstream consumes this, so no later step can catch a problem in it. Q7 makes this gate unconditional.`,
+            ],
+          })
+        }
+      }
+
+      // Optional: earlier failed attempts, recoverable only since TDE-818 gave gate history a
+      // durable home. Before that, attempt N overwrote attempt N-1 and this was unanswerable.
+      const historyLines: string[] = []
+      if (args.include_history === true) {
+        const { data: evs } = await sb.from('task_events')
+          .select('task_id, summary, meta, created_at')
+          .in('task_id', exTasks.map((t: any) => t.id))
+          .in('kind', ['validation_submitted', 'review_submitted'])
+          .order('created_at', { ascending: true })
+        for (const e of (evs || [])) {
+          if (e.meta?.overall === 'valid' || e.meta?.overall === 'pass') continue
+          const t = exById.get(e.task_id)
+          historyLines.push(`  · ${t ? exRef(t) : e.task_id} — ${e.summary}${e.meta?.attempt ? '' : ''}`)
+        }
+      }
+
+      const RANK: Record<string, number> = { failed_check: 0, judgment_residue: 1, terminal: 2 }
+      excs.sort((a, b) => (b.blast - a.blast) || (RANK[a.kind] - RANK[b.kind]))
+
+      const failed = excs.filter(e => e.kind === 'failed_check')
+      const residue = excs.filter(e => e.kind === 'judgment_residue')
+      const terminal = excs.filter(e => e.kind === 'terminal')
+
+      const outLines: string[] = [
+        `# What needs you — "${exFlow.name}"${exFlow.short_id ? `  [${exFlow.short_id}]` : ''}`,
+        `${exTasks.length} step${exTasks.length !== 1 ? 's' : ''}${exFlow.step_list_open ? ' known so far (step list OPEN)' : ''} · ${excs.length} item${excs.length !== 1 ? 's' : ''} need judgment`,
+        `Ordered by blast radius — how much downstream work builds on the step. Passing checks and step outputs are deliberately NOT shown (Q7: showing everything is what causes rubber-stamping).`,
+      ]
+      if (!excs.length) {
+        outLines.push('', 'Nothing needs you. Every declared check passed, no judgment criteria are unverified, and there is no terminal step — which is itself unusual; check the flow actually has an endpoint.')
+        return outLines.join('\n')
+      }
+      if (failed.length) {
+        outLines.push('', `── FAILED CHECKS (${failed.length}) — a gate rejected something ──`)
+        failed.forEach(e => outLines.push(...e.lines))
+      }
+      if (residue.length) {
+        outLines.push('', `── JUDGMENT RESIDUE (${residue.length}) — nothing could check these for you ──`)
+        residue.forEach(e => outLines.push(...e.lines))
+      }
+      if (terminal.length) {
+        outLines.push('', `── TERMINAL OUTPUT (${terminal.length}) — unconditional gate ──`)
+        terminal.forEach(e => outLines.push(...e.lines))
+      }
+      if (args.include_history === true) {
+        outLines.push('', `── EARLIER FAILED ATTEMPTS (from durable gate history) ──`)
+        outLines.push(...(historyLines.length ? historyLines : ['  (none recorded)']))
+      } else {
+        outLines.push('', `(Pass include_history:true to also see earlier failed attempts a step has since passed.)`)
+      }
+      return outLines.join('\n')
     }
 
     case 'get_flow_audit': {
