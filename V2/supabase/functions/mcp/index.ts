@@ -1358,6 +1358,7 @@ const ASSISTANT_DIRECTIVES = [
   'VALIDATION INDEPENDENCE: Flows use TWO agents per handoff — executor (you) and validator (a separate subagent). When a task has output contract rules, call store_artifact with the VERBATIM produced content before complete_task. Then: (A) if all rules are kind=check AND you already know the rules, skip validate_output entirely — call submit_validation_result directly with your check results (1 call instead of 2); (B) if judgment rules exist, call validate_output to get the validator_agent_prompt, spawn an adversarial validator subagent via the Agent tool passing that prompt unmodified — the subagent starts from FAIL prior and calls submit_validation_result with validator="independent-subagent". You do NOT evaluate judgment rules yourself. MULTI-VOTE: for high-stakes flows with multiple judgment blockers, spawn 3 independent validators and only accept pass if majority (2 of 3) agree — split = fail, surface to human.',
   'FLOW IDENTITY: After persisting a new flow (after all create_task + set_task_output + set_task_input calls), call name_flow with all task IDs and a descriptive name (e.g. "Blog Post Publication Flow"). Optionally add a context string — the goal, constraints, or background that applies to all tasks. At the start of any flow run, call get_flow_context to orient yourself. Use update_flow_context to log progress or decisions that future agents in the flow should know.',
   'RUN FLOW: When the user asks you to run, execute, or start a flow — call run_flow first (with flow_id or any task_id in the flow). Read the playbook it returns. Then self-sequence through every step in order: execute → store_artifact → complete_task → validate → handle action. Do NOT prompt the user between steps unless action=ask_human. The flow runs to completion (or human intervention) in one session.',
+  'STEP LIST OPEN — do not let a flow claim it finished when it only ran out of known steps (TDE-811). Some operations genuinely cannot know their full step list up front: research, investigation, debugging, anything whose next move depends on what the last one found. This is NOT a flow "type" (there are none) — it is a fact about what you currently know, and it changes during the run. WHEN AUTHORING: if you cannot list the steps to the end, pass step_list_open:true to name_flow. WHEN RUNNING: the moment you realise the remaining work is not yet knowable, call update_flow_context(task_id, step_list_open:true) — do not wait until the readout is already lying. While it is open, run_flow will NOT declare COMPLETE and will not stop early when the known steps are done; it tells you to decide and create the next step instead. CLOSE IT the moment the extent becomes known — update_flow_context(task_id, step_list_open:false) — because an open list permanently withholds the flow\'s ability to report itself finished. The denominator itself is always live (it counts current steps), so adding a step mid-run is expected and safe; what needs declaring is only whether more are coming.',
   'CHECK RULE EXECUTION: For kind=check rules, ACTUALLY RUN the check — do NOT assert or claim. Submit two fields: (1) observed_value — the raw datum from running it: exact word count ("1,542 words"), command output ("exit 0: All 24 tests passed"), file path ("/src/index.ts found"), pattern match ("keyword \'auth\' found at line 47"). Submitting without observed_value is REJECTED by the server. (2) note — interpretation of the observed_value against the rule (e.g. "1,542 words — exceeds the 1,000-word minimum"). How to produce observed_value: word/char count → run `echo "..." | wc -w` via Bash; command check → run it via Bash, capture stdout + exit code; file existence → Glob/Read, record the path; pattern → Grep/Read and record the match. FAIL EVIDENCE: any failing rule (kind=judgment OR kind=check) ALSO requires a note — the specific deficiency. This applies to the validator subagent too.',
   'SELF-CONTAINED TASK CONTEXT: When creating any task — via create_task, resolve_seed, or as flow tasks — write the detail field so a cold reader (no access to this chat, session memory, or external notes) can pick it up and act. Include: the goal/why of this specific task, any key decisions or open questions, and pointers to load-bearing context (relevant files, KB entries, prior decisions). Not a transcript dump — the minimum a cold reader needs to act. DETAIL vs MILESTONES — DIVIDE THE LABOR (do this AT CREATION, not as a fix-up pass): detail = the WHY, background, and key decisions; milestones = the ordered, checkable ACTION STEPS. Do NOT dump step-by-step actions as prose into detail — the moment a task has more than one action step, pass them as the create_task `milestones` array (one step per entry, never a checklist inside a note, no numbering — the app orders them). Reach for the milestones array by default whenever the work has discrete steps; writing the steps into detail instead is the wrong default. Applies to ALL creation paths: direct create_task calls, bootstrap_project populate phase, flow task creation, and resolve_seed outputs.',
   'RELAY MODE: When the user says they want to RELAY / HAND OFF / SHARE a task with someone else (a teammate, another agent), enter relay mode. (1) Announce "[Recording context for the task]" so the user knows you are now capturing hand-off context, then keep working with them to surface the WHY behind the task. (2) Pass relay_context on create_task (or update_task for an existing task) — a CURATED rationale layer, NOT a transcript dump and NOT a duplicate of detail. detail = the distilled what/how-to-act (self-contained, as always); relay_context = the hand-off layer that removes the assignee\'s need to come back and ask: who it is going to (free text, e.g. "to: Sara (backend)"), the key decision(s) and WHY, approaches considered and rejected and why-not, intent / how to treat the task, open questions, watch-outs. Distill it the same way you distill detail — capture the reasoning, drop the chatter. The recipient is free text for now (no team-member directory yet); auto-routing to real members is a deferred follow-up.',
@@ -2933,6 +2934,7 @@ const TOOLS = [
         task_ids: { type: 'array', items: { type: 'string' }, description: 'All task IDs in the flow (UUIDs or short IDs).' },
         context: { type: 'string', description: 'Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow.' },
         short_id: { type: 'string', description: 'Optional custom short ID (e.g. "BKT-F3"). Must be unique across all your flows. Auto-generated if omitted.' },
+        step_list_open: { type: 'boolean', description: 'TDE-811: pass true when you do NOT yet know the flow\'s full step list — the operation discovers its next step as it goes (research, investigation). The flow then never reports itself complete just because the known steps ran out, and its progress readouts say more steps are expected. Default false (the steps you are naming are the whole flow). Changeable later via update_flow_context.' },
         bypass: { type: 'boolean', description: 'DEPRECATED (TDE-820) — ignored. Contracts no longer block finalization, so there is nothing to bypass. Accepted only so older callers do not error; passing it does NOT mark the flow gate-bypassed.' },
         bypass_reason: { type: 'string', description: 'DEPRECATED (TDE-820) — ignored, kept for backward compatibility.' },
       },
@@ -2952,7 +2954,7 @@ const TOOLS = [
   },
   {
     name: 'update_flow_context',
-    description: 'RENAME a flow (pass name), update its shared context bag (pass context), and/or set/change its short ID — all via any task ID in the flow. This is the canonical way to rename an existing flow: no need to re-run name_flow with the full task list.',
+    description: 'RENAME a flow (pass name), update its shared context bag (pass context), set/change its short ID, and/or declare whether its STEP LIST IS STILL OPEN (step_list_open) — all via any task ID in the flow. This is the canonical way to rename an existing flow: no need to re-run name_flow with the full task list.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2960,6 +2962,7 @@ const TOOLS = [
         context: { type: 'string', description: 'New shared context (replaces existing)' },
         name: { type: 'string', description: 'Optional: rename the flow' },
         short_id: { type: 'string', description: 'Optional: set or change the flow short ID (e.g. "BKT-F2"). Must be unique across all your flows.' },
+        step_list_open: { type: 'boolean', description: 'TDE-811: true = this flow does NOT yet know its full step list (it discovers the next step as it goes — research and investigation are like this). While true, progress readouts say "more steps expected" and the flow will NOT report itself complete when the currently-known steps run out, because that is a pause, not the end. Set false once the extent is known. Settable in BOTH directions mid-run — it is a fact about what you currently know, not a category of flow.' },
       },
       required: ['task_id'],
     },
@@ -6484,7 +6487,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: flows } = await sb.from('flows')
-        .select('id, name, short_id, created_at')
+        .select('id, name, short_id, created_at, step_list_open')
         .eq('project_id', project.id)
         .eq('user_id', userId)
         .order('created_at', { ascending: false })
@@ -6501,10 +6504,13 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const total = ts.length
         const done = ts.filter((t: any) => t.status === 'done').length
         const inProg = ts.filter((t: any) => t.status === 'in_progress').length
-        const overall = done === total && total > 0 ? 'done' : inProg > 0 || done > 0 ? 'in_progress' : 'pending'
+        // TDE-811: an open step list must not roll up to 'done' just because every step
+        // discovered so far is finished — that is a pause, not completion.
+        const listOpen = flow.step_list_open === true
+        const overall = done === total && total > 0 ? (listOpen ? 'in_progress' : 'done') : inProg > 0 || done > 0 ? 'in_progress' : 'pending'
         lines.push(flow.short_id ? `${flow.name}  [${flow.short_id}]` : flow.name)
         lines.push(`  id: ${flow.id}`)
-        lines.push(`  steps: ${total} · ${done}/${total} done · ${overall}`)
+        lines.push(`  steps: ${total}${listOpen ? ' known so far' : ''} · ${done}/${total} done · ${overall}${listOpen ? ' · step list OPEN (more steps expected)' : ''}`)
         if (ts.length) {
           const stepLines = ts.map((t: any) => {
             const ref = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id
@@ -6707,11 +6713,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
         let flow: any = null
         if (looksLikeUuid) {
-          const { data } = await sb.from('flows').select('id, name, short_id, context, project_id').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+          const { data } = await sb.from('flows').select('id, name, short_id, context, project_id, step_list_open').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
           flow = data
         } else {
           // Name lookup — optionally scoped to a project
-          let q = sb.from('flows').select('id, name, short_id, context, project_id').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
+          let q = sb.from('flows').select('id, name, short_id, context, project_id, step_list_open').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
           if (args.project_id) {
             const p = await resolveProject(sb, userId, args.project_id)
             if (p) q = q.eq('project_id', p.id)
@@ -6734,7 +6740,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
         // If the anchor has a flow_id, fetch the whole named flow
         if (anchor.flow_id) {
-          const { data: flow } = await sb.from('flows').select('id, name, short_id, context, project_id').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+          const { data: flow } = await sb.from('flows').select('id, name, short_id, context, project_id, step_list_open').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
           flowRecord = flow || null
           const { data: tasks } = await sb.from('tasks')
             .select('id, text, status, priority, short_id, flow_step, input, output, sort_order, project_id, executor, human_guidance, project:projects(name, prefix)')
@@ -6825,14 +6831,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       const completedCount = sorted.filter((t: any) => t.status === 'done').length
       const pendingFrom = sorted.findIndex((t: any) => t.status !== 'done')
-      const allDone = completedCount === sorted.length
+      // TDE-811: "every known step is done" is NOT the same as "the flow is finished". A flow
+      // whose step list is still open discovers its next step as it goes, so this condition is
+      // true at every pause — declaring COMPLETE there is a false terminal verdict, and the
+      // early return below made an agent stop working on it.
+      const stepListOpen = flowRecord?.step_list_open === true
+      const allKnownDone = completedCount === sorted.length
+      const allDone = allKnownDone && !stepListOpen
 
       const lines: string[] = []
       lines.push(flowRecord ? `Flow: "${flowRecord.name}"${flowRecord.short_id ? `  [${flowRecord.short_id}]` : ''}` : `Flow (unnamed — call name_flow to register it)`)
       if (flowRecord?.context) lines.push(`Context: ${flowRecord.context}`)
-      lines.push(`Progress: ${completedCount}/${sorted.length} steps complete`)
+      lines.push(`Progress: ${completedCount}/${sorted.length} steps ${stepListOpen ? 'done — step list still OPEN, more steps expected' : 'complete'}`)
+      if (allKnownDone && stepListOpen) {
+        lines.push(`\nStatus: ALL KNOWN STEPS DONE — but this flow's step list is still open, so it is NOT finished. Decide the next step and create it (or close the list with update_flow_context(step_list_open: false) if the operation is actually over).`)
+        lines.push(`\nSteps so far:`)
+        sorted.forEach((t: any, i: number) => {
+          lines.push(`  ${statusIcon(t.status)}  ${stepLabel(t, i)} — ${t.text}`)
+        })
+        return lines.join('\n')
+      }
       if (allDone) {
-        lines.push(`\nStatus: COMPLETE — all steps done.`)
+        lines.push(`\nStatus: COMPLETE — all ${sorted.length} steps done.`)
         lines.push(`\nSteps:`)
         sorted.forEach((t: any, i: number) => {
           lines.push(`  ${statusIcon(t.status)}  ${stepLabel(t, i)} — ${t.text}`)
@@ -6955,16 +6975,16 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         if (args.flow_id) {
           const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
           if (looksLikeUuid) {
-            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor, step_list_open').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
             guideFlowRecord = data
           } else {
-            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
+            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor, step_list_open').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
             guideFlowRecord = data
           }
         } else if (args.task_id) {
           const anchor = await resolveTask(sb, userId, args.task_id)
           if (anchor?.flow_id) {
-            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
+            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor, step_list_open').eq('id', anchor.flow_id).eq('user_id', userId).maybeSingle()
             guideFlowRecord = data
           }
         }
@@ -7019,7 +7039,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const lines: string[] = []
         lines.push(`Guide Mode — "${guideFlowRecord.name}"`)
         lines.push(`Cursor: ${guideStepLabel(currentStep)} [${exLabel}] — ${currentStep.text}`)
-        lines.push(`Progress: ${guideSorted.filter((t: any) => t.status === 'done').length}/${guideSorted.length} steps done`)
+        // TDE-811: name the denominator honestly when the step list is still open.
+        lines.push(`Progress: ${guideSorted.filter((t: any) => t.status === 'done').length}/${guideSorted.length} steps done${guideFlowRecord.step_list_open === true ? ' — step list OPEN, more steps expected' : ''}`)
         lines.push('')
         lines.push('── CURRENT STEP ────────────────────────────────────')
         if (currentStep.human_guidance) {
@@ -7115,7 +7136,13 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       } else {
         const remaining = guideSorted.filter((t: any) => t.status !== 'done' && t.id !== stepToAdvance.id)
         if (remaining.length === 0) {
-          advLines.push('Flow complete — all steps done.')
+          // TDE-811: an open step list means this is a pause, not the end. Saying "complete"
+          // here is the false terminal verdict — for discovery-shaped work it fires every time.
+          if (guideFlowRecord.step_list_open === true) {
+            advLines.push('All KNOWN steps are done — but this flow\'s step list is still open, so it is not finished. Decide the next step and create it, or close the list with update_flow_context(step_list_open: false) if the operation is genuinely over.')
+          } else {
+            advLines.push('Flow complete — all steps done.')
+          }
         } else {
           advLines.push(`Remaining steps: ${remaining.map((t: any) => `${guideStepLabel(t)} (${t.executor || 'agent'})`).join(', ')}`)
         }
@@ -8269,11 +8296,14 @@ Call submit_validation_result with:
       // Reuse existing flow if any task already belongs to one
       const existingFlowId = valid.find((t: any) => t.flow_id)?.flow_id || null
       let flowId: string
+      // TDE-811: only write step_list_open when the caller actually said something, so
+      // re-naming an existing flow does not silently slam an open step list shut.
+      const stepListField = args.step_list_open !== undefined ? { step_list_open: args.step_list_open === true } : {}
       if (existingFlowId) {
-        await sb.from('flows').update({ name: args.name, context: args.context || null, short_id: shortId, ...gateFields, updated_at: new Date().toISOString() }).eq('id', existingFlowId).eq('user_id', userId)
+        await sb.from('flows').update({ name: args.name, context: args.context || null, short_id: shortId, ...gateFields, ...stepListField, updated_at: new Date().toISOString() }).eq('id', existingFlowId).eq('user_id', userId)
         flowId = existingFlowId
       } else {
-        const { data: flow, error } = await sb.from('flows').insert({ user_id: userId, project_id: project.id, name: args.name, context: args.context || null, short_id: shortId, ...gateFields }).select('id').single()
+        const { data: flow, error } = await sb.from('flows').insert({ user_id: userId, project_id: project.id, name: args.name, context: args.context || null, short_id: shortId, ...gateFields, ...stepListField }).select('id').single()
         if (error || !flow) throw new Error(error?.message || 'Failed to create flow')
         flowId = flow.id
       }
@@ -8396,12 +8426,22 @@ Call submit_validation_result with:
       if (args.context !== undefined) updates.context = args.context
       if (args.name) updates.name = args.name
       if (args.short_id !== undefined) updates.short_id = args.short_id || null
+      // TDE-811: the step-list-open switch. Mutable in BOTH directions during a run — open it
+      // when you realise the operation discovers its own next step, close it when the extent is
+      // finally known. Not a flow type: nothing branches on it except whether the system is
+      // entitled to call the flow finished.
+      if (args.step_list_open !== undefined) updates.step_list_open = args.step_list_open === true
 
       await sb.from('flows').update(updates).eq('id', task.flow_id).eq('user_id', userId)
       const parts = []
       if (args.name) parts.push(`Renamed to "${args.name}".`)
       if (args.context !== undefined) parts.push('Context saved.')
       if (args.short_id !== undefined) parts.push(args.short_id ? `Short ID set to "${args.short_id}".` : 'Short ID cleared.')
+      if (args.step_list_open !== undefined) {
+        parts.push(args.step_list_open === true
+          ? 'Step list OPEN — progress readouts will say more steps are expected, and the flow will not report itself complete when the known steps run out.'
+          : 'Step list CLOSED — the known steps are the whole flow, so finishing them completes it.')
+      }
       return `Flow updated.${parts.length ? ' ' + parts.join(' ') : ''}`
     }
 
