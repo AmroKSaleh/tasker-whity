@@ -19,6 +19,7 @@ const PLATFORMS = [
   { id: 'claude-code',     label: 'Claude Code' },
   { id: 'cursor',          label: 'Cursor' },
   { id: 'windsurf',        label: 'Windsurf' },
+  { id: 'antigravity',     label: 'Antigravity' },
   { id: 'roo-code',        label: 'Roo Code' },
   { id: 'claude-ai',       label: 'Claude.ai' },
   { id: 'chatgpt',         label: 'ChatGPT' },
@@ -384,6 +385,36 @@ function WindsurfTab({ apiKey, onSwitchToKey }) {
   )
 }
 
+function AntigravityTab({ apiKey, onSwitchToKey }) {
+  const key = apiKey || 'YOUR_API_KEY'
+  return (
+    <div>
+      <p className="text-[12px] text-mute-2 mb-3 leading-relaxed">
+        Use Tasker in Google's Antigravity IDE via MCP — the agent reads and writes your durable task state directly.
+      </p>
+      <PlatformLink href="https://antigravity.google" label="antigravity.google" />
+      <KeyBanner apiKey={apiKey} onSwitchToKey={onSwitchToKey} />
+      <Step n="1">Open or create <span className="font-mono text-[11px]">~/.gemini/antigravity-ide/mcp_config.json</span>.</Step>
+      <Step n="2">Add the Tasker server. Note the key is <span className="font-mono text-[11px]">httpUrl</span> — Antigravity does not use <span className="font-mono text-[11px]">url</span> or <span className="font-mono text-[11px]">serverUrl</span> like the other clients, and the server will silently fail to load if you use the wrong one:</Step>
+      <CodeSnip>{`{
+  "mcpServers": {
+    "tasker": {
+      "httpUrl": "${MCP_URL}",
+      "headers": {
+        "Authorization": "Bearer ${key}"
+      }
+    }
+  }
+}`}</CodeSnip>
+      <Step n="3">Restart Antigravity fully (not just reload the window).</Step>
+      <Step n="4">Ask the agent: <span className="font-mono text-[11px]">"List my Tasker projects"</span> to verify.</Step>
+      <p className="text-[11px] text-mute-2 mt-3 leading-relaxed">
+        If it doesn't connect, check whether your install reads <span className="font-mono">~/.gemini/config/mcp_config.json</span> instead — some versions keep the file there. The contents are identical either way.
+      </p>
+    </div>
+  )
+}
+
 function RooCodeTab({ apiKey, onSwitchToKey }) {
   const key = apiKey || 'YOUR_API_KEY'
   return (
@@ -610,6 +641,7 @@ export default function SettingsPage() {
     'claude-code':    <ClaudeCodeTab apiKey={taskerKey} onKeyChange={setTaskerKey} />,
     'cursor':         <CursorTab {...tabProps} />,
     'windsurf':       <WindsurfTab {...tabProps} />,
+    'antigravity':    <AntigravityTab {...tabProps} />,
     'roo-code':       <RooCodeTab {...tabProps} />,
     'claude-ai':      <ClaudeAiTab {...tabProps} />,
     'chatgpt':        <ChatGPTTab {...tabProps} />,
