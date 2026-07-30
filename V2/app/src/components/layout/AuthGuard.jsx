@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabase'
 import { syncSettingsFromSupabase } from '../../lib/aiSettings'
+import { syncBrowserTimezone } from '../../lib/timezone'
 import { saveGitHubToken } from '../../lib/github'
 
 export default function AuthGuard({ children }) {
@@ -21,6 +22,7 @@ export default function AuthGuard({ children }) {
         else {
           captureGitHubToken(session).catch(() => {})
           syncSettingsFromSupabase().catch(() => {})
+          syncBrowserTimezone().catch(() => {})
           // A pending org invite survives any login method (incl. OAuth, which lands on /dashboard).
           const pendingInvite = localStorage.getItem('tasker.pendingInvite')
           if (pendingInvite) {

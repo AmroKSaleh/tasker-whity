@@ -6046,6 +6046,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           settings_summary,
           environments,
           active_environment_id,
+          // The web app captures the browser's zone on login, but an MCP-only user may never
+          // open it — and the server cannot infer a timezone from an HTTP request.
+          timezone_note: instructions.timezone ? undefined
+            : 'No timezone saved, so task timestamps render in UTC. If you can read this machine\'s timezone (e.g. a shell command), call update_ai_instructions(timezone: "<IANA name, e.g. Asia/Amman>") once. If you cannot, ask the user rather than guessing.',
           environment_note: environments.length
             ? 'Environments partition the user\'s projects (single-user; Personal / Work / Learning …). The active one is the DEFAULT for create_project when environment_id is omitted — you may still pass environment_id explicitly. Do NOT silently scope reads to it: list_projects shows every Environment unless the caller filters. The web app owns switching the active Environment (MCP only reads it).'
             : undefined,
@@ -6145,6 +6149,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           catch { return `"${raw}" is not a timezone this server can render. Use an IANA name (e.g. "Asia/Amman") or a fixed UTC offset (e.g. "+03:00").` }
         }
         updates.timezone = raw
+        // Marks this as a deliberate choice so the web app's browser detection stops
+        // correcting it (see app/src/lib/timezone.js).
+        updates.timezone_source = 'user'
       }
 
       const { data: existing } = await sb.from('user_settings').select('ai_instructions').eq('user_id', userId).maybeSingle()
