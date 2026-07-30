@@ -29,14 +29,44 @@ export default function OAuthAuthorizePage() {
   const [loading, setLoading] = useState(true)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState('')
+  const [clientName, setClientName] = useState('')
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       setSession(session)
-      setLoading(false)
       if (!session) {
         navigate(`/login?next=${encodeURIComponent(location.pathname + location.search)}`, { replace: true })
+        return
       }
+      if (!clientId) {
+        setError('Missing client_id')
+        setLoading(false)
+        return
+      }
+      supabase.from('oauth_clients')
+        .select('client_name, redirect_uris')
+        .eq('client_id', clientId)
+        .maybeSingle()
+        .then(({ data: client, error: dbErr }) => {
+          if (dbErr || !client) {
+            setError('Invalid client_id')
+            setLoading(false)
+            return
+          }
+          if (!redirectUri) {
+            setError('Missing redirect_uri')
+            setLoading(false)
+            return
+          }
+          const isAllowed = Array.isArray(client.redirect_uris) && client.redirect_uris.includes(redirectUri)
+          if (!isAllowed) {
+            setError('The redirect URI is not registered for this client.')
+            setLoading(false)
+            return
+          }
+          setClientName(client.client_name || clientLabel(clientId))
+          setLoading(false)
+        })
     })
   }, [])
 
@@ -81,7 +111,7 @@ export default function OAuthAuthorizePage() {
   if (loading) return null
   if (!session) return null
 
-  const appName = clientLabel(clientId)
+  const appName = clientName || clientLabel(clientId)
 
   return (
     <div className="min-h-screen bg-paper flex flex-col items-center justify-center p-6">
@@ -122,25 +152,33 @@ export default function OAuthAuthorizePage() {
           </div>
 
           {/* Actions */}
-          <div className="px-6 py-4 flex gap-3">
-            <button
-              onClick={handleDeny}
-              disabled={working}
-              className="flex-1 h-9 border border-line rounded-lg text-[13px] font-semibold text-mute hover:text-ink hover:border-ink-2 transition-colors disabled:opacity-40"
-            >
-              Deny
-            </button>
-            <button
-              onClick={handleApprove}
-              disabled={working}
-              className="flex-1 h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors disabled:opacity-40"
-            >
-              {working ? 'Connecting…' : 'Allow'}
-            </button>
-          </div>
-
-          {error && (
-            <p className="px-6 pb-4 text-[12px] text-red-500">{error}</p>
+          {error ? (
+            <div className="px-6 py-4 flex flex-col gap-2">
+              <p className="text-[12px] text-red-500 font-medium">{error}</p>
+              <button
+                onClick={() => navigate('/home')}
+                className="w-full h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors"
+              >
+                Go back to Tasker
+              </button>
+            </div>
+          ) : (
+            <div className="px-6 py-4 flex gap-3">
+              <button
+                onClick={handleDeny}
+                disabled={working}
+                className="flex-1 h-9 border border-line rounded-lg text-[13px] font-semibold text-mute hover:text-ink hover:border-ink-2 transition-colors disabled:opacity-40"
+              >
+                Deny
+              </button>
+              <button
+                onClick={handleApprove}
+                disabled={working}
+                className="flex-1 h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors disabled:opacity-40"
+              >
+                {working ? 'Connecting…' : 'Allow'}
+              </button>
+            </div>
           )}
         </div>
 
