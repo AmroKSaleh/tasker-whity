@@ -1,8 +1,8 @@
 const PRIORITY_CONFIG = {
-  rush:   { bg: '#111111', color: '#ffffff', border: '1px solid #111111',        label: 'RUSH' },
-  high:   { bg: '#444444', color: '#ffffff', border: '1px solid #444444',        label: 'HIGH' },
-  medium: { bg: '#ffffff', color: '#111111', border: '1px solid #111111',        label: 'MED'  },
-  low:    { bg: '#ffffff', color: '#9a9a9a', border: '1px dashed #111111',       label: 'LOW'  },
+  rush:   { bg: 'var(--color-ink)',   color: 'var(--color-paper)', border: 'none',                                       label: 'RUSH' },
+  high:   { bg: 'var(--color-ink-2)', color: 'var(--color-paper)', border: 'none',                                       label: 'HIGH' },
+  medium: { bg: 'transparent',        color: 'var(--color-ink)',   border: '1px solid var(--color-ink)',                 label: 'MED'  },
+  low:    { bg: 'transparent',        color: 'var(--color-mute-2)', border: '1px dashed var(--color-mute-2)',            label: 'LOW'  },
 }
 
 export default function Chip({ priority, children, className = '', light = false, ...props }) {
@@ -11,10 +11,10 @@ export default function Chip({ priority, children, className = '', light = false
     return (
       <span
         style={{
-          background: light ? 'rgba(255,255,255,0.15)' : c.bg,
-          color: light ? '#ffffff' : c.color,
-          border: light ? '1px solid rgba(255,255,255,0.3)' : c.border,
-          fontFamily: 'inherit',
+          background: light ? 'rgba(251,250,246,0.15)' : c.bg,
+          color: light ? 'var(--color-paper)' : c.color,
+          border: light ? '1px solid rgba(251,250,246,0.3)' : c.border,
+          fontFamily: '"JetBrains Mono", ui-monospace, monospace',
           fontSize: '9px',
           fontWeight: 600,
           letterSpacing: '0.6px',
@@ -24,9 +24,8 @@ export default function Chip({ priority, children, className = '', light = false
           alignItems: 'center',
           textTransform: 'uppercase',
           whiteSpace: 'nowrap',
-          fontVariantNumeric: 'tabular-nums',
         }}
-        className={`font-mono ${className}`}
+        className={className}
         {...props}
       >
         {c.label}
@@ -36,7 +35,7 @@ export default function Chip({ priority, children, className = '', light = false
 
   return (
     <span
-      className={`inline-flex items-center px-2 h-6 rounded-sm border text-[11px] font-medium transition-all duration-150 cursor-pointer select-none ${className}`}
+      className={`inline-flex items-center px-2 h-6 rounded-sm border border-line text-[11px] font-medium text-mute cursor-pointer select-none hover:border-ink hover:text-ink transition-colors duration-150 ${className}`}
       {...props}
     >
       {children}

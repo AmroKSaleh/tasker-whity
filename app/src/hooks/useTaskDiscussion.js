@@ -47,9 +47,10 @@ export function useTaskDiscussion(taskId) {
 
   async function saveMessages(updated) {
     if (!recordId.current) return
+    const capped = updated.length > 15 ? updated.slice(-15) : updated
     await supabase
       .from('task_discussions')
-      .update({ messages: updated, updated_at: new Date().toISOString() })
+      .update({ messages: capped, updated_at: new Date().toISOString() })
       .eq('id', recordId.current)
   }
 
@@ -58,6 +59,14 @@ export function useTaskDiscussion(taskId) {
     await supabase
       .from('task_discussions')
       .update({ steps: newSteps, checked_steps: newCheckedSteps, reason: newReason, updated_at: new Date().toISOString() })
+      .eq('id', recordId.current)
+  }
+
+  async function saveSteps(newSteps, newCheckedSteps) {
+    if (!recordId.current) return
+    await supabase
+      .from('task_discussions')
+      .update({ steps: newSteps, checked_steps: newCheckedSteps, updated_at: new Date().toISOString() })
       .eq('id', recordId.current)
   }
 
@@ -74,7 +83,8 @@ export function useTaskDiscussion(taskId) {
     steps, setSteps,
     checkedSteps, setCheckedSteps,
     reason, setReason,
-    saveStepsAndReason, saveCheckedSteps,
+    saveSteps, saveStepsAndReason, saveCheckedSteps,
     loading,
+    reload: load,
   }
 }
