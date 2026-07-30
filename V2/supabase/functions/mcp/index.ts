@@ -49,6 +49,21 @@ function rankTasks(tasks: any[]): any[] {
     .map(({ t, score }) => ({ ...t, _score: score }))
 }
 
+// ── Timestamps ───────────────────────────────────────────────
+// A bare date makes the reader do arithmetic to find out whether it is stale, so
+// "last edited" always ships with its distance from now.
+function agoLabel(iso: string | null | undefined, now = Date.now()): string | null {
+  if (!iso) return null
+  const then = new Date(iso).getTime()
+  if (!Number.isFinite(then)) return null
+  const days = Math.floor((now - then) / 86400000)
+  if (days <= 0) return 'today'
+  if (days === 1) return 'yesterday'
+  if (days < 30) return `${days}d ago`
+  const months = Math.floor(days / 30)
+  return months < 12 ? `${months}mo ago` : `${Math.floor(days / 365)}y ago`
+}
+
 // ── Auth ─────────────────────────────────────────────────────
 async function hashKey(raw: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
@@ -1747,7 +1762,7 @@ const TOOLS = [
   },
   {
     name: 'list_tasks',
-    description: 'List tasks. Flow steps are NOT tasks and are excluded (TDE-320) — a task that belongs to a named flow is a STEP, listed only via the Flows tools (list_flows / get_flow_context), never here. Done tasks are also excluded by default — pass status: "all" to include them. If no project_id is provided, the user\'s default project is used when set; otherwise this requires confirmed: true to list across ALL projects. include_flow_steps is an explicit user override only: set it solely when the USER has explicitly asked to see flow steps here as if they were normal tasks — never flip it on your own initiative.',
+    description: 'List tasks. Each line carries the date the task was added and, when it differs, the date it was last edited. To answer "what changed lately / when was anything last touched", pass sort: "recently_updated" — do NOT call get_task on candidates to compare timestamps. Flow steps are NOT tasks and are excluded (TDE-320) — a task that belongs to a named flow is a STEP, listed only via the Flows tools (list_flows / get_flow_context), never here. Done tasks are also excluded by default — pass status: "all" to include them. If no project_id is provided, the user\'s default project is used when set; otherwise this requires confirmed: true to list across ALL projects. include_flow_steps is an explicit user override only: set it solely when the USER has explicitly asked to see flow steps here as if they were normal tasks — never flip it on your own initiative.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1757,6 +1772,7 @@ const TOOLS = [
         confirmed:  { type: 'boolean', description: 'Set to true to list tasks across ALL projects (only needed when project_id is omitted AND no default project is set).' },
         include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks — TDE-320). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own.' },
         phase_id:   { type: 'string', description: 'TDE-804: show only tasks in this phase (UUID, slug, or exact name). Pass "unphased" to list only tasks belonging to NO phase. Requires project_id.' },
+        sort:       { type: 'string', enum: ['sorting_order', 'recently_updated'], description: 'Ordering. Default "sorting_order" (the board order). "recently_updated" sorts by last edit, newest first — use it to see what changed most recently.' },
       },
       required: [],
     },
@@ -1889,7 +1905,7 @@ const TOOLS = [
   },
   {
     name: 'get_task',
-    description: 'Get full details for a single task: text, context, priority, status, due date, section, project, and milestones. Call this when you are about to START working on a task — a pending task is automatically set to in_progress (pass peek: true to inspect without starting). When you finish, mark it done with complete_task only if the work is genuinely complete; otherwise leave it in_progress.',
+    description: 'Get full details for a single task: text, context, priority, status, due date, section, project, milestones, and when it was created / last edited. Call this when you are about to START working on a task — a pending task is automatically set to in_progress (pass peek: true to inspect without starting). The auto-start does not count as an edit, so reading a task never changes its last-edited time. When you finish, mark it done with complete_task only if the work is genuinely complete; otherwise leave it in_progress.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3980,7 +3996,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'list_tasks': {
       const { project_id, section_id, status, confirmed, include_flow_steps } = args
-      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId)
+      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, updated_at, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId)
       if (project_id) {
         const p = await resolveProject(sb, userId, project_id)
         if (p) query = query.eq('project_id', p.id)
@@ -4014,19 +4030,29 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (status === 'all')   { /* no filter */ }
       else if (status)        query = query.eq('status', status)
       else                    query = query.neq('status', 'done')
-      const { data } = await query.order('sort_order')
+      // "What changed lately?" is a recency question, and answering it by sorting order
+      // means reading the whole list and eyeballing dates. Newest edit first instead.
+      const byRecency = args.sort === 'recently_updated'
+      const { data } = byRecency
+        ? await query.order('updated_at', { ascending: false })
+        : await query.order('sort_order')
       if (!data?.length) return phaseLabel ? `No tasks found in phase "${phaseLabel}".` : 'No tasks found.'
       const body = data.map((t: any) => {
         const shortRef = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id
         const sectionName = t.section?.name ?? 'no section'
         const added = t.created_at ? t.created_at.slice(0, 10) : null
+        // Only when it differs from the creation date — an untouched task would otherwise
+        // spend a second date repeating its first (cf. the token economy in TDE-371).
+        const editedOn = t.updated_at ? t.updated_at.slice(0, 10) : null
+        const edited = editedOn && editedOn !== added ? editedOn : null
         // Phase is omitted when the list is already scoped to one — it would repeat on every
         // line for no information (cf. the token-economy work in TDE-371).
         const phaseBadge = !phaseLabel && t.phase?.name ? t.phase.name : null
         const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.status !== 'pending' ? t.status : null, phaseBadge].filter(Boolean).join(', ')
-        return `${shortRef} — ${t.text}${badges ? ` [${badges}]` : ''} · ${sectionName}${added ? ` · added ${added}` : ''}`
+        return `${shortRef} — ${t.text}${badges ? ` [${badges}]` : ''} · ${sectionName}${added ? ` · added ${added}` : ''}${edited ? ` · edited ${edited}` : ''}`
       }).join('\n')
-      return phaseLabel ? `Phase: ${phaseLabel}\n\n${body}` : body
+      const header = [phaseLabel ? `Phase: ${phaseLabel}` : null, byRecency ? 'Sorted by most recently edited.' : null].filter(Boolean).join('\n')
+      return header ? `${header}\n\n${body}` : body
     }
 
     case 'create_task': {
@@ -4463,7 +4489,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           }
         }
         if (!flowWarning) {
-          await sb.from('tasks').update({ status: 'in_progress' }).eq('id', full.id)
+          // A pickup is not an edit. Route the flip through autostart_task so the touch
+          // trigger leaves updated_at alone (migration 20260730120000) — otherwise simply
+          // READING a task would overwrite the "Last edited" time reported below, and a
+          // survey of N tasks would restamp all N as edited-just-now.
+          const { error: autostartErr } = await sb.rpc('autostart_task', { p_task_id: full.id, p_user_id: userId })
+          // The function deploy and the migration land separately. If the RPC is not there
+          // yet, still perform the flip — reporting a start that never happened is a worse
+          // failure than losing the updated_at preservation for one call.
+          if (autostartErr) await sb.from('tasks').update({ status: 'in_progress' }).eq('id', full.id)
           full.status = 'in_progress'
           justStarted = true
           // TDE-819: get_task SILENTLY flips a pending task to in_progress. That is convenient for
@@ -4495,6 +4529,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `# ${full.text}`,
         `ID: ${shortRef} | Project: ${full.project?.name ?? '—'} | Section: ${full.section?.name ?? 'Ungrouped'}`,
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
+        // Reading this line is safe: get_task's autostart no longer bumps updated_at, so
+        // "Last edited" reports a real change to the task, not the last time it was read.
+        `Created: ${String(full.created_at ?? '').slice(0, 10) || '—'} | Last edited: ${String(full.updated_at ?? '').slice(0, 10) || '—'}${agoLabel(full.updated_at) ? ` (${agoLabel(full.updated_at)})` : ''}`,
       ]
       if (branchName) lines.push(`Branch: ${branchName}`)
       // TDE-804: the phase answers "is this in scope right now" — the question an agent
