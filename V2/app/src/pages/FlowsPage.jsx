@@ -92,7 +92,7 @@ function FlowCard({ flow, active, onClick }) {
 }
 
 function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted }) {
-  const [graphHeight, setGraphHeight] = useState(320)
+  const [listHeight, setListHeight] = useState(250)
   const [panel, setPanel] = useState(null) // 'is' | 'kb' | null
   const [selectedTaskId, setSelectedTaskId] = useState(null)
   const [flowIs, setFlowIs] = useState(null)
@@ -279,9 +279,9 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
   function startResize(e) {
     e.preventDefault()
     const startY = e.clientY
-    const startH = graphHeight
+    const startH = listHeight
     function onMove(ev) {
-      setGraphHeight(Math.max(140, Math.min(720, startH + (ev.clientY - startY))))
+      setListHeight(Math.max(140, Math.min(600, startH - (ev.clientY - startY))))
     }
     function onUp() {
       window.removeEventListener('pointermove', onMove)
@@ -481,7 +481,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
           )}
         </div>
       )}
-      <div className="shrink-0" style={{ height: graphHeight }}>
+      <div className="flex-1 relative min-h-0">
         <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
       </div>
       <div
@@ -491,7 +491,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
       >
         <span className="w-8 h-0.5 rounded-full bg-line group-hover:bg-mute-2 transition-colors" />
       </div>
-      <div className="flex-1 overflow-auto px-4 py-3 no-scrollbar">
+      <div className="shrink-0 overflow-auto px-4 py-3 no-scrollbar" style={{ height: listHeight }}>
         <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
       </div>
 

@@ -15,36 +15,55 @@ const ACCENT = '#D97757'
 function statusColor(status) {
   if (status === 'done') return '#4ade80'
   if (status === 'in_progress') return ACCENT
-  return 'var(--color-line)'
+  return '#475569' // grey for pending
 }
 
 function FlowTaskNode({ data }) {
   const { task, prefix, step, onTaskClick } = data
-  const color = statusColor(task.status)
+  const headerColor = statusColor(task.status)
+  
   return (
     <div
       onClick={() => onTaskClick?.(task.id)}
       style={{
-        width: NODE_W, minHeight: NODE_H, background: 'var(--color-paper)',
-        border: `1.5px solid ${color}`, borderRadius: 8, padding: '9px 11px',
+        width: NODE_W, minHeight: NODE_H, 
+        background: 'rgba(24, 24, 24, 0.95)',
+        border: '1px solid #333', 
+        borderRadius: 8,
+        boxShadow: '0 6px 12px rgba(0,0,0,0.4)',
         boxSizing: 'border-box', fontFamily: 'inherit',
         cursor: onTaskClick ? 'pointer' : 'default',
+        overflow: 'hidden',
+        display: 'flex',
+        flexDirection: 'column'
       }}
     >
-      <Handle type="target" position={Position.Left} style={{ opacity: 0, pointerEvents: 'none' }} />
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
-        <span style={{ width: 6, height: 6, borderRadius: '50%', background: color, flexShrink: 0 }} />
-        <span style={{ fontFamily: 'monospace', fontSize: 10, color: 'var(--color-mute-2)', letterSpacing: '0.06em', fontWeight: 700 }}>
+      <Handle 
+        type="target" 
+        position={Position.Left} 
+        style={{ background: '#fff', width: 10, height: 10, border: '2px solid #333', left: -5, top: '50%', opacity: 1, pointerEvents: 'none' }} 
+      />
+      
+      <div style={{ background: headerColor, padding: '4px 10px', display: 'flex', alignItems: 'center' }}>
+        <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#fff', letterSpacing: '0.06em', fontWeight: 700, textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}>
           STEP {step}{prefix && task.short_id != null ? ` · ${prefix}-${task.short_id}` : ''}
         </span>
       </div>
+      
       <div style={{
-        fontSize: 12.5, fontWeight: 600, color: 'var(--color-ink)', lineHeight: 1.35,
+        padding: '10px 12px',
+        fontSize: 12.5, fontWeight: 500, color: '#fff', lineHeight: 1.35,
         display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
+        flex: 1
       }}>
         {task.text}
       </div>
-      <Handle type="source" position={Position.Right} style={{ opacity: 0, pointerEvents: 'none' }} />
+      
+      <Handle 
+        type="source" 
+        position={Position.Right} 
+        style={{ background: '#fff', width: 10, height: 10, border: '2px solid #333', right: -5, top: '50%', opacity: 1, pointerEvents: 'none' }} 
+      />
     </div>
   )
 }
@@ -68,9 +87,8 @@ function buildLayout(steps, prefix, onTaskClick) {
         id: `${src}->${s.task.id}`,
         source: src,
         target: s.task.id,
-        type: 'smoothstep',
-        style: { stroke: ACCENT, strokeWidth: 1.5 },
-        markerEnd: { type: MarkerType.ArrowClosed, color: ACCENT },
+        type: 'default', // Bezier curve
+        style: { stroke: 'rgba(255,255,255,0.7)', strokeWidth: 2.5 },
       })
     })
   })
@@ -110,7 +128,7 @@ function buildLayout(steps, prefix, onTaskClick) {
 export default function FlowGraph({ steps, prefix, onTaskClick }) {
   const { nodes, edges } = useMemo(() => buildLayout(steps, prefix, onTaskClick), [steps, prefix, onTaskClick])
   return (
-    <div style={{ width: '100%', height: '100%', background: 'var(--color-surf-2)' }}>
+    <div style={{ width: '100%', height: '100%', background: '#151515' }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -125,8 +143,8 @@ export default function FlowGraph({ steps, prefix, onTaskClick }) {
         minZoom={0.2}
         maxZoom={1.5}
       >
-        <Background color="var(--color-line-2)" gap={18} size={1} />
-        <Controls showInteractive={false} />
+        <Background color="#333" gap={20} size={1.5} />
+        <Controls showInteractive={false} style={{ filter: 'invert(1)' }} />
       </ReactFlow>
     </div>
   )
