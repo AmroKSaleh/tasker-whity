@@ -64,6 +64,44 @@ function agoLabel(iso: string | null | undefined, now = Date.now()): string | nu
   return months < 12 ? `${months}mo ago` : `${Math.floor(days / 365)}y ago`
 }
 
+// Timestamps are stored UTC but read by a person, and a UTC wall clock is not the time
+// they remember working. Accepts an IANA zone ("Asia/Amman") or a fixed offset ("+03:00");
+// unset or unparseable falls back to UTC, always labeled so the reader knows which it got.
+function zoneLabel(tz?: string | null): string {
+  const m = /^([+-])(\d{2}):?(\d{2})$/.exec((tz ?? '').trim())
+  if (m) return `GMT${m[1]}${Number(m[2])}${m[3] === '00' ? '' : ':' + m[3]}`
+  return tz?.trim() || 'UTC'
+}
+
+function formatStamp(iso: string | null | undefined, tz?: string | null, withZone = true): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (!Number.isFinite(d.getTime())) return '—'
+  const suffix = withZone ? ` ${zoneLabel(tz)}` : ''
+  const m = /^([+-])(\d{2}):?(\d{2})$/.exec((tz ?? '').trim())
+  if (m) {
+    const mins = (m[1] === '-' ? -1 : 1) * (Number(m[2]) * 60 + Number(m[3]))
+    return `${new Date(d.getTime() + mins * 60000).toISOString().slice(0, 16).replace('T', ' ')}${suffix}`
+  }
+  if (tz?.trim()) {
+    try {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: tz.trim(), year: 'numeric', month: '2-digit', day: '2-digit',
+        hour: '2-digit', minute: '2-digit', hourCycle: 'h23',
+      }).formatToParts(d)
+      const get = (t: string) => parts.find((p: any) => p.type === t)?.value ?? ''
+      return `${get('year')}-${get('month')}-${get('day')} ${get('hour')}:${get('minute')}${suffix}`
+    } catch { /* unknown zone — fall through to UTC rather than throwing on a read */ }
+  }
+  return `${d.toISOString().slice(0, 16).replace('T', ' ')}${withZone ? ' UTC' : ''}`
+}
+
+// One lightweight lookup rather than threading the preference through every call site.
+async function userTimezone(sb: any, userId: string): Promise<string | null> {
+  const { data } = await sb.from('user_settings').select('ai_instructions').eq('user_id', userId).maybeSingle()
+  return data?.ai_instructions?.timezone ?? null
+}
+
 // ── Auth ─────────────────────────────────────────────────────
 async function hashKey(raw: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
@@ -2556,7 +2594,7 @@ const TOOLS = [
   },
   {
     name: 'update_ai_instructions',
-    description: 'Save or update AI behavioral preferences. Takes any of: task_list_format, show_completed_tasks, rank_tasks_by, communication_style, multiple_tasks_handling, show_project_context. Only provided fields are changed.',
+    description: 'Save or update AI behavioral preferences. Takes any of: task_list_format, show_completed_tasks, rank_tasks_by, communication_style, multiple_tasks_handling, show_project_context, timezone. Only provided fields are changed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2566,6 +2604,7 @@ const TOOLS = [
         communication_style: { type: 'string', enum: ['terse', 'detailed', 'conversational'] },
         multiple_tasks_handling: { type: 'string', enum: ['collaborative', 'autonomous'] },
         show_project_context: { type: 'boolean' },
+        timezone: { type: 'string', description: 'The zone timestamps are shown in — an IANA name ("Asia/Amman") or a fixed UTC offset ("+03:00"). Unset means times render as UTC. Set it when the user states their timezone.' },
       },
       required: [],
     },
@@ -4033,6 +4072,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       // "What changed lately?" is a recency question, and answering it by sorting order
       // means reading the whole list and eyeballing dates. Newest edit first instead.
       const byRecency = args.sort === 'recently_updated'
+      const tz = await userTimezone(sb, userId)
       const { data } = byRecency
         ? await query.order('updated_at', { ascending: false })
         : await query.order('sort_order')
@@ -4041,17 +4081,25 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const shortRef = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id
         const sectionName = t.section?.name ?? 'no section'
         const added = t.created_at ? t.created_at.slice(0, 10) : null
-        // Only when it differs from the creation date — an untouched task would otherwise
-        // spend a second date repeating its first (cf. the token economy in TDE-371).
-        const editedOn = t.updated_at ? t.updated_at.slice(0, 10) : null
-        const edited = editedOn && editedOn !== added ? editedOn : null
+        // Skipped for a task nobody has touched since creating it — it would spend a second
+        // stamp repeating its first (cf. the token economy in TDE-371). The zone is stated
+        // once in the header rather than repeated on every line, for the same reason.
+        const neverEdited = !t.updated_at || !t.created_at
+          || Math.abs(new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) < 60000
+        const edited = neverEdited ? null : formatStamp(t.updated_at, tz, false)
         // Phase is omitted when the list is already scoped to one — it would repeat on every
         // line for no information (cf. the token-economy work in TDE-371).
         const phaseBadge = !phaseLabel && t.phase?.name ? t.phase.name : null
         const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.status !== 'pending' ? t.status : null, phaseBadge].filter(Boolean).join(', ')
         return `${shortRef} — ${t.text}${badges ? ` [${badges}]` : ''} · ${sectionName}${added ? ` · added ${added}` : ''}${edited ? ` · edited ${edited}` : ''}`
       }).join('\n')
-      const header = [phaseLabel ? `Phase: ${phaseLabel}` : null, byRecency ? 'Sorted by most recently edited.' : null].filter(Boolean).join('\n')
+      const anyEdited = data.some((t: any) => t.updated_at && t.created_at
+        && Math.abs(new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) >= 60000)
+      const header = [
+        phaseLabel ? `Phase: ${phaseLabel}` : null,
+        byRecency ? 'Sorted by most recently edited.' : null,
+        anyEdited ? `Edit times are ${zoneLabel(tz)}.` : null,
+      ].filter(Boolean).join('\n')
       return header ? `${header}\n\n${body}` : body
     }
 
@@ -4525,13 +4573,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const branchName = full.project?.prefix && full.short_id != null
         ? `${String(full.project.prefix).toLowerCase()}-${full.short_id}${branchSlug ? '-' + branchSlug : ''}`
         : null
+      const tz = await userTimezone(sb, userId)
       const lines: string[] = [
         `# ${full.text}`,
         `ID: ${shortRef} | Project: ${full.project?.name ?? '—'} | Section: ${full.section?.name ?? 'Ungrouped'}`,
         `Priority: ${full.priority} | Status: ${full.status}${full.due_date ? ` | Due: ${full.due_date}` : ''}`,
         // Reading this line is safe: get_task's autostart no longer bumps updated_at, so
         // "Last edited" reports a real change to the task, not the last time it was read.
-        `Created: ${String(full.created_at ?? '').slice(0, 10) || '—'} | Last edited: ${String(full.updated_at ?? '').slice(0, 10) || '—'}${agoLabel(full.updated_at) ? ` (${agoLabel(full.updated_at)})` : ''}`,
+        `Created: ${formatStamp(full.created_at, tz)} | Last edited: ${formatStamp(full.updated_at, tz)}${agoLabel(full.updated_at) ? ` (${agoLabel(full.updated_at)})` : ''}`,
       ]
       if (branchName) lines.push(`Branch: ${branchName}`)
       // TDE-804: the phase answers "is this in scope right now" — the question an agent
@@ -5989,6 +6038,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           communication_style: instructions.communication_style,
           multiple_tasks_handling: instructions.multiple_tasks_handling,
           show_project_context: instructions.show_project_context ? 'shown' : 'hidden',
+          timezone: zoneLabel(instructions.timezone),
         }
         return JSON.stringify({
           status: 'ready',
@@ -6080,12 +6130,21 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case 'update_ai_instructions': {
-      const allowed = ['task_list_format', 'show_completed_tasks', 'rank_tasks_by', 'communication_style', 'multiple_tasks_handling', 'show_project_context']
+      const allowed = ['task_list_format', 'show_completed_tasks', 'rank_tasks_by', 'communication_style', 'multiple_tasks_handling', 'show_project_context', 'timezone']
       const updates: Record<string, any> = {}
       for (const k of allowed) if (args[k] !== undefined) updates[k] = args[k]
 
       if (Object.keys(updates).length === 0) {
-        return 'No fields to update. Provide at least one of: task_list_format, show_completed_tasks, rank_tasks_by, communication_style, multiple_tasks_handling, show_project_context.'
+        return 'No fields to update. Provide at least one of: task_list_format, show_completed_tasks, rank_tasks_by, communication_style, multiple_tasks_handling, show_project_context, timezone.'
+      }
+      // Reject a zone we cannot render, rather than silently falling back to UTC later.
+      if (updates.timezone !== undefined && updates.timezone !== null && String(updates.timezone).trim() !== '') {
+        const raw = String(updates.timezone).trim()
+        if (!/^([+-])(\d{2}):?(\d{2})$/.test(raw)) {
+          try { new Intl.DateTimeFormat('en-CA', { timeZone: raw }) }
+          catch { return `"${raw}" is not a timezone this server can render. Use an IANA name (e.g. "Asia/Amman") or a fixed UTC offset (e.g. "+03:00").` }
+        }
+        updates.timezone = raw
       }
 
       const { data: existing } = await sb.from('user_settings').select('ai_instructions').eq('user_id', userId).maybeSingle()
