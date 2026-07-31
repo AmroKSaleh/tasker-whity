@@ -1,16 +1,41 @@
 import { useState, useEffect, useMemo, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
-import { Search, CornerDownLeft } from 'lucide-react'
+import { Search, CornerDownLeft, Zap } from 'lucide-react'
 import { supabase } from '../../lib/supabase'
+import { useTheme } from '../../hooks/useTheme'
 
 const STATUS_DOT = { in_progress: 'bg-accent', done: 'bg-mute-2', pending: 'bg-line' }
 
-// Global task search (⌘/Ctrl-K or the Search rail button). Matches by title or short ID
-// (e.g. "TDE-52", "tde52", or just "52") across every project; selecting a result opens
-// that task on its project board via /dashboard/:slug?task=:id.
+// TDE-396 v1 — the smallest real step from "search" toward "command palette": a short,
+// hand-written list of page jumps + the one non-navigation action (theme) that's genuinely
+// global (no project context needed). Filtered by the same query as tasks, so typing
+// "theme" or "flows" surfaces a command exactly like typing a task title surfaces a task.
+// Deliberately NOT a registry/plugin system yet — add verbs here directly until the list
+// earns something fancier.
+function buildCommands(navigate, toggleTheme) {
+  return [
+    { id: 'nav-today', label: 'Go to Today', run: () => navigate('/today') },
+    { id: 'nav-projects', label: 'Go to Projects', run: () => navigate('/projects') },
+    { id: 'nav-flows', label: 'Go to Flows', run: () => navigate('/flows') },
+    { id: 'nav-environments', label: 'Go to Environments', run: () => navigate('/environments') },
+    { id: 'nav-settings', label: 'Go to Settings', run: () => navigate('/settings') },
+    { id: 'theme-toggle', label: 'Toggle theme (light / dark)', run: toggleTheme },
+  ]
+}
+
+// Global search + a small set of commands (⌘/Ctrl-K or the Search rail button). Tasks match
+// by title or short ID (e.g. "TDE-52", "tde52", or just "52") across every project; selecting
+// a task result opens it on its project board via /dashboard/:slug?task=:id. Commands run
+// immediately on selection — no navigation involved beyond what the command itself does.
 export default function GlobalSearch({ open, onClose }) {
   const navigate = useNavigate()
+  const { resolved: resolvedTheme, setPreference: setThemePreference } = useTheme()
+  const toggleTheme = useCallback(
+    () => setThemePreference(resolvedTheme === 'dark' ? 'light' : 'dark'),
+    [resolvedTheme, setThemePreference],
+  )
+  const commands = useMemo(() => buildCommands(navigate, toggleTheme), [navigate, toggleTheme])
   const [query, setQuery] = useState('')
   const [tasks, setTasks] = useState([])
   const [projects, setProjects] = useState([])
@@ -56,19 +81,37 @@ export default function GlobalSearch({ open, onClose }) {
       .slice(0, 25)
   }, [query, tasks, projMap])
 
+  // Commands show up front, unfiltered, when the box is empty — the whole point of a v1
+  // this small is that opening it once shows you everything it can do. Typing narrows them
+  // by the same query as tasks, so "theme" or "flows" behaves exactly like typing a title.
+  const commandResults = useMemo(() => {
+    const q = query.trim().toLowerCase()
+    if (!q) return commands
+    return commands.filter(c => c.label.toLowerCase().includes(q))
+  }, [query, commands])
+
+  // One combined, keyboard-navigable list: commands first (there are only a handful), tasks
+  // after. Each entry keeps its kind so render/choose can branch without re-deriving it.
+  const combined = useMemo(() => [
+    ...commandResults.map(c => ({ kind: 'command', command: c })),
+    ...results.map(r => ({ kind: 'task', ...r })),
+  ], [commandResults, results])
+
   useEffect(() => { setActive(0) }, [query])
 
-  const choose = useCallback((r) => {
-    if (!r?.proj?.slug) return
-    navigate(`/dashboard/${r.proj.slug}?task=${r.t.id}`)
+  const choose = useCallback((entry) => {
+    if (!entry) return
+    if (entry.kind === 'command') { entry.command.run(); onClose(); return }
+    if (!entry.proj?.slug) return
+    navigate(`/dashboard/${entry.proj.slug}?task=${entry.t.id}`)
     onClose()
   }, [navigate, onClose])
 
   function onKeyDown(e) {
     if (e.key === 'Escape') { onClose(); return }
-    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(i => Math.min(i + 1, results.length - 1)) }
+    if (e.key === 'ArrowDown') { e.preventDefault(); setActive(i => Math.min(i + 1, combined.length - 1)) }
     else if (e.key === 'ArrowUp') { e.preventDefault(); setActive(i => Math.max(i - 1, 0)) }
-    else if (e.key === 'Enter') { e.preventDefault(); choose(results[active]) }
+    else if (e.key === 'Enter') { e.preventDefault(); choose(combined[active]) }
   }
 
   if (!open) return null
@@ -86,31 +129,40 @@ export default function GlobalSearch({ open, onClose }) {
             value={query}
             onChange={e => setQuery(e.target.value)}
             onKeyDown={onKeyDown}
-            placeholder="Search tasks by title or ID (e.g. TDE-52)…"
+            placeholder="Search tasks, or jump somewhere — try “flows” or “theme”…"
             className="flex-1 bg-transparent py-3.5 text-[14px] text-ink outline-none placeholder:text-mute-2"
           />
           <kbd className="shrink-0 text-[10px] font-mono text-mute-2 border border-line rounded px-1.5 py-0.5">esc</kbd>
         </div>
 
         <div className="max-h-[52vh] overflow-y-auto py-1">
-          {query.trim() === '' ? (
-            <p className="px-4 py-6 text-center text-[12px] text-mute-2">Type a task title or short ID to search across all projects.</p>
-          ) : results.length === 0 ? (
-            <p className="px-4 py-6 text-center text-[12px] text-mute-2">No tasks match “{query}”.</p>
+          {combined.length === 0 ? (
+            <p className="px-4 py-6 text-center text-[12px] text-mute-2">No tasks or commands match “{query}”.</p>
           ) : (
-            results.map((r, i) => (
+            combined.map((entry, i) => entry.kind === 'command' ? (
               <button
-                key={r.t.id}
-                onClick={() => choose(r)}
+                key={entry.command.id}
+                onClick={() => choose(entry)}
                 onMouseEnter={() => setActive(i)}
                 className={clsx('w-full flex items-center gap-3 px-4 py-2 text-left transition-colors', i === active ? 'bg-surf-2' : 'hover:bg-surf-2/60')}
               >
-                <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', STATUS_DOT[r.t.status] || STATUS_DOT.pending)} />
-                <span className={clsx('flex-1 min-w-0 truncate text-[13px]', r.t.status === 'done' ? 'text-mute-2 line-through' : 'text-ink')}>
-                  {r.t.text || '(untitled)'}
+                <Zap className="h-3 w-3 shrink-0 text-accent" />
+                <span className="flex-1 min-w-0 truncate text-[13px] text-ink">{entry.command.label}</span>
+                {i === active && <CornerDownLeft className="h-3 w-3 shrink-0 text-mute-2" />}
+              </button>
+            ) : (
+              <button
+                key={entry.t.id}
+                onClick={() => choose(entry)}
+                onMouseEnter={() => setActive(i)}
+                className={clsx('w-full flex items-center gap-3 px-4 py-2 text-left transition-colors', i === active ? 'bg-surf-2' : 'hover:bg-surf-2/60')}
+              >
+                <span className={clsx('w-1.5 h-1.5 rounded-full shrink-0', STATUS_DOT[entry.t.status] || STATUS_DOT.pending)} />
+                <span className={clsx('flex-1 min-w-0 truncate text-[13px]', entry.t.status === 'done' ? 'text-mute-2 line-through' : 'text-ink')}>
+                  {entry.t.text || '(untitled)'}
                 </span>
-                {r.ref && <span className="shrink-0 font-mono text-[10px] text-mute-2">{r.ref}</span>}
-                <span className="shrink-0 text-[10px] text-mute-2 max-w-[120px] truncate">{r.proj?.name ?? '—'}</span>
+                {entry.ref && <span className="shrink-0 font-mono text-[10px] text-mute-2">{entry.ref}</span>}
+                <span className="shrink-0 text-[10px] text-mute-2 max-w-[120px] truncate">{entry.proj?.name ?? '—'}</span>
                 {i === active && <CornerDownLeft className="h-3 w-3 shrink-0 text-mute-2" />}
               </button>
             ))
