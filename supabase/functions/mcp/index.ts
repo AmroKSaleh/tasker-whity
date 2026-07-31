@@ -1469,7 +1469,7 @@ const TOOLS = [
   },
   {
     name: 'pull_local_project',
-    description: 'LOCAL MODE: hydrate/refresh the .tasker/ mirror of a Local Mode project. DEFAULT (script transport): returns a small response with a hydrate_script — write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs`; it downloads the bundle over a short-lived signed URL and writes every file (project.json, tasks/*.md, context.md, README.md, .gitignore, .sync.json) plus removes tombstoned task files, then prints a JSON summary (file_count, cursor, lease, next_free_ids). File contents never enter your context. Pass inline:true only when node is unavailable — that returns the full file map for you to write manually. Call at the START of local work (pull-before-work). Refuses projects without Local Mode enabled.',
+    description: 'LOCAL MODE: hydrate/refresh the .tasker/ mirror of a Local Mode project. Returns a hydrate_script — write it as hydrate.mjs in the directory that should contain .tasker/ and run `node hydrate.mjs`. It downloads the bundle over a short-lived signed URL, writes every file (project.json, tasks/*.md, context.md, README.md, .gitignore, .sync.json), removes tombstoned task files, and prints a JSON summary (file_count, cursor, lease, next_free_ids). File contents never enter your context. Call at the START of local work. Refuses projects without Local Mode enabled.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1484,7 +1484,7 @@ const TOOLS = [
   },
   {
     name: 'flush_local_project',
-    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send the task files you changed (verbatim content) and any deleted short IDs. The hub applies per-task last-write-wins by updated_at (ties → hub), enforces edit-beats-delete, accepts new tasks only within this device\'s leased ID block, and records tombstones for deletions. STRUCTURAL: a task\'s `section:` and `group:` frontmatter are writable — set `section:` to move a task between sections; set `group:` to move it into a group. CREATE-BY-REFERENCE: if `section:` names a slug that does not exist yet, the hub CREATES that section (named exactly as the slug), returned as created_sections. Likewise if `group:` names an unknown slug AND the task has a section, the hub CREATES that group in that section, returned as created_groups. Created names = the slug verbatim (rename later via the web app / rename_group). Group/section RENAME, DELETE, and REORDER still go through MCP (create-only via files). Returns the new cursor plus hub_wins corrections — write those file contents back to disk, then update .sync.json\'s cursor. Call after each work unit (flush-after-work). Note: input/output/review fields in files are READ-ONLY carriage — contract/bar edits flow through the normal MCP ceremonies, not flush.',
+    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send changed task files (verbatim) and any deleted short IDs. The hub applies per-task last-write-wins by updated_at (ties → hub), enforces edit-beats-delete, accepts new tasks only within this device\'s leased ID block, and records tombstones. STRUCTURAL: a task\'s `section:` and `group:` frontmatter are writable — set them to move the task. CREATE-BY-REFERENCE: an unknown `section:` slug CREATES that section; an unknown `group:` slug CREATES that group (needs a section), returned as created_sections / created_groups, named as the slug verbatim. RENAME, DELETE and REORDER of groups/sections still go through MCP — files are create-only. Returns the new cursor plus hub_wins corrections: write those back to disk, then update .sync.json\'s cursor. Call after each work unit. input/output/review fields in files are READ-ONLY carriage — contract edits go through the normal MCP ceremonies.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1515,7 +1515,7 @@ const TOOLS = [
   },
   {
     name: 'mint_device_token',
-    description: 'LOCAL MODE (immediate sync): mint a long-lived, revocable device token so a watch.mjs process can auto-sync .tasker/ the instant a file changes — without re-pulling a 15-min link. The token is scoped to ONE project on ONE device: even if leaked it can only pull/flush that project. Returns the secret ONCE (store it, it is never shown again) plus the watch endpoints. Prefer just running the watch_script from pull_local_project, which mints and embeds a token for you. Owner-only.',
+    description: 'LOCAL MODE (immediate sync): mint a long-lived, revocable device token so a watch.mjs process can auto-sync .tasker/ the instant a file changes. Scoped to ONE project on ONE device — even if leaked it can only pull/flush that project. Returns the secret ONCE (never shown again) plus the watch endpoints. Prefer the watch_script from pull_local_project, which mints and embeds a token for you. Owner-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1725,7 +1725,7 @@ const TOOLS = [
   },
   {
     name: 'list_phases',
-    description: 'TDE-804: list a project\'s PHASES — condition-bounded stages ("Phase 1 ends when we launch"), each with its task counts. A phase is bounded by an exit condition, NOT a date; a due date is optional. Phases are an ORTHOGONAL axis to sections: sections are categorical (kind of work), phases are temporal (when). The response marks the project\'s ACTIVE phase and reports how many tasks are UNPHASED — unphased is a legitimate permanent state, not a backlog to drain.',
+    description: 'list a project\'s PHASES — condition-bounded stages ("Phase 1 ends when we launch"), each with its task counts. A phase is bounded by an exit condition, NOT a date; a due date is optional. Phases are an ORTHOGONAL axis to sections: sections are categorical (kind of work), phases are temporal (when). The response marks the project\'s ACTIVE phase and reports how many tasks are UNPHASED — unphased is a legitimate permanent state, not a backlog to drain.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
@@ -1734,7 +1734,7 @@ const TOOLS = [
   },
   {
     name: 'create_phase',
-    description: 'TDE-804: create a phase in a project. ALWAYS set exit_condition — it is the honesty guardrail: stating what must be TRUE for the phase to end forces a statement of what is actually required, so unrequired work falls out to a later phase. A phase without one is just a bucket. due_date is optional and should stay empty unless the user genuinely has a deadline (a phase is bounded by achievement, not the calendar — that is what makes it not a sprint).',
+    description: 'create a phase in a project. ALWAYS set exit_condition — it is the honesty guardrail: stating what must be TRUE for the phase to end forces a statement of what is actually required, so unrequired work falls out to a later phase. A phase without one is just a bucket. due_date is optional and should stay empty unless the user genuinely has a deadline (a phase is bounded by achievement, not the calendar — that is what makes it not a sprint).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1748,7 +1748,7 @@ const TOOLS = [
   },
   {
     name: 'update_phase',
-    description: 'TDE-804: update a phase — rename it, revise its exit condition, set/clear its optional due date, or change its position. Non-destructive: task assignments are untouched.',
+    description: 'update a phase — rename it, revise its exit condition, set/clear its optional due date, or change its position. Non-destructive: task assignments are untouched.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1764,7 +1764,7 @@ const TOOLS = [
   },
   {
     name: 'delete_phase',
-    description: 'TDE-804: delete a phase. Its tasks are NOT deleted — they become UNPHASED (phase_id → null), which is a valid state. If this phase was the project\'s active phase, the pointer is cleared. Reports how many tasks were unphased.',
+    description: 'delete a phase. Its tasks are NOT deleted — they become UNPHASED (phase_id → null), which is a valid state. If this phase was the project\'s active phase, the pointer is cleared. Reports how many tasks were unphased.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1776,7 +1776,7 @@ const TOOLS = [
   },
   {
     name: 'set_active_phase',
-    description: 'TDE-804: set which phase the project is CURRENTLY in — the answer to "what is in scope right now". get_ready_work uses this to scope the queue, so keeping it accurate is what makes phases useful to an agent rather than decoration. Pass phase_id: null (or omit it) to clear the pointer.',
+    description: 'set which phase the project is CURRENTLY in — the answer to "what is in scope right now". get_ready_work uses this to scope the queue, so keeping it accurate is what makes phases useful to an agent rather than decoration. Pass phase_id: null (or omit it) to clear the pointer.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1788,7 +1788,7 @@ const TOOLS = [
   },
   {
     name: 'set_task_phase',
-    description: 'TDE-804: assign a task to a phase, or UNPHASE it (pass phase_id: null / omit). Unphasing is not a failure state — work that legitimately belongs to no stage (idea inventories, evergreen items) should stay unphased rather than be stamped with a phase that would then be a lie.',
+    description: 'assign a task to a phase, or UNPHASE it (pass phase_id: null / omit). Unphasing is not a failure state — work that legitimately belongs to no stage (idea inventories, evergreen items) should stay unphased rather than be stamped with a phase that would then be a lie.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1800,7 +1800,7 @@ const TOOLS = [
   },
   {
     name: 'list_tasks',
-    description: 'List tasks. Each line carries the date the task was added and, when it differs, the date it was last edited. To answer "what changed lately / when was anything last touched", pass sort: "recently_updated" — do NOT call get_task on candidates to compare timestamps. Flow steps are NOT tasks and are excluded (TDE-320) — a task that belongs to a named flow is a STEP, listed only via the Flows tools (list_flows / get_flow_context), never here. Done tasks are also excluded by default — pass status: "all" to include them. If no project_id is provided, the user\'s default project is used when set; otherwise this requires confirmed: true to list across ALL projects. include_flow_steps is an explicit user override only: set it solely when the USER has explicitly asked to see flow steps here as if they were normal tasks — never flip it on your own initiative.',
+    description: 'List tasks. Each line carries the date the task was added and, when it differs, when it was last edited. For "what changed lately", pass sort: "recently_updated" — do NOT call get_task on candidates to compare timestamps. Flow steps are NOT tasks and are excluded: a task in a named flow is a STEP, listed via list_flows / get_flow_context, never here. Done tasks are excluded by default — pass status: "all" to include them. With no project_id the user\'s default project is used when set; otherwise listing across ALL projects requires confirmed: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1808,8 +1808,8 @@ const TOOLS = [
         section_id: { type: 'string', description: 'Section UUID (optional)' },
         status:     { type: 'string', enum: ['pending', 'in_progress', 'done', 'all'], description: 'Filter by status. Defaults to excluding done tasks. Pass "all" to include everything.' },
         confirmed:  { type: 'boolean', description: 'Set to true to list tasks across ALL projects (only needed when project_id is omitted AND no default project is set).' },
-        include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks — TDE-320). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own.' },
-        phase_id:   { type: 'string', description: 'TDE-804: show only tasks in this phase (UUID, slug, or exact name). Pass "unphased" to list only tasks belonging to NO phase. Requires project_id.' },
+        include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own.' },
+        phase_id: { type: 'string', description: 'show only tasks in this phase (UUID, slug, or exact name). Pass "unphased" to list only tasks belonging to NO phase. Requires project_id.' },
         sort:       { type: 'string', enum: ['sorting_order', 'recently_updated'], description: 'Ordering. Default "sorting_order" (the board order). "recently_updated" sorts by last edit, newest first — use it to see what changed most recently.' },
       },
       required: [],
@@ -1830,18 +1830,18 @@ const TOOLS = [
         kind:       { type: 'string', enum: ['normal', 'seed'], description: 'Default "normal". "seed" = a placeholder resolved later into a real task or flow.' },
         seed_target:    { type: 'string', enum: ['task', 'flow'], description: 'Seeds only: what this resolves into — a concrete task (resolve_seed) or a flow (build_new_flow).' },
         open_questions: { type: 'array', items: { type: 'string' }, description: 'Seeds only: the SPECIFIC gaps blocking specification — things ANSWERED with the user during resolution. Stored as kind="question" items in the seed\'s unified checklist (they do NOT gate resolution).' },
-        milestones:     { type: 'array', items: { type: 'string' }, description: 'Ordered milestone texts added in one call (no separate add_milestone needed). On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind="prerequisite" checklist items that soft-gate resolve_seed / build_new_flow. On a normal task they are plain milestones.' },
+        milestones:     { type: 'array', items: { type: 'string' }, description: 'Ordered milestone texts, added in one call. On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind="prerequisite" items that soft-gate resolve_seed / build_new_flow. On a normal task, plain milestones.' },
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent (default) = AI runs it; user = human executes, AI coaches; external = third party (web admin, client, etc.). A single flow can mix executor types.' },
-        human_guidance: { type: 'string', description: 'For user/external steps only: the human-facing step instructions shown in guide mode. Distinct from detail (which is AI-facing context). Write as a clear action directive: what the person must do, where, and how to verify it worked.' },
-        relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set this only when the user wants to relay/hand off this task to someone else. A CURATED rationale layer that lets the assignee act without coming back to ask — NOT a transcript dump. Distill from your discussion: who it is going to (free text, e.g. "to: Sara (backend)"), the key decision(s) and WHY, approaches considered and rejected and why-not, intent / how to treat it, open questions, and watch-outs. Setting this marks the task as a relay. Leave unset for normal tasks.' },
-        allow_duplicate: { type: 'boolean', description: 'TDE-379 duplicate defense: creation is REFUSED if a near-identical open task already exists (the response lists the matches). Pass true to override and create anyway when it is genuinely distinct. Leave unset normally — if you see the guard, prefer working the existing task or merge_task_as_duplicate.' },
+        human_guidance: { type: 'string', description: 'user/external steps only: human-facing instructions shown in guide mode. Distinct from detail (AI-facing). Write as an action directive — what the person must do, where, and how to verify it worked.' },
+        relay_context:  { type: 'string', description: 'RELAY MODE: set only when handing this task off to someone else. A CURATED rationale layer so the assignee need not come back and ask — NOT a transcript dump. Include: who it is for (e.g. "to: Sara (backend)"), key decisions and WHY, approaches rejected and why-not, intent, open questions, watch-outs. Setting it marks the task as a relay.' },
+        allow_duplicate: { type: 'boolean', description: 'Duplicate defense: creation is REFUSED if a near-identical open task exists (the response lists matches). Pass true only when it is genuinely distinct — otherwise work the existing task or merge_task_as_duplicate.' },
       },
       required: ['project_id', 'text'],
     },
   },
   {
     name: 'merge_task_as_duplicate',
-    description: 'TDE-379: fold a duplicate task into a canonical one so agents/sessions converge on ONE task instead of spawning copies. Transfers the duplicate\'s incomplete milestones and appends its detail to the canonical task, then closes the duplicate with a DISTINCT outcome (duplicate_of → canonical, not a plain "done"). Use it when create_task\'s duplicate guard surfaces a match, or to clean up existing dups.',
+    description: 'fold a duplicate task into a canonical one so agents/sessions converge on ONE task instead of spawning copies. Transfers the duplicate\'s incomplete milestones and appends its detail to the canonical task, then closes the duplicate with a DISTINCT outcome (duplicate_of → canonical, not a plain "done"). Use it when create_task\'s duplicate guard surfaces a match, or to clean up existing dups.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1853,7 +1853,7 @@ const TOOLS = [
   },
   {
     name: 'resolve_seed',
-    description: 'Resolve a CONTEXT SEED (seed_target "task") into a real, placed task — AFTER settling its checklist with the user. The seed checklist is unified (TDE-300): kind="question" items are answered during this conversation; kind="prerequisite" items are work that should be done first and SOFT-GATE this call (unmet prerequisites are surfaced and you must pass proceed_anyway:true to override). Atomically: creates the concrete task from task_spec, places it, marks the seed done, and links the new task back to the seed (provenance). PASS task_spec.section_id with the resolved task\'s REAL home — the resolved task must NOT stay in the "Needs Context" staging section (if omitted it lands in Backlog, not the seed\'s section). For FLOW seeds, do NOT use this — run build_new_flow with the seed pre-brief instead.',
+    description: 'Resolve a CONTEXT SEED (seed_target "task") into a real, placed task — AFTER settling its checklist with the user. kind="question" items are answered in conversation; kind="prerequisite" items SOFT-GATE this call (unmet ones are surfaced; pass proceed_anyway:true to override). Atomically creates the task from task_spec, places it, marks the seed done, and links it back to the seed. PASS task_spec.section_id with the task\'s REAL home — it must not stay in the "Needs Context" staging section (omitted → Backlog, not the seed\'s section). For FLOW seeds use build_new_flow instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1893,8 +1893,8 @@ const TOOLS = [
         pinned:         { type: 'boolean', description: 'Pin or unpin the task' },
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent = AI; user = human (AI coaches); external = third party.' },
         human_guidance: { type: 'string', description: 'Human-facing step instructions for guide mode (user/external steps). Replaces existing.' },
-        relay_context:  { type: 'string', description: 'RELAY MODE (TDE-324): set/replace the curated relay rationale layer on an EXISTING task (e.g. when the user decides to hand off a task already created). Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump. Setting it marks the task as a relay.' },
-        delegated_to:   { type: 'string', description: 'TDE-375: who the task is delegated to (free text — an agent or teammate). You (the owner) REMAIN responsible and still own the quality gate; delegation is NOT reassignment. Pass an empty string to clear.' },
+        relay_context:  { type: 'string', description: 'Set/replace the relay rationale layer on an EXISTING task. Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump.' },
+        delegated_to:   { type: 'string', description: 'Who the task is delegated to (free text — agent or teammate). The owner REMAINS responsible and still owns the quality gate; delegation is NOT reassignment. Empty string clears.' },
         agent_ready:    { type: 'boolean', description: 'Mark this task "ready for the agent" — it enters the autonomous work queue (get_ready_work). Usually set by the human in the web app ("Hand to agent"); set false to pull it back.' },
         agent_proposal: { type: 'string', description: 'Prepare→confirm→execute: record the agent\'s PREPARED proposal for this task (a concise summary of what it will do). Setting it makes the task appear in the web Agent Queue "Awaiting confirmation" tab. Clear it (empty string) once the human confirms and you execute, or if declined.' },
         agent_proposal_confirmed: { type: 'boolean', description: 'Usually set by the HUMAN in the web app (the "Confirm" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. The agent normally only clears the proposal after executing (which resets this to false).' },
@@ -1943,13 +1943,13 @@ const TOOLS = [
   },
   {
     name: 'get_task',
-    description: 'Get full details for a single task: text, context, priority, status, due date, section, project, milestones, and when it was created / last edited. Call this when you are about to START working on a task — a pending task is automatically set to in_progress (pass peek: true to inspect without starting). The auto-start does not count as an edit, so reading a task never changes its last-edited time. When you finish, mark it done with complete_task only if the work is genuinely complete; otherwise leave it in_progress.',
+    description: 'Get full details for a single task: text, context, priority, status, due date, section, project, milestones, created / last-edited times. Call when about to START a task — a pending task is auto-set to in_progress (peek: true inspects without starting). Auto-start is not an edit, so reading never changes last-edited. When done, complete_task only if the work is genuinely complete; otherwise leave it in_progress.',
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         peek: { type: 'boolean', description: 'If true, just read the task without auto-setting it to in_progress. Use when inspecting/planning rather than starting work.' },
-        refresh_context: { type: 'boolean', description: 'Force the full project context (Foundation, Instruction Set, KB index) back inline. It is normally sent only on the first task you open in a project each session and omitted (as a short pointer) thereafter to save tokens. Pass true to re-ground after your context was compacted/cleared.' },
+        refresh_context: { type: 'boolean', description: 'Force the full project context (Foundation, Instruction Set, KB index) back inline. Normally sent only on the first task opened in a project each session, then omitted as a short pointer. Use after your context was compacted or cleared.' },
       },
       required: ['task_id'],
     },
@@ -2104,14 +2104,14 @@ const TOOLS = [
   },
   {
     name: 'append_session_activity',
-    description: "Append a typed, IMMUTABLE entry to a task's agent session ledger — the durable, human-inspectable record of what the agent did (persists across sessions). Opens a session lazily if none is open. Types: progress (a step taken / status update), action (a concrete change made), question (BLOCKED — needs human input; sets the session to awaiting_input), result (an outcome / deliverable), error (a failure). Entries cannot be edited or deleted (TDE-374).",
+    description: "Append a typed, IMMUTABLE entry to a task's agent session ledger — the durable, human-inspectable record of what the agent did (persists across sessions). Opens a session lazily if none is open. Types: progress (a step taken / status update), action (a concrete change made), question (BLOCKED — needs human input; sets the session to awaiting_input), result (an outcome / deliverable), error (a failure). Entries cannot be edited or deleted.",
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         type:    { type: 'string', enum: ['progress', 'action', 'question', 'result', 'error'], description: 'The kind of entry.' },
         body:    { type: 'string', description: 'What happened / what you are asking — one concise entry.' },
-        actor:   { type: 'string', description: 'Optional: the agent/client acting (e.g. "Claude Code"). The full provenance layer is completed in TDE-375.' },
+        actor: { type: 'string', description: 'Optional: the agent/client acting (e.g. "Claude Code").' },
       },
       required: ['task_id', 'type', 'body'],
     },
@@ -2130,7 +2130,7 @@ const TOOLS = [
   },
   {
     name: 'get_task_history',
-    description: "Read a task's DURABLE GATE HISTORY (TDE-818) — the append-only record of what changed on its contract / review bar / gate verdicts, with before+after state. This is a real log, unlike get_flow_audit (which renders the CURRENT validation snapshot). Use it to answer questions the task row cannot: what the contract said before it was replaced, whether a human confirmation was silently erased by a later edit, what attempt 1 of a review actually said before attempt 2 overwrote it, and what each gate retry failed on. Kinds: contract_set, contract_cleared, contract_confirmed, review_bar_frozen, review_bar_cleared, review_submitted, validation_submitted, fields_changed.",
+    description: "Read a task's DURABLE GATE HISTORY — the append-only record of what changed on its contract / review bar / gate verdicts, with before+after state. A real log, unlike get_flow_audit (the CURRENT validation snapshot). Answers what the task row cannot: what a contract said before it was replaced, whether a human confirmation was later erased, what an earlier review attempt said, what each retry failed on. Kinds: contract_set, contract_cleared, contract_confirmed, review_bar_frozen, review_bar_cleared, review_submitted, validation_submitted, fields_changed.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -2164,7 +2164,7 @@ const TOOLS = [
   },
   {
     name: 'stop_flow',
-    description: "TDE-384: set a durable STOP on a flow — a human-set halt agents MUST honor. While stopped, run_flow / guide_flow / advance_guide refuse to proceed and return the reason. Use when the human changes their mind mid-flow (checks INTENT — distinct from the quality gates, which check output). Identify the flow by flow_id (UUID or name) or any task_id in it.",
+    description: "set a durable STOP on a flow — a human-set halt agents MUST honor. While stopped, run_flow / guide_flow / advance_guide refuse to proceed and return the reason. Use when the human changes their mind mid-flow (checks INTENT — distinct from the quality gates, which check output). Identify the flow by flow_id (UUID or name) or any task_id in it.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -2177,7 +2177,7 @@ const TOOLS = [
   },
   {
     name: 'resume_flow',
-    description: "TDE-384: clear a flow's stop. It resumes exactly where it stood (guide cursor and task states untouched). Identify by flow_id (UUID or name) or any task_id in it.",
+    description: "clear a flow's stop. It resumes exactly where it stood (guide cursor and task states untouched). Identify by flow_id (UUID or name) or any task_id in it.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -2673,7 +2673,7 @@ const TOOLS = [
   },
   {
     name: 'move_task',
-    description: 'Move a task to a DIFFERENT project. Reassigns the short ID into the target project\'s sequence and preserves text, detail, priority, status, output contract, and stored artifact. Side effects (the task is leaving its old project): it is unlinked from any flow, its section/group is reset (section/group are project-scoped), and cross-project I/O dependency edges are DROPPED — both the task\'s own input edges and any references to it from tasks left behind. The response reports exactly what was dropped. For same-project moves between sections/groups use update_task or move_task_to_group instead.',
+    description: 'Move a task to a DIFFERENT project. Reassigns the short ID into the target project\'s sequence; preserves text, detail, priority, status, output contract and stored artifact. Side effects: unlinked from any flow, section/group reset (both are project-scoped), and cross-project I/O edges DROPPED — the task\'s own input edges and any references to it from tasks left behind. The response reports what was dropped. For same-project moves use update_task or move_task_to_group.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2737,7 +2737,7 @@ const TOOLS = [
   },
   {
     name: 'enable_task_review',
-    description: 'Enable the task-level output judge (TDE-261) on a STANDALONE task. Two modes: (1) call WITHOUT `bar` to get grounding (the task\'s text + the governing IS) and the instruction to author a checkable acceptance bar from text+IS only (Phase 1 — no KB); (2) call WITH `bar: { rules: [...] }` to FREEZE that bar as the task\'s review snapshot and turn review on. Refuses flow tasks (mutual exclusivity — flow gates govern those). Refuses to overwrite an existing frozen bar unless force:true.',
+    description: 'Enable the task-level output judge on a STANDALONE task. Two modes: (1) call WITHOUT `bar` to get grounding (the task\'s text + the governing IS) and the instruction to author a checkable acceptance bar from text+IS only (Phase 1 — no KB); (2) call WITH `bar: { rules: [...] }` to FREEZE that bar as the task\'s review snapshot and turn review on. Refuses flow tasks (mutual exclusivity — flow gates govern those). Refuses to overwrite an existing frozen bar unless force:true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2750,7 +2750,7 @@ const TOOLS = [
   },
   {
     name: 'disable_task_review',
-    description: 'Turn OFF task-level review (TDE-261) and clear its frozen bar + verdict — the undo counterpart of enable_task_review. Use this to release a task that was review-enabled by mistake, or stuck in an escalated (review_verdict.escalated) state, WITHOUT faking a passing review (which would corrupt the review ledger). Not a silent wipe: it stamps a {cleared:true, reason, cleared_at} record in place of the verdict so the audit shows a clear happened and why. Removes the "NEEDS REVIEW" board card. Refuses if review was never enabled.',
+    description: 'Turn OFF task-level review and clear its frozen bar + verdict — the undo counterpart of enable_task_review. Releases a task review-enabled by mistake, or stuck escalated, without faking a passing review. Not a silent wipe: stamps {cleared:true, reason, cleared_at} in place of the verdict so the audit shows a clear happened and why. Removes the "NEEDS REVIEW" board card. Refuses if review was never enabled.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2762,7 +2762,7 @@ const TOOLS = [
   },
   {
     name: 'review_task',
-    description: 'Run the task-level output judge (TDE-261) on a review-enabled STANDALONE task. Returns the single-task judging protocol with the frozen bar and the stored artifact (read SERVER-SIDE, not from your claims — independence). Mirrors the flow loop store_artifact → validate_output → submit_validation_result: you run check rules inline and spawn a fresh independent subagent for judgment rules, then call submit_task_review with the per-rule results. Refuses flow tasks (mutual exclusivity).',
+    description: 'Run the task-level output judge on a review-enabled STANDALONE task. Returns the judging protocol with the frozen bar and the stored artifact (read SERVER-SIDE, not from your claims — that is the independence). Run check rules inline; spawn a fresh independent subagent for judgment rules; then call submit_task_review with the per-rule results. Refuses flow tasks.',
     inputSchema: {
       type: 'object',
       properties: { task_id: { type: 'string', description: 'The review-enabled task to judge.' } },
@@ -2771,7 +2771,7 @@ const TOOLS = [
   },
   {
     name: 'submit_task_review',
-    description: 'Record the task-level judge verdict (TDE-261). Computes overall pass/fail from per-rule results against the frozen bar, writes review_verdict, and applies the gate: a blocker failure REOPENS the task (status→in_progress) with the critique; after 3 failed attempts it escalates to the human (action=ask_human). On pass the task stays done. Returns the action: pass | regenerate | ask_human.',
+    description: 'Record the task-level judge verdict. Computes overall pass/fail from per-rule results against the frozen bar, writes review_verdict, and applies the gate: a blocker failure REOPENS the task (status→in_progress) with the critique; after 3 failed attempts it escalates to the human (action=ask_human). On pass the task stays done. Returns the action: pass | regenerate | ask_human.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2793,7 +2793,7 @@ const TOOLS = [
         },
         narrative: {
           type: 'object',
-          description: 'GUIDED REVIEW (TDE-382): a human-facing narrative of the verdict, structured so the human gate is ~30s of judgment, not error-hunting. Provide on any fail/escalation. Verdict logic is unchanged — this is presentation.',
+          description: 'GUIDED REVIEW: a human-facing narrative of the verdict, structured so the human gate is ~30s of judgment, not error-hunting. Provide on any fail/escalation. Verdict logic is unchanged — this is presentation.',
           properties: {
             core:      { type: 'string', description: 'The single most important thing the human must judge.' },
             sections:  { type: 'array', description: 'Consequence-ordered points.', items: { type: 'object', properties: { point: { type: 'string' }, consequence: { type: 'string' } } } },
@@ -2860,7 +2860,7 @@ const TOOLS = [
   },
   {
     name: 'validate_output',
-    description: 'PHASE 1 of a handoff check. Returns the rules to evaluate — the CONSUMER\'s input contract for this edge (the gate) plus the producer\'s own output contract (self-check) — plus a validator_agent_prompt when judgment rules are present. Call this when you need to (a) learn which rules apply, or (b) get the validator_agent_prompt for a judgment-rule contract. For contracts with ONLY kind=check rules and you already know the rules, you may skip this call and call submit_validation_result directly — the response will tell you when this shortcut applies.',
+    description: 'PHASE 1 of a handoff check. Returns the rules to evaluate — the CONSUMER\'s input contract for this edge (the gate) plus the producer\'s output contract (self-check) — plus a validator_agent_prompt when judgment rules are present. Call it to learn which rules apply, or to get that prompt. For contracts with ONLY kind=check rules whose rules you already know, skip this and call submit_validation_result directly.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2878,7 +2878,7 @@ const TOOLS = [
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID — the PRODUCER (same as validate_output)' },
         target_task_id: { type: 'string', description: 'Optional: the CONSUMER edge validated against (required only if the producer feeds more than one task)' },
-        validator: { type: 'string', description: 'Who ran this validation. Required when judgment rules are present. Use "independent-subagent" (fresh Claude session with the artifact), "human" (human reviewed), or "self" (you graded your own work — discloses conflict). Omitting when judgment rules exist flags the ledger as unverified.' },
+        validator: { type: 'string', description: 'Who ran this validation. Required when judgment rules are present: "independent-subagent" (fresh session with the artifact), "human", or "self" (you graded your own work — discloses the conflict). Omitting it with judgment rules present flags the ledger unverified.' },
         results: {
           type: 'array',
           description: 'Per-rule results from your evaluation.',
@@ -2959,7 +2959,7 @@ const TOOLS = [
   },
   {
     name: 'get_flow_audit',
-    description: 'Full validation audit trail for a flow — who validated, when, which rules passed/failed, evidence notes, retry counts, and contract blessing status. Returns a step-by-step report across all tasks in the flow. Use for compliance review, debugging a failed run, or understanding what the flow produced and why. NOTE: this is the EVERYTHING view. To present a flow to a HUMAN for review, use get_flow_exceptions instead — showing a person every step is what makes them rubber-stamp.',
+    description: 'Full validation audit trail for a flow — who validated, when, which rules passed/failed, evidence notes, retry counts, contract blessing status — step by step across every task. Use for compliance review or debugging a failed run. This is the EVERYTHING view: to present a flow to a HUMAN, use get_flow_exceptions instead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2970,13 +2970,13 @@ const TOOLS = [
   },
   {
     name: 'get_flow_exceptions',
-    description: "THE HUMAN REVIEW SURFACE for a flow (TDE-382 / Q7). Returns ONLY what needs a person's judgment — never the flow's outputs, never passing checks, never progress. Q7 settled that human attention DEGRADES with volume: anyone shown 29 step outputs is rubber-stamping by the sixth, and a rubber-stamped output is worse than an ungated one because it then carries confidence. So review load must scale with PROBLEMS FOUND, not with flow length. Three categories come back, ordered by BLAST RADIUS (how much downstream work builds on the step, so early seams in long flows surface first): (1) FAILED CHECKS with their observed evidence — what was actually seen, not a claim; (2) JUDGMENT RESIDUE — criteria that could not be reduced to a deterministic check, which are the human's list BY DESIGN even when nothing failed; (3) the TERMINAL OUTPUT, always listed unconditionally, because no step downstream exists to catch it. Use this when a human asks 'what needs me on this flow?' or before asking anyone to sign off. Pass include_history to also pull earlier failed attempts from the durable gate history.",
+    description: "THE HUMAN REVIEW SURFACE for a flow. Returns ONLY what needs a person's judgment — never the flow's outputs, never passing checks, never progress. Three categories, ordered by blast radius (early seams in long flows first): (1) FAILED CHECKS with their observed evidence — what was seen, not a claim; (2) JUDGMENT RESIDUE — criteria no deterministic check could cover, the human's list by design even when nothing failed; (3) the TERMINAL OUTPUT, always, since nothing downstream can catch it. Use when a human asks 'what needs me on this flow?' or before asking anyone to sign off.",
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Any task in the flow (UUID or short ID).' },
         flow_id: { type: 'string', description: 'Alternatively, the flow UUID or name.' },
-        include_history: { type: 'boolean', description: 'Also include EARLIER failed attempts from task_events (TDE-818), not just the current state of each gate. Default false. Useful when a step passed only after several tries and you want to see what it failed on first.' },
+        include_history: { type: 'boolean', description: 'Also include EARLIER failed attempts from task_events, not just the current state of each gate. Default false. Useful when a step passed only after several tries and you want to see what it failed on first.' },
       },
       required: [],
     },
@@ -2994,7 +2994,7 @@ const TOOLS = [
   },
   {
     name: 'name_flow',
-    description: 'Give a flow a human name and optional shared context bag. Creates a named flow record and links all specified tasks to it. Call this after building a new flow (after all create_task + set_task_output + set_task_input calls). CONTRACTS DO NOT BLOCK THIS (TDE-820): a flow with no contracts anywhere is still a flow — gates belong only at seams, and naming a flow is about identity, not quality. The response includes an ADVISORY on internal handoffs: which carry no contract (normal), which have vague/unusable rules (worth sharpening), and which are AI-QA\'d but not yet human-blessed (fine until you rely on them as a gate — confirm_contract then). The name appears in get_flow_order output and can be retrieved with get_flow_context. A short ID (e.g. BKT-F1) is auto-assigned if not provided. To RENAME an already-named flow, do NOT re-call name_flow with the full task list — call update_flow_context(task_id, name) with any one task in the flow.',
+    description: 'Give a flow a human name and optional shared context bag: creates the flow record and links the given tasks to it. Call after building a new flow (after the create_task + set_task_output + set_task_input calls). CONTRACTS DO NOT BLOCK THIS — a flow with no contracts anywhere is still a flow. The response includes an advisory on internal handoffs: which carry no contract (normal), which have vague rules (worth sharpening), and which are AI-QA\'d but not human-blessed (confirm_contract when you need one as a real gate). A short ID (e.g. BKT-F1) is auto-assigned if not given. To RENAME an already-named flow do NOT re-call this with the full task list — use update_flow_context(task_id, name).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3003,9 +3003,9 @@ const TOOLS = [
         task_ids: { type: 'array', items: { type: 'string' }, description: 'All task IDs in the flow (UUIDs or short IDs).' },
         context: { type: 'string', description: 'Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow.' },
         short_id: { type: 'string', description: 'Optional custom short ID (e.g. "BKT-F3"). Must be unique across all your flows. Auto-generated if omitted.' },
-        step_list_open: { type: 'boolean', description: 'TDE-811: pass true when you do NOT yet know the flow\'s full step list — the operation discovers its next step as it goes (research, investigation). The flow then never reports itself complete just because the known steps ran out, and its progress readouts say more steps are expected. Default false (the steps you are naming are the whole flow). Changeable later via update_flow_context.' },
-        bypass: { type: 'boolean', description: 'DEPRECATED (TDE-820) — ignored. Contracts no longer block finalization, so there is nothing to bypass. Accepted only so older callers do not error; passing it does NOT mark the flow gate-bypassed.' },
-        bypass_reason: { type: 'string', description: 'DEPRECATED (TDE-820) — ignored, kept for backward compatibility.' },
+        step_list_open: { type: 'boolean', description: 'pass true when you do NOT yet know the flow\'s full step list — the operation discovers its next step as it goes (research, investigation). The flow then never reports itself complete just because the known steps ran out, and its progress readouts say more steps are expected. Default false (the steps you are naming are the whole flow). Changeable later via update_flow_context.' },
+        bypass: { type: 'boolean', description: 'DEPRECATED — ignored. Contracts no longer block finalization, so there is nothing to bypass. Accepted only so older callers do not error; passing it does NOT mark the flow gate-bypassed.' },
+        bypass_reason: { type: 'string', description: 'DEPRECATED — ignored, kept for backward compatibility.' },
       },
       required: ['project_id', 'name', 'task_ids'],
     },
@@ -3031,7 +3031,7 @@ const TOOLS = [
         context: { type: 'string', description: 'New shared context (replaces existing)' },
         name: { type: 'string', description: 'Optional: rename the flow' },
         short_id: { type: 'string', description: 'Optional: set or change the flow short ID (e.g. "BKT-F2"). Must be unique across all your flows.' },
-        step_list_open: { type: 'boolean', description: 'TDE-811: true = this flow does NOT yet know its full step list (it discovers the next step as it goes — research and investigation are like this). While true, progress readouts say "more steps expected" and the flow will NOT report itself complete when the currently-known steps run out, because that is a pause, not the end. Set false once the extent is known. Settable in BOTH directions mid-run — it is a fact about what you currently know, not a category of flow.' },
+        step_list_open: { type: 'boolean', description: 'True = the full step list is not yet known (the flow discovers its next step as it goes — research, investigation). While true, progress says "more steps expected" and the flow will NOT report itself complete when known steps run out. Set false once the extent is known. Settable both directions mid-run — it describes what you currently know, not a kind of flow.' },
       },
       required: ['task_id'],
     },
@@ -3120,7 +3120,7 @@ const TOOLS = [
   },
   {
     name: 'build_new_flow',
-    description: 'Start building a NEW flow — a chain of contract-linked tasks toward a goal (sections/groups are just filing; the flow is the I/O chain). Call this when the user wants to create a multi-step process/flow from scratch, OR to resolve a FLOW seed (pass its seed_id). It does NOT build anything itself: it returns an interview playbook + the project\'s current tasks/sections (grounding). When seed_id is given it also returns the seed\'s pre-brief and unified checklist, and SOFT-GATES on any unmet kind="prerequisite" items (surfaced for you to confirm with the user before building — never a hard block). YOU then run a grill-me-style interview, propose the tasks and their input/output contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
+    description: 'Start building a NEW flow — a single operation too big for one sitting, cut into steps so it holds together across its length. Call this when the user wants to create a multi-step process from scratch, OR to resolve a FLOW seed (pass its seed_id). It builds nothing itself: it returns an interview playbook plus the project\'s current tasks/sections as grounding. With seed_id it also returns the seed\'s pre-brief and checklist, and SOFT-GATES on unmet kind="prerequisite" items (surfaced to confirm with the user — never a hard block). YOU then run a grill-me-style interview, propose the steps and any contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3133,7 +3133,7 @@ const TOOLS = [
   },
   {
     name: 'derive_output_contract',
-    description: 'TDE-287: derive a producing task\'s output contract (its definition-of-done) FROM what its downstream consumers demand — the consumer\'s input-edge rules ARE the acceptance criteria the output must meet, so the def-of-done should cover them. Wire the consumer edges first (set_task_input), then call this on the PRODUCER. Returns a DRAFT rule set plus an "assumptions" list (vague rules inherited from consumers, multi-consumer merges, missing criteria) to SURFACE to the human before confirming — the derive-from-input + assumption-surfacing half of the authoring loop. Pass apply:true to persist the draft as the producer\'s output contract (still AI-QA\'d until confirm_contract; the name_flow gate enforces the blessing).',
+    description: 'Derive a producing task\'s output contract (its definition-of-done) FROM what its downstream consumers demand — the consumers\' input-edge rules ARE the acceptance criteria. Wire the consumer edges first (set_task_input), then call this on the PRODUCER. Returns a DRAFT rule set plus an "assumptions" list (vague inherited rules, multi-consumer merges, missing criteria) to SURFACE to the human before confirming. Pass apply:true to persist the draft as the output contract — still AI-QA\'d until confirm_contract.',
     inputSchema: {
       type: 'object',
       properties: {
