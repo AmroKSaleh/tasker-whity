@@ -1477,14 +1477,14 @@ const TOOLS = [
         device_id: { type: 'string', description: 'Stable name for this machine/checkout (e.g. "desktop-repo"). Determines the ID lease block.' },
         cursor: { type: 'number', description: 'The cursor from this device\'s current .sync.json (omit on first pull). Used for the tombstone diff.' },
         inline: { type: 'boolean', description: 'If true, return the full file map in the tool response instead of the hydrate script (context-heavy fallback for environments without node).' },
-        watch: { type: 'boolean', description: 'If true, ALSO mint a scoped device token and return a watch_script (watch.mjs) for immediate two-way sync: `node watch.mjs` flushes edits within ~1s of a save and polls the hub every ~15s. Use when a human will hand-edit files or wants the web board to update live. Off by default (avoids accruing standing tokens on ordinary pulls).' },
+        watch: { type: 'boolean', description: 'If true, also mint a scoped device token and return a watch_script (watch.mjs): `node watch.mjs` flushes edits within ~1s of a save and polls the hub every ~15s. Use when a human will hand-edit files or wants the web board to update live. Off by default.' },
       },
       required: ['project_id', 'device_id'],
     },
   },
   {
     name: 'flush_local_project',
-    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send changed task files (verbatim) and any deleted short IDs. The hub applies per-task last-write-wins by updated_at (ties → hub), enforces edit-beats-delete, accepts new tasks only within this device\'s leased ID block, and records tombstones. STRUCTURAL: a task\'s `section:` and `group:` frontmatter are writable — set them to move the task. CREATE-BY-REFERENCE: an unknown `section:` slug CREATES that section; an unknown `group:` slug CREATES that group (needs a section), returned as created_sections / created_groups, named as the slug verbatim. RENAME, DELETE and REORDER of groups/sections still go through MCP — files are create-only. Returns the new cursor plus hub_wins corrections: write those back to disk, then update .sync.json\'s cursor. Call after each work unit. input/output/review fields in files are READ-ONLY carriage — contract edits go through the normal MCP ceremonies.',
+    description: 'LOCAL MODE: push local .tasker/ edits up to the hub. Send changed task files (verbatim) and any deleted short IDs. Per-task last-write-wins by updated_at (ties → hub); edit beats delete; new tasks accepted only within this device\'s leased ID block; deletions get tombstoned. `section:` / `group:` frontmatter are writable to move a task; an unknown slug CREATES that section/group (returned as created_sections / created_groups, named as the slug). RENAME/DELETE/REORDER still go through MCP. Returns the new cursor plus hub_wins corrections — write those back, update .sync.json\'s cursor. Call after each work unit. input/output/review fields are READ-ONLY carriage.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1541,7 +1541,7 @@ const TOOLS = [
   },
   {
     name: 'bootstrap_project',
-    description: 'STEP 1 of a GATED interview for creating a NEW project. Call this FIRST when the user asks to create / set up a project — do NOT use create_project for that. It returns ONLY Phase 1 (open-prose elicitation) + a draft_id; the later phases are released one at a time by bootstrap_advance, so you cannot skip ahead or run a multiple-choice quiz. The project is created only from a user-BLESSED draft. trash in = trash out — lift input quality, never transcribe.',
+    description: 'STEP 1 of a GATED interview for creating a NEW project. Call this FIRST when the user asks to create / set up a project — not create_project. Returns ONLY Phase 1 (open-prose elicitation) + a draft_id; later phases release one at a time via bootstrap_advance, so you cannot skip ahead or run a multiple-choice quiz. The project is created only from a user-BLESSED draft.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1552,7 +1552,7 @@ const TOOLS = [
   },
   {
     name: 'bootstrap_advance',
-    description: 'Advance the gated bootstrap interview one phase at a time (after bootstrap_project). Each call returns ONLY the next phase. Steps in order: "elicited" (after asking the open Phase-1 questions; submit the user\'s free-text answers) → "drafted" (after drafting + probing the Foundation brief; submit the brief) → "blessed" (after the user blesses the brief line-by-line; submit the final brief — THIS creates the project). Steps are enforced; you cannot jump ahead.',
+    description: 'Advance the gated bootstrap interview one phase at a time (after bootstrap_project). Each call returns ONLY the next phase, in order: "elicited" (submit the user\'s free-text answers) → "drafted" (submit the drafted+probed Foundation brief) → "blessed" (submit the final brief — THIS creates the project). Enforced; you cannot jump ahead.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1619,7 +1619,7 @@ const TOOLS = [
   },
   {
     name: 'export_project',
-    description: 'Export an ENTIRE project to a portable, full-fidelity JSON bundle: Foundation/context, sections, groups, tasks (with milestones, I/O edges + contracts, flow membership, custom statuses), flows (+ flow IS/KB), the project Knowledge Base and Instruction Set. The returned JSON is the input to import_project — save it to a file to back up a project or move it to another account. Ephemeral state (drafts, intake jobs) is intentionally excluded.',
+    description: 'Export an ENTIRE project to a portable, full-fidelity JSON bundle: Foundation/context, sections, groups, tasks (milestones, I/O edges + contracts, flow membership, custom statuses), flows (+ flow IS/KB), the project KB and IS. The returned JSON is the input to import_project — save it to back up or move a project. Ephemeral state (drafts, intake jobs) is excluded.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
@@ -1725,7 +1725,7 @@ const TOOLS = [
   },
   {
     name: 'list_phases',
-    description: 'list a project\'s PHASES — condition-bounded stages ("Phase 1 ends when we launch"), each with its task counts. A phase is bounded by an exit condition, NOT a date; a due date is optional. Phases are an ORTHOGONAL axis to sections: sections are categorical (kind of work), phases are temporal (when). The response marks the project\'s ACTIVE phase and reports how many tasks are UNPHASED — unphased is a legitimate permanent state, not a backlog to drain.',
+    description: 'List a project\'s PHASES — condition-bounded stages ("Phase 1 ends when we launch"), each with task counts. Bounded by an exit condition, not a date (due_date is optional). Orthogonal to sections: sections are categorical, phases are temporal. Marks the ACTIVE phase and reports UNPHASED task count — a legitimate permanent state, not a backlog to drain.',
     inputSchema: {
       type: 'object',
       properties: { project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' } },
@@ -1734,7 +1734,7 @@ const TOOLS = [
   },
   {
     name: 'create_phase',
-    description: 'create a phase in a project. ALWAYS set exit_condition — it is the honesty guardrail: stating what must be TRUE for the phase to end forces a statement of what is actually required, so unrequired work falls out to a later phase. A phase without one is just a bucket. due_date is optional and should stay empty unless the user genuinely has a deadline (a phase is bounded by achievement, not the calendar — that is what makes it not a sprint).',
+    description: 'Create a phase in a project. ALWAYS set exit_condition — a phase without one is just a bucket; stating what must be TRUE to end it is what makes unrequired work fall to a later phase. due_date is optional and should stay empty unless there is a genuine deadline — a phase is bounded by achievement, not the calendar.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1800,7 +1800,7 @@ const TOOLS = [
   },
   {
     name: 'list_tasks',
-    description: 'List tasks. Each line carries the date the task was added and, when it differs, when it was last edited. For "what changed lately", pass sort: "recently_updated" — do NOT call get_task on candidates to compare timestamps. Flow steps are NOT tasks and are excluded: a task in a named flow is a STEP, listed via list_flows / get_flow_context, never here. Done tasks are excluded by default — pass status: "all" to include them. With no project_id the user\'s default project is used when set; otherwise listing across ALL projects requires confirmed: true.',
+    description: 'List tasks. Each line carries the added date and, when it differs, last-edited date. For "what changed lately", pass sort: "recently_updated" — do not call get_task on candidates to compare timestamps. Flow steps are excluded (they are STEPS, listed via list_flows / get_flow_context). Done tasks are excluded by default — status: "all" includes them. With no project_id the default project is used when set; otherwise listing across ALL projects requires confirmed: true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1808,7 +1808,7 @@ const TOOLS = [
         section_id: { type: 'string', description: 'Section UUID (optional)' },
         status:     { type: 'string', enum: ['pending', 'in_progress', 'done', 'all'], description: 'Filter by status. Defaults to excluding done tasks. Pass "all" to include everything.' },
         confirmed:  { type: 'boolean', description: 'Set to true to list tasks across ALL projects (only needed when project_id is omitted AND no default project is set).' },
-        include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own.' },
+        include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY — set true only when the user has explicitly asked to see flow steps here as if they were normal tasks. Never set on your own initiative.' },
         phase_id: { type: 'string', description: 'show only tasks in this phase (UUID, slug, or exact name). Pass "unphased" to list only tasks belonging to NO phase. Requires project_id.' },
         sort:       { type: 'string', enum: ['sorting_order', 'recently_updated'], description: 'Ordering. Default "sorting_order" (the board order). "recently_updated" sorts by last edit, newest first — use it to see what changed most recently.' },
       },
@@ -1817,7 +1817,7 @@ const TOOLS = [
   },
   {
     name: 'create_task',
-    description: 'Create a single task. For a multi-step process toward a goal — where steps hand off to each other and need quality checks between them — do NOT create tasks ad hoc; use build_new_flow instead. To create a SEED (a placeholder whose deliverable is another artifact, for work that is needed but underspecified, or a flow worth building later), pass kind:"seed" with seed_target plus open_questions and/or milestones — a seed has ONE unified checklist (open_questions become "answer-during-resolution" items, milestones become "settle-first" prerequisites that soft-gate resolution).',
+    description: 'Create a single task. For a multi-step process toward a goal, do NOT create tasks ad hoc — use build_new_flow instead. To create a SEED (a placeholder for underspecified work or a flow worth building later), pass kind:"seed" with seed_target plus open_questions and/or milestones — a unified checklist: open_questions are answered during resolution, milestones become prerequisites that soft-gate resolution.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1833,8 +1833,8 @@ const TOOLS = [
         milestones:     { type: 'array', items: { type: 'string' }, description: 'Ordered milestone texts, added in one call. On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind="prerequisite" items that soft-gate resolve_seed / build_new_flow. On a normal task, plain milestones.' },
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent (default) = AI runs it; user = human executes, AI coaches; external = third party (web admin, client, etc.). A single flow can mix executor types.' },
         human_guidance: { type: 'string', description: 'user/external steps only: human-facing instructions shown in guide mode. Distinct from detail (AI-facing). Write as an action directive — what the person must do, where, and how to verify it worked.' },
-        relay_context:  { type: 'string', description: 'RELAY MODE: set only when handing this task off to someone else. A CURATED rationale layer so the assignee need not come back and ask — NOT a transcript dump. Include: who it is for (e.g. "to: Sara (backend)"), key decisions and WHY, approaches rejected and why-not, intent, open questions, watch-outs. Setting it marks the task as a relay.' },
-        allow_duplicate: { type: 'boolean', description: 'Duplicate defense: creation is REFUSED if a near-identical open task exists (the response lists matches). Pass true only when it is genuinely distinct — otherwise work the existing task or merge_task_as_duplicate.' },
+        relay_context:  { type: 'string', description: 'RELAY MODE: set only when handing this task to someone else. Curated, not a transcript dump: who it is for, key decisions and WHY, rejected approaches, intent, open questions, watch-outs. Setting it marks the task as a relay.' },
+        allow_duplicate: { type: 'boolean', description: 'Creation is REFUSED if a near-identical open task exists (matches listed in the response). Pass true only when genuinely distinct — otherwise work the existing task or merge_task_as_duplicate.' },
       },
       required: ['project_id', 'text'],
     },
@@ -1858,7 +1858,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         seed_id: { type: 'string', description: 'The seed task to resolve (UUID or short ID).' },
-        proceed_anyway: { type: 'boolean', description: 'Override the soft prerequisite gate. Default false. When false, resolving a seed that still has unchecked kind="prerequisite" checklist items is refused with the list of unmet prerequisites — confirm with the user, then retry with true.' },
+        proceed_anyway: { type: 'boolean', description: 'Override the soft prerequisite gate. Default false — resolving with unchecked kind="prerequisite" items is refused with the list of what\'s unmet; confirm with the user, then retry true.' },
         task_spec: {
           type: 'object',
           description: 'The resolved concrete task.',
@@ -2130,7 +2130,7 @@ const TOOLS = [
   },
   {
     name: 'get_task_history',
-    description: "Read a task's DURABLE GATE HISTORY — the append-only record of what changed on its contract / review bar / gate verdicts, with before+after state. A real log, unlike get_flow_audit (the CURRENT validation snapshot). Answers what the task row cannot: what a contract said before it was replaced, whether a human confirmation was later erased, what an earlier review attempt said, what each retry failed on. Kinds: contract_set, contract_cleared, contract_confirmed, review_bar_frozen, review_bar_cleared, review_submitted, validation_submitted, fields_changed.",
+    description: "A task's DURABLE GATE HISTORY — the append-only record of contract / review bar / gate changes, with before+after state. Unlike get_flow_audit (the current snapshot), this answers what the task row cannot: what a contract said before replacement, whether a confirmation was later erased, what an earlier review attempt said. Kinds: contract_set, contract_cleared, contract_confirmed, review_bar_frozen, review_bar_cleared, review_submitted, validation_submitted, fields_changed.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -2144,7 +2144,7 @@ const TOOLS = [
   },
   {
     name: 'get_my_attention',
-    description: "The agent's 'what needs me?' triage — one cross-task pull. Recommended FIRST move after __init_tasker_session. Returns, for the user's non-done work (optionally scoped to a project): tasks awaiting the human's review verdict, pending human GUIDANCE left on tasks (unconsumed), agent sessions AWAITING INPUT (an agent asked a question and is blocked), STALE in-progress tasks (quiet 2+ days), and OVERDUE items. Read it, then act on the highest-priority item.",
+    description: "The 'what needs me?' triage — one cross-task pull. Recommended FIRST move after __init_tasker_session. For the user's non-done work (optionally scoped to a project): tasks awaiting review verdict, pending human GUIDANCE (unconsumed), agent sessions AWAITING INPUT, STALE in-progress tasks (quiet 2+ days), and OVERDUE items. Act on the highest-priority item.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -2256,7 +2256,7 @@ const TOOLS = [
   },
   {
     name: 'github_push_file',
-    description: 'Commit a text file to a path in a connected GitHub repo — the canonical way to persist flow/task artifacts to version control. If the file already exists it is updated (the existing SHA is fetched automatically). Path convention for flow artifacts: .tasker/artifacts/{flow-short-id}/{filename}. Requires a GitHub account connected via github_connect and a repo to write to (falls back to the project\'s linked repo if task_id is supplied and omitted).',
+    description: 'Commit a text file to a path in a connected GitHub repo — the way to persist flow/task artifacts to version control. Updates the file if it already exists (SHA fetched automatically). Path convention for flow artifacts: .tasker/artifacts/{flow-short-id}/{filename}. Requires GitHub connected via github_connect; falls back to the project\'s linked repo when task_id is supplied.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2673,7 +2673,7 @@ const TOOLS = [
   },
   {
     name: 'move_task',
-    description: 'Move a task to a DIFFERENT project. Reassigns the short ID into the target project\'s sequence; preserves text, detail, priority, status, output contract and stored artifact. Side effects: unlinked from any flow, section/group reset (both are project-scoped), and cross-project I/O edges DROPPED — the task\'s own input edges and any references to it from tasks left behind. The response reports what was dropped. For same-project moves use update_task or move_task_to_group.',
+    description: 'Move a task to a DIFFERENT project. Reassigns the short ID into the target project\'s sequence; preserves text, detail, priority, status, output contract and stored artifact. Side effects: unlinked from any flow, section/group reset, cross-project I/O edges DROPPED (its own inputs and any references to it). The response reports what was dropped. For same-project moves use update_task or move_task_to_group.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2737,7 +2737,7 @@ const TOOLS = [
   },
   {
     name: 'enable_task_review',
-    description: 'Enable the task-level output judge on a STANDALONE task. Two modes: (1) call WITHOUT `bar` to get grounding (the task\'s text + the governing IS) and the instruction to author a checkable acceptance bar from text+IS only (Phase 1 — no KB); (2) call WITH `bar: { rules: [...] }` to FREEZE that bar as the task\'s review snapshot and turn review on. Refuses flow tasks (mutual exclusivity — flow gates govern those). Refuses to overwrite an existing frozen bar unless force:true.',
+    description: 'Enable the task-level output judge on a STANDALONE task. Call WITHOUT `bar` to get grounding (task text + governing IS) and instructions to author a checkable bar; call WITH `bar: { rules: [...] }` to FREEZE it and turn review on. Refuses flow tasks (flow gates govern those) and refuses to overwrite an existing frozen bar unless force:true.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2872,7 +2872,7 @@ const TOOLS = [
   },
   {
     name: 'submit_validation_result',
-    description: 'Report per-rule validation results. Writes to the producer\'s feedback ledger, applies the gate (any BLOCKER gate-rule failure → invalid, reopens producer), returns the verdict. Can be called standalone (without a prior validate_output) for contracts with only kind=check rules when the rules are already known — collapses the two-call flow to one. Always required for judgment rules (called by the validator subagent). Warnings recorded but do not block.',
+    description: 'Report per-rule validation results. Writes to the producer\'s feedback ledger, applies the gate (any BLOCKER rule failure → invalid, reopens producer), returns the verdict. Can skip a prior validate_output for contracts with only kind=check rules already known. Always required for judgment rules (called by the validator subagent). Warnings recorded but do not block.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2994,7 +2994,7 @@ const TOOLS = [
   },
   {
     name: 'name_flow',
-    description: 'Give a flow a human name and optional shared context bag: creates the flow record and links the given tasks to it. Call after building a new flow (after the create_task + set_task_output + set_task_input calls). CONTRACTS DO NOT BLOCK THIS — a flow with no contracts anywhere is still a flow. The response includes an advisory on internal handoffs: which carry no contract (normal), which have vague rules (worth sharpening), and which are AI-QA\'d but not human-blessed (confirm_contract when you need one as a real gate). A short ID (e.g. BKT-F1) is auto-assigned if not given. To RENAME an already-named flow do NOT re-call this with the full task list — use update_flow_context(task_id, name).',
+    description: 'Give a flow a human name and optional shared context bag: creates the flow record and links the given tasks to it. Call after building a new flow (after create_task + set_task_output + set_task_input). CONTRACTS DO NOT BLOCK THIS — a flow with no contracts anywhere is still a flow. Returns an advisory on internal handoffs: no contract (normal), vague rules (worth sharpening), AI-QA\'d but not human-blessed (confirm_contract when you need a real gate). A short ID (e.g. BKT-F1) is auto-assigned if not given. To RENAME an already-named flow use update_flow_context(task_id, name), not this.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3003,8 +3003,8 @@ const TOOLS = [
         task_ids: { type: 'array', items: { type: 'string' }, description: 'All task IDs in the flow (UUIDs or short IDs).' },
         context: { type: 'string', description: 'Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow.' },
         short_id: { type: 'string', description: 'Optional custom short ID (e.g. "BKT-F3"). Must be unique across all your flows. Auto-generated if omitted.' },
-        step_list_open: { type: 'boolean', description: 'pass true when you do NOT yet know the flow\'s full step list — the operation discovers its next step as it goes (research, investigation). The flow then never reports itself complete just because the known steps ran out, and its progress readouts say more steps are expected. Default false (the steps you are naming are the whole flow). Changeable later via update_flow_context.' },
-        bypass: { type: 'boolean', description: 'DEPRECATED — ignored. Contracts no longer block finalization, so there is nothing to bypass. Accepted only so older callers do not error; passing it does NOT mark the flow gate-bypassed.' },
+        step_list_open: { type: 'boolean', description: 'True when the flow\'s full step list is not yet known (research, investigation — it discovers steps as it goes). Progress then says more steps are expected and never falsely reports complete. Default false. Changeable later via update_flow_context.' },
+        bypass: { type: 'boolean', description: 'DEPRECATED — ignored, kept so older callers do not error. Contracts no longer block finalization.' },
         bypass_reason: { type: 'string', description: 'DEPRECATED — ignored, kept for backward compatibility.' },
       },
       required: ['project_id', 'name', 'task_ids'],
@@ -3120,7 +3120,7 @@ const TOOLS = [
   },
   {
     name: 'build_new_flow',
-    description: 'Start building a NEW flow — a single operation too big for one sitting, cut into steps so it holds together across its length. Call this when the user wants to create a multi-step process from scratch, OR to resolve a FLOW seed (pass its seed_id). It builds nothing itself: it returns an interview playbook plus the project\'s current tasks/sections as grounding. With seed_id it also returns the seed\'s pre-brief and checklist, and SOFT-GATES on unmet kind="prerequisite" items (surfaced to confirm with the user — never a hard block). YOU then run a grill-me-style interview, propose the steps and any contracts, get ONE confirmation of the whole flow at the end, and only then persist via create_task + set_task_output + set_task_input.',
+    description: 'Start building a NEW flow — a single operation too big for one sitting, cut into steps so it holds together across its length. Call when the user wants a multi-step process from scratch, OR to resolve a FLOW seed (pass its seed_id). Builds nothing itself: returns an interview playbook plus the project\'s current tasks/sections as grounding, and with seed_id the seed\'s pre-brief + checklist (SOFT-GATED on unmet kind="prerequisite" items — surfaced, never a hard block). Run a grill-me interview, propose steps and any contracts, get ONE confirmation, then persist via create_task + set_task_output + set_task_input.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3133,7 +3133,7 @@ const TOOLS = [
   },
   {
     name: 'derive_output_contract',
-    description: 'Derive a producing task\'s output contract (its definition-of-done) FROM what its downstream consumers demand — the consumers\' input-edge rules ARE the acceptance criteria. Wire the consumer edges first (set_task_input), then call this on the PRODUCER. Returns a DRAFT rule set plus an "assumptions" list (vague inherited rules, multi-consumer merges, missing criteria) to SURFACE to the human before confirming. Pass apply:true to persist the draft as the output contract — still AI-QA\'d until confirm_contract.',
+    description: 'Derive a producing task\'s output contract FROM what its downstream consumers demand — the consumers\' input-edge rules ARE the acceptance criteria. Wire the consumer edges first (set_task_input), then call on the PRODUCER. Returns a DRAFT rule set plus an "assumptions" list (vague inherited rules, multi-consumer merges, missing criteria) to surface to the human before confirming. apply:true persists the draft — still AI-QA\'d until confirm_contract.',
     inputSchema: {
       type: 'object',
       properties: {
