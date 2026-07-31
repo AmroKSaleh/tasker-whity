@@ -1443,7 +1443,7 @@ const CONTRACT_SCHEMA = {
 const TOOLS = [
   {
     name: 'list_projects',
-    description: 'List all projects with name, slug, progress stats, and context (goal, why, scope), grouped by Environment (the active one is marked). Defaults to ALL projects across every Environment — pass environment_id to show only one. If you have not yet called __init_tasker_session this session, call it first — it returns the user\'s preferences and the playbook for using Tasker correctly (task lifecycle, flows, dependency rules).',
+    description: 'List all projects with name, slug, progress stats, and context (goal, why, scope), grouped by Environment (active one marked). Defaults to ALL projects across every Environment — pass environment_id to show only one. Call __init_tasker_session first if you have not this session.',
     inputSchema: { type: 'object', properties: { environment_id: { type: 'string', description: 'Optional: show only projects in this Environment (UUID from list_environments). Omit to see every Environment.' } }, required: [] },
   },
   {
@@ -1503,7 +1503,7 @@ const TOOLS = [
   },
   {
     name: 'set_local_mode',
-    description: 'Turn Local Mode ON or OFF for a project (the same toggle as the web ⇄ Local button). When ON, the project mirrors to .tasker/ files that agents work directly and sync via pull_local_project / flush_local_project. Turning it OFF does not delete any existing .tasker/ files on disk — it just stops the hub treating the project as local (pull/flush will refuse until re-enabled). Use this to make a project local without opening the web app.',
+    description: 'Turn Local Mode ON or OFF for a project (same toggle as the web ⇄ Local button). ON mirrors the project to .tasker/ files synced via pull_local_project / flush_local_project. OFF does not delete existing .tasker/ files — it just stops the hub treating the project as local (pull/flush refuse until re-enabled). Use to go local without opening the web app.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1515,7 +1515,7 @@ const TOOLS = [
   },
   {
     name: 'mint_device_token',
-    description: 'LOCAL MODE (immediate sync): mint a long-lived, revocable device token so a watch.mjs process can auto-sync .tasker/ the instant a file changes. Scoped to ONE project on ONE device — even if leaked it can only pull/flush that project. Returns the secret ONCE (never shown again) plus the watch endpoints. Prefer the watch_script from pull_local_project, which mints and embeds a token for you. Owner-only.',
+    description: 'LOCAL MODE: mint a long-lived, revocable device token so watch.mjs can auto-sync .tasker/ the instant a file changes. Scoped to ONE project on ONE device. Returns the secret ONCE plus the watch endpoints. Prefer the watch_script from pull_local_project, which mints one for you. Owner-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1877,14 +1877,14 @@ const TOOLS = [
   },
   {
     name: 'update_task',
-    description: 'Update task fields. Only provided fields are changed. Pass append:true to ADD the provided detail to the existing detail (separated by a blank line) instead of replacing it — use it to accumulate notes/context on a task without resending the whole field. Note: setting status to in_progress or done is hard-blocked if the task has unmet upstream flow dependencies — finish the source task(s) first (the response explains which).',
+    description: 'Update task fields. Only provided fields change. Pass append:true to ADD detail to the existing detail (blank-line separated) instead of replacing it. Setting status to in_progress or done is hard-blocked if the task has unmet upstream flow dependencies — finish the source task(s) first (the response explains which).',
     inputSchema: {
       type: 'object',
       properties: {
         task_id:    { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         text:       { type: 'string' },
         detail:     { type: 'string', description: 'Task context. Replaces the existing detail unless append:true is also passed.' },
-        append:     { type: 'boolean', description: 'If true, the provided detail is appended to the existing detail (separated by a blank line) instead of replacing it. Default false. Lets you add notes/context without resending the whole field.' },
+        append:     { type: 'boolean', description: 'If true, appends the provided detail to the existing detail (blank-line separated) instead of replacing it. Default false.' },
         priority:   { type: 'string', enum: ['rush', 'high', 'medium', 'low'] },
         status:     { type: 'string', enum: ['pending', 'in_progress', 'done'] },
         due_date:   { type: 'string' },
@@ -1895,9 +1895,9 @@ const TOOLS = [
         human_guidance: { type: 'string', description: 'Human-facing step instructions for guide mode (user/external steps). Replaces existing.' },
         relay_context:  { type: 'string', description: 'Set/replace the relay rationale layer on an EXISTING task. Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump.' },
         delegated_to:   { type: 'string', description: 'Who the task is delegated to (free text — agent or teammate). The owner REMAINS responsible and still owns the quality gate; delegation is NOT reassignment. Empty string clears.' },
-        agent_ready:    { type: 'boolean', description: 'Mark this task "ready for the agent" — it enters the autonomous work queue (get_ready_work). Usually set by the human in the web app ("Hand to agent"); set false to pull it back.' },
-        agent_proposal: { type: 'string', description: 'Prepare→confirm→execute: record the agent\'s PREPARED proposal for this task (a concise summary of what it will do). Setting it makes the task appear in the web Agent Queue "Awaiting confirmation" tab. Clear it (empty string) once the human confirms and you execute, or if declined.' },
-        agent_proposal_confirmed: { type: 'boolean', description: 'Usually set by the HUMAN in the web app (the "Confirm" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. The agent normally only clears the proposal after executing (which resets this to false).' },
+        agent_ready:    { type: 'boolean', description: 'Mark "ready for the agent" — enters the autonomous work queue (get_ready_work). Usually set by the human ("Hand to agent"); false pulls it back.' },
+        agent_proposal: { type: 'string', description: 'Prepare→confirm→execute: the agent\'s PREPARED proposal (a concise summary of what it will do). Setting it puts the task in the web Agent Queue "Awaiting confirmation" tab. Clear it (empty string) once confirmed-and-executed, or if declined.' },
+        agent_proposal_confirmed: { type: 'boolean', description: 'Usually set by the human (the "Confirm" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. Normally reset to false only by clearing the proposal after executing.' },
       },
       required: ['task_id'],
     },
@@ -2104,7 +2104,7 @@ const TOOLS = [
   },
   {
     name: 'append_session_activity',
-    description: "Append a typed, IMMUTABLE entry to a task's agent session ledger — the durable, human-inspectable record of what the agent did (persists across sessions). Opens a session lazily if none is open. Types: progress (a step taken / status update), action (a concrete change made), question (BLOCKED — needs human input; sets the session to awaiting_input), result (an outcome / deliverable), error (a failure). Entries cannot be edited or deleted.",
+    description: "Append a typed, IMMUTABLE entry to a task's agent session ledger — the durable, human-inspectable record of what the agent did. Opens a session lazily if none is open. Types: progress (a step/status update), action (a concrete change), question (BLOCKED — sets the session to awaiting_input), result (an outcome/deliverable), error. Entries cannot be edited or deleted.",
     inputSchema: {
       type: 'object',
       properties: {
@@ -2292,7 +2292,7 @@ const TOOLS = [
         content:   { type: 'string', description: 'Text content of the file. For target_type "doc": pass HTML or Markdown. For "sheet": pass CSV.' },
         task_id:   { type: 'string', description: 'Optional: task UUID or short ID. Places file in the right project/flow subfolder and records the Drive file ID on the task output.' },
         target_type: { type: 'string', enum: ['file', 'doc', 'sheet'], description: 'What to create. "file" (default) = raw file as-is. "doc" = editable Google Doc (converts from HTML/Markdown). "sheet" = editable Google Sheet (converts from CSV).' },
-        mime_type: { type: 'string', description: 'Source content MIME. For "file": the file\'s own type (default text/plain; use text/markdown for .md). For "doc": text/html (default) or text/markdown. For "sheet": text/csv (default). This is the format Drive converts FROM, not the Google-apps type.' },
+        mime_type: { type: 'string', description: 'Source content MIME — the format Drive converts FROM, not the Google-apps type. "file": default text/plain (text/markdown for .md). "doc": text/html (default) or text/markdown. "sheet": text/csv (default).' },
       },
       required: ['filename', 'content'],
     },
@@ -2750,7 +2750,7 @@ const TOOLS = [
   },
   {
     name: 'disable_task_review',
-    description: 'Turn OFF task-level review and clear its frozen bar + verdict — the undo counterpart of enable_task_review. Releases a task review-enabled by mistake, or stuck escalated, without faking a passing review. Not a silent wipe: stamps {cleared:true, reason, cleared_at} in place of the verdict so the audit shows a clear happened and why. Removes the "NEEDS REVIEW" board card. Refuses if review was never enabled.',
+    description: 'Turn OFF task-level review and clear its frozen bar + verdict — the undo counterpart of enable_task_review. Releases a task review-enabled by mistake or stuck escalated, without faking a passing review. Stamps {cleared:true, reason, cleared_at} in place of the verdict rather than silently wiping it. Removes the "NEEDS REVIEW" card. Refuses if review was never enabled.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2970,13 +2970,13 @@ const TOOLS = [
   },
   {
     name: 'get_flow_exceptions',
-    description: "THE HUMAN REVIEW SURFACE for a flow. Returns ONLY what needs a person's judgment — never the flow's outputs, never passing checks, never progress. Three categories, ordered by blast radius (early seams in long flows first): (1) FAILED CHECKS with their observed evidence — what was seen, not a claim; (2) JUDGMENT RESIDUE — criteria no deterministic check could cover, the human's list by design even when nothing failed; (3) the TERMINAL OUTPUT, always, since nothing downstream can catch it. Use when a human asks 'what needs me on this flow?' or before asking anyone to sign off.",
+    description: "THE HUMAN REVIEW SURFACE for a flow. Returns ONLY what needs judgment — never outputs, passing checks, or progress. Ordered by blast radius: (1) FAILED CHECKS with observed evidence; (2) JUDGMENT RESIDUE — criteria no check could cover; (3) the TERMINAL OUTPUT, always, since nothing downstream can catch it. Use when a human asks 'what needs me on this flow?' or before sign-off.",
     inputSchema: {
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Any task in the flow (UUID or short ID).' },
         flow_id: { type: 'string', description: 'Alternatively, the flow UUID or name.' },
-        include_history: { type: 'boolean', description: 'Also include EARLIER failed attempts from task_events, not just the current state of each gate. Default false. Useful when a step passed only after several tries and you want to see what it failed on first.' },
+        include_history: { type: 'boolean', description: 'Also include EARLIER failed attempts, not just the current state of each gate. Default false. Useful to see what a step failed on before it eventually passed.' },
       },
       required: [],
     },
@@ -3031,14 +3031,14 @@ const TOOLS = [
         context: { type: 'string', description: 'New shared context (replaces existing)' },
         name: { type: 'string', description: 'Optional: rename the flow' },
         short_id: { type: 'string', description: 'Optional: set or change the flow short ID (e.g. "BKT-F2"). Must be unique across all your flows.' },
-        step_list_open: { type: 'boolean', description: 'True = the full step list is not yet known (the flow discovers its next step as it goes — research, investigation). While true, progress says "more steps expected" and the flow will NOT report itself complete when known steps run out. Set false once the extent is known. Settable both directions mid-run — it describes what you currently know, not a kind of flow.' },
+        step_list_open: { type: 'boolean', description: 'True = the full step list is not yet known (research/investigation discovering its next step as it goes). Progress then says "more expected" and won\'t falsely report complete. Set false once the extent is known — changeable either way mid-run.' },
       },
       required: ['task_id'],
     },
   },
   {
     name: 'guide_flow',
-    description: 'Start or resume guide mode for a flow that has user/external steps. Returns the current pending human step with its human_guidance text, AI coaching context, and what evidence is needed to advance. The agent\'s role in guide mode is coach + verifier (explain the step, answer "why", troubleshoot snags, check evidence) — NOT executor. Call this at the start of a guide session and whenever the user asks for the current step or needs help.',
+    description: 'Start or resume guide mode for a flow with user/external steps. Returns the current pending human step with its human_guidance text, coaching context, and what evidence is needed to advance. The agent\'s role is coach + verifier — NOT executor. Call at the start of a guide session and whenever the user asks for the current step or needs help.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3061,7 +3061,7 @@ const TOOLS = [
   },
   {
     name: 'run_flow',
-    description: 'Get the full execution playbook for an existing flow — ordered steps with their contracts, current status, and the step-by-step protocol to run the flow to completion. Call this at the start of any flow run. The playbook tells you exactly what to produce at each step, what the quality gates check, and how to sequence store_artifact → complete_task → validate_output → submit_validation_result for each handoff.',
+    description: 'Get the full execution playbook for an existing flow — ordered steps with contracts, current status, and the protocol to run it to completion. Call at the start of any flow run. Tells you what to produce at each step, what the gates check, and how to sequence store_artifact → complete_task → validate_output → submit_validation_result per handoff.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -3145,7 +3145,7 @@ const TOOLS = [
   },
   {
     name: 'pull_intake_job',
-    description: 'INTAKE QUEUE: claim the oldest PENDING intake job for the user — content they captured from the web app (e.g. a Gmail email via the "+Task" button) for you to structure into tasks. Call this when the user says "process intake" / "process my emails" / similar. Marks the job processing and returns its payload. After structuring, call submit_intake_result. Returns {job_id, source, payload, instructions} or {empty:true} if nothing is pending.',
+    description: 'INTAKE QUEUE: claim the oldest PENDING intake job — content the user captured from the web app (e.g. a Gmail email via "+Task") for you to structure into tasks. Call on "process intake" / "process my emails". Marks the job processing and returns its payload; after structuring, call submit_intake_result. Returns {empty:true} if nothing is pending.',
     inputSchema: { type: 'object', properties: {} },
   },
   {
