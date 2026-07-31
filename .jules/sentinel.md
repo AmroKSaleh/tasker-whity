@@ -1,0 +1,4 @@
+## 2026-07-31 - OAuth Client and Redirect URI Validation
+**Vulnerability:** The OAuth authorization endpoint (`OAuthAuthorizePage.jsx`) previously accepted any arbitrary `client_id` and `redirect_uri` parameters and generated OAuth authorization codes without validating them against registered clients in the database, allowing redirect hijacking and open redirect on deny.
+**Learning:** Even if client-side state hooks like `clientLabel` exist to handle known clients, authentication and authorization flows must always validate all untrusted inputs on mount against the source of truth (the database).
+**Prevention:** Query `oauth_clients` on mount to check if the client is registered, and ensure that the requested `redirect_uri` is strictly included in the registered `redirect_uris` whitelist. Stop the flow immediately if validation fails.

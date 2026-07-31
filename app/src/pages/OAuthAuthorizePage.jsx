@@ -26,28 +26,61 @@ export default function OAuthAuthorizePage() {
   const codeChallengeMethod = params.get('code_challenge_method') ?? 'S256'
 
   const [session, setSession] = useState(null)
+  const [client, setClient] = useState(null)
+  const [validationError, setValidationError] = useState('')
   const [loading, setLoading] = useState(true)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState('')
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setLoading(false)
-      if (!session) {
+    let active = true
+    async function init() {
+      const { data: { session: sess } } = await supabase.auth.getSession()
+      if (!active) return
+      setSession(sess)
+      if (!sess) {
         navigate(`/login?next=${encodeURIComponent(location.pathname + location.search)}`, { replace: true })
+        return
       }
-    })
-  }, [])
+      if (!clientId || !redirectUri) {
+        setValidationError('Missing client_id or redirect_uri')
+        setLoading(false)
+        return
+      }
+      try {
+        const { data: dbClient, error: dbErr } = await supabase
+          .from('oauth_clients')
+          .select('client_id, redirect_uris, client_name')
+          .eq('client_id', clientId)
+          .maybeSingle()
+
+        if (dbErr || !dbClient) {
+          setValidationError('Client not registered')
+        } else if (!dbClient.redirect_uris?.includes(redirectUri)) {
+          setValidationError('Invalid redirect_uri')
+        } else {
+          setClient(dbClient)
+        }
+      } catch {
+        setValidationError('Failed to validate client connection')
+      }
+      setLoading(false)
+    }
+    init()
+    return () => { active = false }
+  }, [clientId, redirectUri, location.pathname, location.search, navigate])
 
   async function handleApprove() {
-    if (!redirectUri) { setError('Missing redirect_uri'); return }
+    if (validationError || !redirectUri) { setError('Invalid request'); return }
     setWorking(true)
     try {
       const bytes = new Uint8Array(32)
       crypto.getRandomValues(bytes)
       const code = btoa(String.fromCharCode(...bytes))
         .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '')
+
+      const expiresAt = new Date()
+      expiresAt.setMinutes(expiresAt.getMinutes() + 10)
 
       const { error: dbErr } = await supabase.from('oauth_codes').insert({
         user_id: session.user.id,
@@ -56,14 +89,14 @@ export default function OAuthAuthorizePage() {
         redirect_uri: redirectUri,
         code_challenge: codeChallenge || null,
         code_challenge_method: codeChallenge ? codeChallengeMethod : null,
-        expires_at: new Date(Date.now() + 10 * 60 * 1000).toISOString(),
+        expires_at: expiresAt.toISOString(),
       })
       if (dbErr) throw new Error(dbErr.message)
 
       const url = new URL(redirectUri)
       url.searchParams.set('code', code)
       if (state) url.searchParams.set('state', state)
-      window.location.href = url.toString()
+      window.location.assign(url.toString())
     } catch (err) {
       setError(err.message)
       setWorking(false)
@@ -71,17 +104,17 @@ export default function OAuthAuthorizePage() {
   }
 
   function handleDeny() {
-    if (!redirectUri) { navigate('/home'); return }
+    if (validationError || !redirectUri) { navigate('/home'); return }
     const url = new URL(redirectUri)
     url.searchParams.set('error', 'access_denied')
     if (state) url.searchParams.set('state', state)
-    window.location.href = url.toString()
+    window.location.assign(url.toString())
   }
 
   if (loading) return null
   if (!session) return null
 
-  const appName = clientLabel(clientId)
+  const appName = client?.client_name || clientLabel(clientId)
 
   return (
     <div className="min-h-screen bg-paper flex flex-col items-center justify-center p-6">
@@ -97,50 +130,65 @@ export default function OAuthAuthorizePage() {
 
         {/* Card */}
         <div className="bg-paper border border-line rounded-xl shadow-panel overflow-hidden">
-          {/* Header */}
-          <div className="px-6 pt-6 pb-4 border-b border-line-2">
-            <p className="text-[13px] font-semibold text-ink mb-0.5">{appName} wants to connect</p>
-            <p className="text-[12px] text-mute">Signed in as {session.user.email}</p>
-          </div>
+          {validationError ? (
+            <div className="p-6 text-center">
+              <p className="text-[14px] font-semibold text-ink mb-2">Invalid Connection Request</p>
+              <p className="text-[12px] text-red-500 mb-6">{validationError}</p>
+              <button
+                onClick={() => navigate('/home')}
+                className="w-full h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors"
+              >
+                Go Home
+              </button>
+            </div>
+          ) : (
+            <>
+              {/* Header */}
+              <div className="px-6 pt-6 pb-4 border-b border-line-2">
+                <p className="text-[13px] font-semibold text-ink mb-0.5">{appName} wants to connect</p>
+                <p className="text-[12px] text-mute">Signed in as {session.user.email}</p>
+              </div>
 
-          {/* Permissions */}
-          <div className="px-6 py-4 border-b border-line-2">
-            <p className="text-[11px] font-semibold text-mute uppercase tracking-wider mb-3">This will allow {appName} to</p>
-            <ul className="flex flex-col gap-2">
-              {[
-                'Read your projects and tasks',
-                'Create and update tasks',
-                'Mark tasks as done',
-                'Add and complete milestones',
-              ].map(p => (
-                <li key={p} className="flex items-center gap-2.5 text-[12px] text-ink-2">
-                  <span className="text-[#5C7A5F] font-bold">✓</span>
-                  {p}
-                </li>
-              ))}
-            </ul>
-          </div>
+              {/* Permissions */}
+              <div className="px-6 py-4 border-b border-line-2">
+                <p className="text-[11px] font-semibold text-mute uppercase tracking-wider mb-3">This will allow {appName} to</p>
+                <ul className="flex flex-col gap-2">
+                  {[
+                    'Read your projects and tasks',
+                    'Create and update tasks',
+                    'Mark tasks as done',
+                    'Add and complete milestones',
+                  ].map(p => (
+                    <li key={p} className="flex items-center gap-2.5 text-[12px] text-ink-2">
+                      <span className="text-[#5C7A5F] font-bold">✓</span>
+                      {p}
+                    </li>
+                  ))}
+                </ul>
+              </div>
 
-          {/* Actions */}
-          <div className="px-6 py-4 flex gap-3">
-            <button
-              onClick={handleDeny}
-              disabled={working}
-              className="flex-1 h-9 border border-line rounded-lg text-[13px] font-semibold text-mute hover:text-ink hover:border-ink-2 transition-colors disabled:opacity-40"
-            >
-              Deny
-            </button>
-            <button
-              onClick={handleApprove}
-              disabled={working}
-              className="flex-1 h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors disabled:opacity-40"
-            >
-              {working ? 'Connecting…' : 'Allow'}
-            </button>
-          </div>
+              {/* Actions */}
+              <div className="px-6 py-4 flex gap-3">
+                <button
+                  onClick={handleDeny}
+                  disabled={working}
+                  className="flex-1 h-9 border border-line rounded-lg text-[13px] font-semibold text-mute hover:text-ink hover:border-ink-2 transition-colors disabled:opacity-40"
+                >
+                  Deny
+                </button>
+                <button
+                  onClick={handleApprove}
+                  disabled={working}
+                  className="flex-1 h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors disabled:opacity-40"
+                >
+                  {working ? 'Connecting…' : 'Allow'}
+                </button>
+              </div>
 
-          {error && (
-            <p className="px-6 pb-4 text-[12px] text-red-500">{error}</p>
+              {error && (
+                <p className="px-6 pb-4 text-[12px] text-red-500">{error}</p>
+              )}
+            </>
           )}
         </div>
 
