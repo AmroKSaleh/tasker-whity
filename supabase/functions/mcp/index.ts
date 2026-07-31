@@ -1,4 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2'
+import * as jose from 'https://deno.land/x/jose@v4.14.4/index.ts'
 import { inputEdges, inputSourceIds, outputContract, lintRule, deriveOutputFromConsumers, contractAdvisories, renderContractAdvisory } from './contract_gate.ts'
 import { serializeTaskFile, serializeProjectJson, parseTaskFile, contentHash, kbFileSlug, serializeStructure, parseStructure } from './local_format.ts'
 import {
@@ -103,6 +104,25 @@ async function userTimezone(sb: any, userId: string): Promise<string | null> {
 }
 
 // ── Auth ─────────────────────────────────────────────────────
+
+async function getScopedClient(userId: string) {
+  const secretStr = Deno.env.get('SUPABASE_AUTH_JWT_SECRET')
+  if (!secretStr) throw new Error('SUPABASE_AUTH_JWT_SECRET is required to generate scoped tokens.')
+  const secret = new TextEncoder().encode(secretStr)
+  const jwt = await new jose.SignJWT({ sub: userId, role: 'authenticated' })
+    .setProtectedHeader({ alg: 'HS256' })
+    .setExpirationTime('5m')
+    .sign(secret)
+  
+  const anonKey = Deno.env.get('SUPABASE_ANON_KEY')
+  if (!anonKey) throw new Error('SUPABASE_ANON_KEY is required to generate scoped tokens.')
+
+  return createClient(SUPABASE_URL, anonKey, {
+    auth: { persistSession: false },
+    global: { headers: { Authorization: `Bearer ${jwt}` } },
+  })
+}
+
 async function hashKey(raw: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
@@ -1878,6 +1898,8 @@ const TOOLS = [
         limit:  { type: 'number', description: `Max tasks to return. Default ${DEFAULT_PAGE_SIZE}, capped at ${MAX_PAGE_SIZE}.` },
         cursor: { type: 'string', description: 'Opaque pagination cursor from a previous call\'s result. Omit for the first page.' },
         blocking: { type: 'boolean', description: 'Only tasks whose output is an input source for at least one NOT-done task, anywhere in the project — i.e. producers something is still waiting on. A relationship filter, not a scalar one: computed across all of the project\'s I/O edges, so it disables cursor pagination for this call (the set is filtered before paging would apply).' },
+        flow_id: { type: 'string', description: 'Filter by flow membership. Pass a flow UUID or short ID.' },
+        gate_status: { type: 'string', enum: ['valid', 'invalid', 'unverified'], description: 'Filter by contract/gate state. A relationship filter, computed in JS, so it disables cursor pagination for this call.' },
       },
       required: [],
     },
@@ -2214,7 +2236,8 @@ const TOOLS = [
       properties: {
         task_id: { type: 'string', description: 'Task UUID or short ID (e.g. TDE-31)' },
         kind:    { type: 'string', enum: ['contract_set', 'contract_cleared', 'contract_confirmed', 'review_bar_frozen', 'review_bar_cleared', 'review_submitted', 'validation_submitted', 'fields_changed'], description: 'Optional: show only this kind of event.' },
-        limit:   { type: 'number', description: 'Max events (default 30, max 200), newest first.' },
+        limit:   { type: 'number', description: `Max events (default ${DEFAULT_PAGE_SIZE}, max ${MAX_PAGE_SIZE}), newest first.` },
+        cursor:  { type: 'string', description: 'Opaque pagination cursor from a previous call\'s result. Omit for the first page.' },
         verbose: { type: 'boolean', description: 'Include the full before/after JSON per event. Default false (summaries + key flags only) to keep the response cheap.' },
       },
       required: ['task_id'],
@@ -3009,6 +3032,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
+        limit:      { type: 'number', description: `Max flows to return. Default ${DEFAULT_PAGE_SIZE}, capped at ${MAX_PAGE_SIZE}.` },
+        cursor:     { type: 'string', description: 'Opaque pagination cursor from a previous call\'s result. Omit for the first page.' },
       },
       required: ['project_id'],
     },
@@ -3044,6 +3069,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         task_id: { type: 'string', description: 'Any task in the flow (UUID or short ID). The tool finds all other tasks in the same flow automatically.' },
+        limit:   { type: 'number', description: `Max tasks to return. Default ${DEFAULT_PAGE_SIZE}, capped at ${MAX_PAGE_SIZE}.` },
+        cursor:  { type: 'string', description: 'Opaque pagination cursor from a previous call\'s result. Omit for the first page.' },
       },
       required: ['task_id'],
     },
@@ -4160,8 +4187,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       if (args.blocking && !resolvedProject) return 'blocking requires project_id (or a default project) — the I/O graph it scans is project-scoped.'
       // TDE-320: flow steps are not tasks. Exclude any task that belongs to a named
-      // flow unless the user explicitly asked to see them via include_flow_steps.
-      if (!include_flow_steps) query = query.is('flow_id', null)
+      // flow unless the user explicitly asked to see them via include_flow_steps or a flow filter.
+      if (args.flow_id) {
+        const flow = await resolveFlow(sb, userId, args)
+        if (!flow) return `Flow "${args.flow_id}" not found.`
+        query = query.eq('flow_id', flow.id)
+      } else if (!include_flow_steps) {
+        query = query.is('flow_id', null)
+      }
       if (status === 'all')   { /* no filter */ }
       else if (status)        query = query.eq('status', status)
       else                    query = query.neq('status', 'done')
@@ -4176,27 +4209,44 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const sortCol = byRecency ? 'updated_at' : 'sort_order'
       const tz = await userTimezone(sb, userId)
 
-      // blocking (TDE-556 fold-in): a relationship filter across the whole project's I/O
+      // blocking & gate_status (TDE-556 fold-in): relationship filters across the whole project's I/O
       // edges, computed in JS (JSONB reverse-lookup, not a single indexed WHERE). It narrows
       // the candidate set unpredictably, so it disables cursor pagination for this call —
       // the full filtered set is returned at once rather than a page of it.
-      let blockedIds: Set<string> | null = null
-      if (args.blocking) {
-        const { data: allTasks } = await sb.from('tasks').select('id, input, status')
+      let filteredIds: Set<string> | null = null
+      if (args.blocking || args.gate_status) {
+        const { data: allTasks } = await sb.from('tasks').select('id, input, output, status')
           .eq('project_id', resolvedProject.id).eq('user_id', userId)
-        blockedIds = new Set<string>()
+        filteredIds = new Set<string>()
+        const isBlocked = new Set<string>()
+        if (args.blocking) {
+          for (const t of (allTasks ?? [])) {
+            if (t.status === 'done') continue
+            for (const srcId of inputSourceIds(t.input)) isBlocked.add(srcId)
+          }
+        }
         for (const t of (allTasks ?? [])) {
-          if (t.status === 'done') continue
-          for (const srcId of inputSourceIds(t.input)) blockedIds.add(srcId)
+          let keep = true
+          if (args.blocking && !isBlocked.has(t.id)) keep = false
+          if (args.gate_status && keep) {
+            const ledgers = t.output?.validation_ledgers || {}
+            let matched = false
+            for (const key of Object.keys(ledgers)) {
+              if ((ledgers[key].validation_status || 'unverified') === args.gate_status) matched = true
+            }
+            if (!Object.keys(ledgers).length && args.gate_status === 'unverified') matched = true
+            if (!matched) keep = false
+          }
+          if (keep) filteredIds.add(t.id)
         }
       }
 
       let data: any[] = []
       let hasMore = false
       let nextCursor: string | null = null
-      if (blockedIds) {
+      if (filteredIds) {
         const { data: rows } = await query.order(sortCol, { ascending: !byRecency }).order('id', { ascending: !byRecency })
-        data = (rows ?? []).filter((t: any) => blockedIds!.has(t.id))
+        data = (rows ?? []).filter((t: any) => filteredIds!.has(t.id))
       } else {
         const limit = clampLimit(args.limit)
         const cursor = args.cursor ? decodeCursor(args.cursor) : null
@@ -4233,6 +4283,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const header = [
         phaseLabel ? `Phase: ${phaseLabel}` : null,
         args.blocking ? 'Filtered to tasks something else is still waiting on.' : null,
+        args.gate_status ? `Filtered to tasks with gate_status: ${args.gate_status}.` : null,
+        args.flow_id ? `Filtered to flow: ${args.flow_id}.` : null,
         byRecency ? 'Sorted by most recently edited.' : null,
         anyEdited ? `Edit times are ${zoneLabel(tz)}.` : null,
       ].filter(Boolean).join('\n')
@@ -5451,13 +5503,27 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'get_task_history': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return 'Task not found.'
-      const limit = Math.min(Math.max(parseInt(String(args.limit ?? 30), 10) || 30, 1), 200)
+      const limit = clampLimit(args.limit)
+      const cursor = args.cursor ? decodeCursor(args.cursor) : null
+      if (args.cursor && !cursor) return 'Invalid cursor — pass the cursor exactly as returned by a previous call.'
+      
       let q = sb.from('task_events')
-        .select('kind, entity, actor, summary, before, after, meta, created_at')
+        .select('id, kind, entity, actor, summary, before, after, meta, created_at')
         .eq('task_id', task.id)
       if (args.kind) q = q.eq('kind', args.kind)
-      const { data: events, error } = await q.order('created_at', { ascending: false }).limit(limit)
+      q = applyCursor(q, 'created_at', cursor, false)
+
+      const { data: rows, error } = await q.order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit + 1)
       if (error) throw new Error(error.message)
+
+      const hasMore = (rows?.length ?? 0) > limit
+      const events = hasMore ? rows!.slice(0, limit) : (rows ?? [])
+      let nextCursor: string | null = null
+      if (hasMore && events.length) {
+        const last = events[events.length - 1]
+        nextCursor = encodeCursor(last.created_at, last.id)
+      }
+
       if (!events?.length) {
         return `No gate history on "${task.text}"${args.kind ? ` for kind "${args.kind}"` : ''} yet.`
           + `\n\nNOTE: task_events records forward from TDE-818 (2026-07-28). Contract/review/gate changes made BEFORE that are not recoverable — they were overwritten in place.`
@@ -5487,6 +5553,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           if (e.after) lines.push(`  after:  ${JSON.stringify(e.after)}`)
         }
       }
+      if (hasMore) lines.push(``, `… ${events.length}+ shown. cursor: "${nextCursor}" for the next page.`)
       if (args.verbose !== true) lines.push(``, `(Pass verbose:true for full before/after state per event.)`)
       return lines.join('\n')
     }
@@ -6941,7 +7008,25 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       let totalValidated = 0, totalPass = 0, totalFail = 0, totalRetries = 0, totalBlocked = 0, totalProvisional = 0
 
-      sorted.forEach((t: any, i: number) => {
+      // In-memory pagination since sorting is JS-based
+      const limit = clampLimit(args.limit)
+      let startIndex = 0
+      if (args.cursor) {
+        const decoded = decodeCursor(args.cursor)
+        if (!decoded) return 'Invalid cursor — pass the cursor exactly as returned by a previous call.'
+        const idx = sorted.findIndex((t: any) => t.id === decoded.id)
+        if (idx >= 0) startIndex = idx + 1 // strictly after the cursor
+      }
+      const pageTasks = sorted.slice(startIndex, startIndex + limit)
+      const hasMore = startIndex + limit < sorted.length
+      let nextCursor: string | null = null
+      if (hasMore && pageTasks.length) {
+        const last = pageTasks[pageTasks.length - 1]
+        nextCursor = encodeCursor(startIndex + limit - 1, last.id) // using array index as sortValue
+      }
+
+      pageTasks.forEach((t: any, idxInPage: number) => {
+        const i = startIndex + idxInPage
         lines.push(SEP)
         lines.push(`${auditStepLabel(t, i)}  ${statusIcon(t.status)}  — ${t.text}`)
         const ledgers = t.output?.validation_ledgers
@@ -6982,17 +7067,34 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
       lines.push(SEP)
       lines.push(`Summary: ${sorted.length} tasks | ${totalValidated} edges validated | ${totalPass} pass | ${totalFail} fail | ${totalRetries} retries | ${totalBlocked} human-blocked | ${totalProvisional} AI-QA'd contract${totalProvisional !== 1 ? 's' : ''}`)
+      if (hasMore) lines.push(`\n… ${pageTasks.length}+ shown. cursor: "${nextCursor}" for the next page.`)
       return lines.join('\n')
     }
 
     case 'list_flows': {
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
-      const { data: flows } = await sb.from('flows')
+      let q = sb.from('flows')
         .select('id, name, short_id, created_at, step_list_open')
         .eq('project_id', project.id)
         .eq('user_id', userId)
-        .order('created_at', { ascending: false })
+
+      const limit = clampLimit(args.limit)
+      const cursor = args.cursor ? decodeCursor(args.cursor) : null
+      if (args.cursor && !cursor) return 'Invalid cursor — pass the cursor exactly as returned by a previous call.'
+      q = applyCursor(q, 'created_at', cursor, false)
+
+      const { data: rows, error } = await q.order('created_at', { ascending: false }).order('id', { ascending: false }).limit(limit + 1)
+      if (error) throw new Error(error.message)
+
+      const hasMore = (rows?.length ?? 0) > limit
+      const flows = hasMore ? rows!.slice(0, limit) : (rows ?? [])
+      let nextCursor: string | null = null
+      if (hasMore && flows.length) {
+        const last = flows[flows.length - 1]
+        nextCursor = encodeCursor(last.created_at, last.id)
+      }
+
       if (!flows?.length) return `No named flows in project "${project.name}". Use name_flow to name a flow, or build_new_flow to create one.`
       // For each flow, fetch task stats
       const lines = [`Flows in ${project.name} (${project.prefix || project.slug}):\n`]
@@ -7023,6 +7125,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         lines.push('')
       }
       lines.push('To rename a flow (or change its context / short ID), call update_flow_context with any task_id in the flow — no need to re-run name_flow with the full task list.')
+      if (hasMore) lines.push(``, `… ${flows.length}+ shown. cursor: "${nextCursor}" for the next page.`)
       return lines.join('\n')
     }
 
@@ -9323,7 +9426,8 @@ Deno.serve(async (req: Request) => {
         const { name, arguments: toolArgs, input: toolInput } = params
         const resolvedArgs = toolArgs ?? toolInput ?? {}
         try {
-          const text = await runTool(sb, userId, name, resolvedArgs, params, tokenActor)
+          const userSb = await getScopedClient(userId)
+          const text = await runTool(userSb, userId, name, resolvedArgs, params, tokenActor)
           return toolOk(text, id)
         } catch (err: any) {
           fireAndForget(sb.from('mcp_error_logs').insert({
