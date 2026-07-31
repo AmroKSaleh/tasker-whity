@@ -310,6 +310,69 @@ async function resolveDefaultProject(sb: any, userId: string) {
 const PHASE_COLS = 'id, name, slug, sort_order, exit_condition, due_date'
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+// ── Cursor pagination (TDE-378 item c) ─────────────────────────────────────────
+// Keyset pagination on (sortCol, id) — not OFFSET, so results stay stable while
+// rows are being edited between pages. Cursor is opaque to the caller: a base64
+// [sortValue, id] pair. sortCol must be included in the row's select() so the
+// cursor for the LAST row of a page can be built from the fetched data itself.
+const DEFAULT_PAGE_SIZE = 50
+const MAX_PAGE_SIZE = 200
+
+function encodeCursor(sortValue: string | number, id: string): string {
+  return btoa(JSON.stringify([sortValue, id]))
+}
+function decodeCursor(cursor: string): { sortValue: string | number, id: string } | null {
+  try {
+    const parsed = JSON.parse(atob(cursor))
+    if (!Array.isArray(parsed) || parsed.length !== 2) return null
+    const [sortValue, id] = parsed
+    if ((typeof sortValue !== 'string' && typeof sortValue !== 'number') || typeof id !== 'string') return null
+    return { sortValue, id }
+  } catch { return null }
+}
+// Appends the keyset WHERE for "rows strictly after this cursor" given the query's sort
+// direction. ascending: ">" then tie-break "="+">" on id; descending: the mirror "<".
+function applyCursor(query: any, sortCol: string, cursor: { sortValue: string | number, id: string } | null, ascending: boolean) {
+  if (!cursor) return query
+  const op = ascending ? 'gt' : 'lt'
+  const sv = typeof cursor.sortValue === 'string' ? `"${cursor.sortValue}"` : cursor.sortValue
+  return query.or(`${sortCol}.${op}.${sv},and(${sortCol}.eq.${sv},id.${op}.${cursor.id})`)
+}
+function clampLimit(n: any): number {
+  const v = Number(n)
+  if (!Number.isFinite(v) || v <= 0) return DEFAULT_PAGE_SIZE
+  return Math.min(Math.floor(v), MAX_PAGE_SIZE)
+}
+
+// Relative-duration parser for updated_since filters: "7d", "2w", "1mo", "P2W" (ISO 8601
+// duration, weeks/days only — the units Tasker's data actually spans). Absolute ISO dates
+// pass through resolveSince unchanged. Returns null (no filter) on anything unparseable —
+// callers should not fail loudly on a malformed date the agent can just retry.
+function parseRelativeDuration(s: string): number | null {
+  const iso = s.match(/^P(?:(\d+)W)?(?:(\d+)D)?$/i)
+  if (iso && (iso[1] || iso[2])) {
+    const weeks = iso[1] ? parseInt(iso[1], 10) : 0
+    const days = iso[2] ? parseInt(iso[2], 10) : 0
+    return (weeks * 7 + days) * 24 * 60 * 60 * 1000
+  }
+  const short = s.match(/^(\d+)\s*(d|day|days|w|wk|week|weeks|mo|month|months)$/i)
+  if (short) {
+    const n = parseInt(short[1], 10)
+    const unit = short[2].toLowerCase()
+    if (unit.startsWith('d')) return n * 24 * 60 * 60 * 1000
+    if (unit.startsWith('w')) return n * 7 * 24 * 60 * 60 * 1000
+    if (unit.startsWith('mo')) return n * 30 * 24 * 60 * 60 * 1000
+  }
+  return null
+}
+function resolveSince(s: string): string | null {
+  if (!s) return null
+  const rel = parseRelativeDuration(s.trim())
+  if (rel != null) return new Date(Date.now() - rel).toISOString()
+  const t = Date.parse(s)
+  return Number.isFinite(t) ? new Date(t).toISOString() : null
+}
+
 async function resolvePhase(sb: any, projectId: string, ref: string) {
   if (!ref) return null
   const base = () => sb.from('phases').select(PHASE_COLS).eq('project_id', projectId)
@@ -1800,7 +1863,7 @@ const TOOLS = [
   },
   {
     name: 'list_tasks',
-    description: 'List tasks. Each line carries the added date and, when it differs, last-edited date. For "what changed lately", pass sort: "recently_updated" — do not call get_task on candidates to compare timestamps. Flow steps are excluded (they are STEPS, listed via list_flows / get_flow_context). Done tasks are excluded by default — status: "all" includes them. With no project_id the default project is used when set; otherwise listing across ALL projects requires confirmed: true.',
+    description: 'List tasks. Each line carries the added date and, when it differs, last-edited date. For "what changed lately", pass sort: "recently_updated" — do not call get_task on candidates to compare timestamps. Flow steps are excluded (they are STEPS, listed via list_flows / get_flow_context). Done tasks are excluded by default — status: "all" includes them. With no project_id the default project is used when set; otherwise listing across ALL projects requires confirmed: true. Paginated: a result over the limit ends with a cursor line — pass it back as `cursor` for the next page.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1811,6 +1874,10 @@ const TOOLS = [
         include_flow_steps: { type: 'boolean', description: 'EXPLICIT USER OVERRIDE ONLY — set true only when the user has explicitly asked to see flow steps here as if they were normal tasks. Never set on your own initiative.' },
         phase_id: { type: 'string', description: 'show only tasks in this phase (UUID, slug, or exact name). Pass "unphased" to list only tasks belonging to NO phase. Requires project_id.' },
         sort:       { type: 'string', enum: ['sorting_order', 'recently_updated'], description: 'Ordering. Default "sorting_order" (the board order). "recently_updated" sorts by last edit, newest first — use it to see what changed most recently.' },
+        updated_since: { type: 'string', description: 'Only tasks edited on/after this time. Accepts a relative duration ("7d", "2w", "1mo", or ISO 8601 "P2W") or an absolute ISO date.' },
+        limit:  { type: 'number', description: `Max tasks to return. Default ${DEFAULT_PAGE_SIZE}, capped at ${MAX_PAGE_SIZE}.` },
+        cursor: { type: 'string', description: 'Opaque pagination cursor from a previous call\'s result. Omit for the first page.' },
+        blocking: { type: 'boolean', description: 'Only tasks whose output is an input source for at least one NOT-done task, anywhere in the project — i.e. producers something is still waiting on. A relationship filter, not a scalar one: computed across all of the project\'s I/O edges, so it disables cursor pagination for this call (the set is filtered before paging would apply).' },
       },
       required: [],
     },
@@ -1939,6 +2006,17 @@ const TOOLS = [
         confirmed:  { type: 'boolean', description: 'Set to true to rank tasks across ALL projects (only needed when project_id is omitted AND no default project is set).' },
       },
       required: [],
+    },
+  },
+  {
+    name: 'resolve_reference',
+    description: 'Resolve a bare short ID or UUID to its entity type (task / flow / project) and canonical identity, when you don\'t already know which kind of thing it is — e.g. "TDE-52" (task), "TDE-F1" (flow), "TDE" (project). Read-only, no side effects (does not auto-start a task like get_task does). This is the only tool that accepts a flow\'s own displayed short_id as input. Returns a "next" hint pointing at get_task / get_project / get_flow_context for full detail.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        ref: { type: 'string', description: 'A short ID (task, flow, or project prefix/slug) or a UUID.' },
+      },
+      required: ['ref'],
     },
   },
   {
@@ -2351,12 +2429,14 @@ const TOOLS = [
   },
   {
     name: 'list_kb_entries',
-    description: 'List Knowledge Base entries for a project — returns id + title + source + updated_at only (no content). Use this for cheap discovery before update/delete operations.',
+    description: 'List Knowledge Base entries for a project — returns id + title + source + updated_at only (no content). Use this for cheap discovery before update/delete operations. Paginated: a result over the limit ends with a cursor line — pass it back as `cursor` for the next page.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix (e.g. TDE), slug, or UUID' },
         source: { type: 'string', enum: ['user', 'agent', 'all'], description: 'Filter by who created the entry. Defaults to "all".' },
+        limit:  { type: 'number', description: `Max entries to return. Default ${DEFAULT_PAGE_SIZE}, capped at ${MAX_PAGE_SIZE}.` },
+        cursor: { type: 'string', description: 'Opaque pagination cursor from a previous call\'s result. Omit for the first page.' },
       },
       required: ['project_id'],
     },
@@ -4049,13 +4129,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'list_tasks': {
       const { project_id, section_id, status, confirmed, include_flow_steps } = args
-      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, updated_at, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId)
+      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, updated_at, sort_order, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId)
+      let resolvedProject: any = null
       if (project_id) {
-        const p = await resolveProject(sb, userId, project_id)
-        if (p) query = query.eq('project_id', p.id)
+        resolvedProject = await resolveProject(sb, userId, project_id)
+        if (resolvedProject) query = query.eq('project_id', resolvedProject.id)
       } else if (!confirmed) {
         const def = await resolveDefaultProject(sb, userId)
         if (def) {
+          resolvedProject = def
           query = query.eq('project_id', def.id)
         } else {
           return 'This will list tasks across ALL your projects. Call again with confirmed: true if that\'s what you want, or provide a project_id to scope it.'
@@ -4066,30 +4148,69 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       let phaseLabel = ''
       if (args.phase_id) {
         if (!project_id) return 'phase_id requires project_id — a phase belongs to one project.'
-        const p = await resolveProject(sb, userId, project_id)
         if (String(args.phase_id).toLowerCase() === 'unphased') {
           query = query.is('phase_id', null)
           phaseLabel = 'unphased'
         } else {
-          const ph = p ? await resolvePhase(sb, p.id, args.phase_id) : null
+          const ph = resolvedProject ? await resolvePhase(sb, resolvedProject.id, args.phase_id) : null
           if (!ph) return `Phase "${args.phase_id}" not found in that project.`
           query = query.eq('phase_id', ph.id)
           phaseLabel = ph.name
         }
       }
+      if (args.blocking && !resolvedProject) return 'blocking requires project_id (or a default project) — the I/O graph it scans is project-scoped.'
       // TDE-320: flow steps are not tasks. Exclude any task that belongs to a named
       // flow unless the user explicitly asked to see them via include_flow_steps.
       if (!include_flow_steps) query = query.is('flow_id', null)
       if (status === 'all')   { /* no filter */ }
       else if (status)        query = query.eq('status', status)
       else                    query = query.neq('status', 'done')
+      if (args.updated_since) {
+        const since = resolveSince(String(args.updated_since))
+        if (!since) return `Could not parse updated_since: "${args.updated_since}". Use a relative duration ("7d", "2w", "1mo") or an ISO date.`
+        query = query.gte('updated_at', since)
+      }
       // "What changed lately?" is a recency question, and answering it by sorting order
       // means reading the whole list and eyeballing dates. Newest edit first instead.
       const byRecency = args.sort === 'recently_updated'
+      const sortCol = byRecency ? 'updated_at' : 'sort_order'
       const tz = await userTimezone(sb, userId)
-      const { data } = byRecency
-        ? await query.order('updated_at', { ascending: false })
-        : await query.order('sort_order')
+
+      // blocking (TDE-556 fold-in): a relationship filter across the whole project's I/O
+      // edges, computed in JS (JSONB reverse-lookup, not a single indexed WHERE). It narrows
+      // the candidate set unpredictably, so it disables cursor pagination for this call —
+      // the full filtered set is returned at once rather than a page of it.
+      let blockedIds: Set<string> | null = null
+      if (args.blocking) {
+        const { data: allTasks } = await sb.from('tasks').select('id, input, status')
+          .eq('project_id', resolvedProject.id).eq('user_id', userId)
+        blockedIds = new Set<string>()
+        for (const t of (allTasks ?? [])) {
+          if (t.status === 'done') continue
+          for (const srcId of inputSourceIds(t.input)) blockedIds.add(srcId)
+        }
+      }
+
+      let data: any[] = []
+      let hasMore = false
+      let nextCursor: string | null = null
+      if (blockedIds) {
+        const { data: rows } = await query.order(sortCol, { ascending: !byRecency }).order('id', { ascending: !byRecency })
+        data = (rows ?? []).filter((t: any) => blockedIds!.has(t.id))
+      } else {
+        const limit = clampLimit(args.limit)
+        const cursor = args.cursor ? decodeCursor(args.cursor) : null
+        if (args.cursor && !cursor) return 'Invalid cursor — pass the cursor exactly as returned by a previous call, or omit it for the first page.'
+        query = applyCursor(query, sortCol, cursor, !byRecency)
+        const { data: rows } = await query.order(sortCol, { ascending: !byRecency }).order('id', { ascending: !byRecency }).limit(limit + 1)
+        hasMore = (rows?.length ?? 0) > limit
+        data = hasMore ? rows!.slice(0, limit) : (rows ?? [])
+        if (hasMore && data.length) {
+          const last = data[data.length - 1]
+          nextCursor = encodeCursor(last[sortCol], last.id)
+        }
+      }
+
       if (!data?.length) return phaseLabel ? `No tasks found in phase "${phaseLabel}".` : 'No tasks found.'
       const body = data.map((t: any) => {
         const shortRef = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : t.id
@@ -4111,10 +4232,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         && Math.abs(new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) >= 60000)
       const header = [
         phaseLabel ? `Phase: ${phaseLabel}` : null,
+        args.blocking ? 'Filtered to tasks something else is still waiting on.' : null,
         byRecency ? 'Sorted by most recently edited.' : null,
         anyEdited ? `Edit times are ${zoneLabel(tz)}.` : null,
       ].filter(Boolean).join('\n')
-      return header ? `${header}\n\n${body}` : body
+      const footer = hasMore ? `\n\n… ${data.length}+ shown. cursor: "${nextCursor}" for the next page.` : ''
+      return (header ? `${header}\n\n${body}` : body) + footer
     }
 
     case 'create_task': {
@@ -4524,6 +4647,63 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }).join('\n')
     }
 
+    case 'resolve_reference': {
+      const ref = String(args.ref || '').trim()
+      if (!ref) return 'ref is required.'
+
+      // Flow short_id (PREFIX-Fnnn) — the ONLY lookup path that accepts it; every other
+      // flow_id param only matches a UUID or a name substring.
+      const flowShortMatch = ref.match(/^([A-Za-z]{2,6})-F(\d+)$/)
+      if (flowShortMatch) {
+        const project = await resolveProject(sb, userId, flowShortMatch[1])
+        if (project) {
+          const { data: flow } = await sb.from('flows').select('id, name, short_id')
+            .eq('project_id', project.id).eq('short_id', ref).eq('user_id', userId).maybeSingle()
+          if (flow) return JSON.stringify({
+            type: 'flow', id: flow.id, short_id: flow.short_id, name: flow.name,
+            project: { id: project.id, prefix: project.prefix, name: project.name },
+            next: 'get_flow_context or run_flow for the full playbook',
+          })
+        }
+      }
+
+      // Task short_id (PREFIX-NNN) or a task UUID.
+      const task = await resolveTask(sb, userId, ref)
+      if (task) {
+        const project = await resolveProject(sb, userId, task.project_id)
+        return JSON.stringify({
+          type: 'task', id: task.id,
+          short_id: project?.prefix ? `${project.prefix}-${task.short_id}` : task.short_id,
+          text: task.text, status: task.status, flow_id: task.flow_id || null,
+          project: project ? { id: project.id, prefix: project.prefix, name: project.name } : null,
+          next: 'get_task for full context, milestones, and I/O',
+        })
+      }
+
+      // Bare UUID that wasn't a task: try flow, then fall through to project.
+      if (UUID_RE.test(ref)) {
+        const { data: flow } = await sb.from('flows').select('id, name, short_id, project_id')
+          .eq('id', ref).eq('user_id', userId).maybeSingle()
+        if (flow) {
+          const project = await resolveProject(sb, userId, flow.project_id)
+          return JSON.stringify({
+            type: 'flow', id: flow.id, short_id: flow.short_id, name: flow.name,
+            project: project ? { id: project.id, prefix: project.prefix, name: project.name } : null,
+            next: 'get_flow_context or run_flow for the full playbook',
+          })
+        }
+      }
+
+      // Project prefix, slug, or UUID.
+      const project = await resolveProject(sb, userId, ref)
+      if (project) return JSON.stringify({
+        type: 'project', id: project.id, prefix: project.prefix, slug: project.slug, name: project.name,
+        next: 'get_project for Foundation, sections, and stats',
+      })
+
+      return `No task, flow, or project matches "${ref}" in your account.`
+    }
+
     case 'get_task': {
       const task = await resolveTask(sb, userId, args.task_id)
       if (!task) return 'Task not found.'
@@ -4905,14 +5085,22 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       let q = sb.from('project_knowledge')
-        .select('id, title, source, updated_at')
+        .select('id, title, source, updated_at, created_at')
         .eq('project_id', project.id)
         .is('archived_at', null)
-        .order('created_at')
       if (args.source && args.source !== 'all') q = q.eq('source', args.source)
-      const { data } = await q
+      const limit = clampLimit(args.limit)
+      const cursor = args.cursor ? decodeCursor(args.cursor) : null
+      if (args.cursor && !cursor) return 'Invalid cursor — pass the cursor exactly as returned by a previous call, or omit it for the first page.'
+      q = applyCursor(q, 'created_at', cursor, true)
+      const { data } = await q.order('created_at').order('id').limit(limit + 1)
       if (!data?.length) return `No knowledge base entries for "${project.name}".`
-      return data.map((e: any) => `[id: ${e.id}] [${e.source}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+      const hasMore = data.length > limit
+      const page = hasMore ? data.slice(0, limit) : data
+      const body = page.map((e: any) => `[id: ${e.id}] [${e.source}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+      if (!hasMore) return body
+      const last = page[page.length - 1]
+      return `${body}\n\n… ${page.length}+ shown. cursor: "${encodeCursor(last.created_at, last.id)}" for the next page.`
     }
 
     case 'kb_health': {
