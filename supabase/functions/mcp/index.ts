@@ -3178,6 +3178,20 @@ const TOOLS = [
   },
 ]
 
+// ── Section resolver helper ──────────────────────────────────
+// `sections` has no user_id column — ownership is transitive (section → project → user).
+// The MCP runs as service role, so RLS never backstops this: any handler taking a
+// caller-supplied section_id MUST resolve it through here, never by a bare .eq('id', …).
+async function resolveSection(sb: any, userId: string, sectionId: string) {
+  if (!sectionId) return null
+  const { data: section } = await sb.from('sections')
+    .select('id, name, project_id, projects(id, user_id)')
+    .eq('id', sectionId)
+    .maybeSingle()
+  if (!section || section.projects?.user_id !== userId) return null
+  return section
+}
+
 // ── Group resolver helper ────────────────────────────────────
 async function resolveGroup(sb: any, userId: string, groupId: string) {
   const { data: group } = await sb.from('groups')
@@ -5998,16 +6012,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       })
       const gtask = await res.json()
       if (!res.ok) return `Failed to fetch Google Task: ${gtask.error?.message ?? JSON.stringify(gtask)}`
-      const { data: section } = await sb.from('sections').select('project_id').eq('id', section_id).maybeSingle()
+      const section = await resolveSection(sb, userId, section_id)
       if (!section) return 'Section not found.'
-      const { data: lastTask } = await sb.from('tasks').select('sorting_order').eq('section_id', section_id).order('sorting_order', { ascending: false }).limit(1).maybeSingle()
+      const { data: lastTask } = await sb.from('tasks')
+        .select('sort_order').eq('project_id', section.project_id).eq('section_id', section.id)
+        .order('sort_order', { ascending: false }).limit(1).maybeSingle()
       const insert: any = {
         text: gtask.title || 'Untitled',
-        section_id,
+        section_id: section.id,
         project_id: section.project_id,
         user_id: userId,
         status: 'pending',
-        sorting_order: (lastTask?.sorting_order ?? 0) + 1000,
+        sort_order: (lastTask?.sort_order ?? -1) + 1,
         intake_source: 'google_tasks',
       }
       if (gtask.notes) insert.detail = gtask.notes
