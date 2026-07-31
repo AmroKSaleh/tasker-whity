@@ -171,7 +171,7 @@ export default function LoginPage() {
           <span style={{ color: '#D97757', fontSize: 18, fontWeight: 700 }}>✦</span>
           <h1 className="text-[24px] font-extrabold text-ink tracking-tight">Tasker</h1>
         </div>
-        <p className="text-[13px] text-mute">Your focus, decided.</p>
+        <p className="text-[13px] text-mute">Durable, human-shared, quality-gated state.</p>
       </div>
 
       {/* Google */}

@@ -27,7 +27,7 @@ export const NAV_APP_V2 = [
 export const PAGES_APP_V2 = {
   '': `# Welcome to Tasker
 
-Tasker is a task management app built for AI-native builders — people who direct AI assistants to do most of the actual work. Instead of tracking tasks in a spreadsheet or a notes doc, Tasker gives your work structure: projects, sections, groups, and tasks that your AI can read, update, and act on directly.
+Tasker is durable, human-shared, quality-gated state that persists across sessions, agents, and people. Instead of tracking tasks in a spreadsheet or a notes doc, Tasker gives your work structure: projects, sections, groups, and tasks that your AI can read, update, and act on directly.
 
 The core idea is simple: you describe what needs doing, organize it into a hierarchy, and Tasker keeps everything in sync — whether you're working alone in Claude Code or collaborating across multiple AI clients.
 
