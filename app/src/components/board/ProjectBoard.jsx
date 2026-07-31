@@ -488,6 +488,9 @@ export default function ProjectBoard({ project }) {
 
   const [statusFilter, setStatusFilter] = useState('pending')
   const [priorityFilter, setPriorityFilter] = useState(null)
+  // TDE-403: flow steps are hidden from the board by default (TDE-320) — this is the
+  // one explicit override, mirroring the MCP's include_flow_steps on list_tasks.
+  const [showFlowSteps, setShowFlowSteps] = useState(false)
   const [showKB, setShowKB] = useState(false)
   const [showIS, setShowIS] = useState(false)
   const [showCreateTask, setShowCreateTask] = useState(false)
@@ -686,7 +689,8 @@ export default function ProjectBoard({ project }) {
   // does NOT hide a task; it only leaves the board once the flow is named.
   // Every non-flow task in the project, whatever its phase — the aggregate bar needs the
   // unscoped set to compute per-phase segments.
-  const allBoardTasks = useMemo(() => tasks.filter(t => !t.flow_id), [tasks])
+  const allBoardTasks = useMemo(() => showFlowSteps ? tasks : tasks.filter(t => !t.flow_id), [tasks, showFlowSteps])
+  const flowStepCount = useMemo(() => tasks.filter(t => t.flow_id).length, [tasks])
 
   // TDE-804: phase scoping rides on the SAME choke point as the flow filter, so entering a
   // phase re-scopes columns, Pulse %, filter counts, section x/y and the Now Band together —
@@ -808,6 +812,8 @@ export default function ProjectBoard({ project }) {
                   <Pill active={priorityFilter === 'rush'} count={filterCounts.rush} onClick={() => setPriorityFilter(f => f === 'rush' ? null : 'rush')}>Rush</Pill>
                   <Pill active={priorityFilter === 'high'} count={filterCounts.high} onClick={() => setPriorityFilter(f => f === 'high' ? null : 'high')}>High</Pill>
                   <Pill active={priorityFilter === 'medium'} count={filterCounts.medium} onClick={() => setPriorityFilter(f => f === 'medium' ? null : 'medium')}>Med</Pill>
+                  <span className="w-px h-[18px] bg-line-2 mx-1 self-center" />
+                  <Pill active={showFlowSteps} count={flowStepCount} onClick={() => setShowFlowSteps(v => !v)}>Flow Steps</Pill>
                 </div>
               </div>
             </header>
@@ -937,6 +943,8 @@ export default function ProjectBoard({ project }) {
               <Pill active={priorityFilter === 'rush'} count={filterCounts.rush} onClick={() => setPriorityFilter(f => f === 'rush' ? null : 'rush')}>Rush</Pill>
               <Pill active={priorityFilter === 'high'} count={filterCounts.high} onClick={() => setPriorityFilter(f => f === 'high' ? null : 'high')}>High</Pill>
               <Pill active={priorityFilter === 'medium'} count={filterCounts.medium} onClick={() => setPriorityFilter(f => f === 'medium' ? null : 'medium')}>Med</Pill>
+              <span className="w-px h-[18px] bg-line-2 mx-1 self-center" />
+              <Pill active={showFlowSteps} count={flowStepCount} onClick={() => setShowFlowSteps(v => !v)}>Flow Steps</Pill>
             </div>
           )}
 
