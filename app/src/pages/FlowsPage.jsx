@@ -63,6 +63,53 @@ function GateBadge({ flow, size = 'sm' }) {
   )
 }
 
+function LiveStatusBanner({ flow }) {
+  // Determine if the flow is blocked, running, or done.
+  const activeSteps = flow.steps.filter(s => s.task.status === 'in_progress')
+  const isDone = flow.status === 'done'
+  const isRunning = activeSteps.length > 0
+  
+  if (isDone) {
+    return (
+      <div className="flex flex-col gap-0.5">
+        <span className="font-mono text-[10px] font-bold text-[#3a9d57] tracking-wider">✓ FLOW COMPLETE</span>
+        <span className="text-[12px] text-mute-2 leading-snug">All {flow.stepCount} steps have been executed and verified.</span>
+      </div>
+    )
+  }
+
+  if (isRunning) {
+    return (
+      <div className="flex flex-col gap-1">
+        <span className="font-mono text-[10px] font-bold text-accent tracking-wider flex items-center gap-1.5">
+          <span className="relative flex h-2 w-2">
+            <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
+            <span className="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
+          </span>
+          OPERATION IN PROGRESS
+        </span>
+        <span className="text-[12px] text-ink leading-snug">
+          Currently executing step{activeSteps.length !== 1 ? 's' : ''}: {activeSteps.map(s => String(s.step).padStart(2, '0')).join(', ')}
+        </span>
+      </div>
+    )
+  }
+
+  // Not running, not done -> it's pending / waiting. Check for blockers.
+  const hasUnblessed = flow.gate?.unblessed > 0 || flow.gate?.weak > 0
+  
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className="font-mono text-[10px] font-bold text-mute tracking-wider">⏸ WAITING FOR EXECUTION</span>
+      {hasUnblessed ? (
+        <span className="text-[12px] text-accent leading-snug">Contracts need blessing before the agent can safely proceed.</span>
+      ) : (
+        <span className="text-[12px] text-mute-2 leading-snug">Flow is ready. Start the agent in Claude Code to continue.</span>
+      )}
+    </div>
+  )
+}
+
 function FlowCard({ flow, active, onClick }) {
   return (
     <button
@@ -92,7 +139,7 @@ function FlowCard({ flow, active, onClick }) {
 }
 
 function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted }) {
-  const [listHeight, setListHeight] = useState(250)
+  const [listWidth, setListWidth] = useState(420)
   const [panel, setPanel] = useState(null) // 'is' | 'kb' | null
   const [selectedTaskId, setSelectedTaskId] = useState(null)
   const [flowIs, setFlowIs] = useState(null)
@@ -276,12 +323,12 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
 
   const panelEntries = panel === 'is' ? flowIs : panel === 'kb' ? flowKb : null
 
-  function startResize(e) {
+  function startResizeX(e) {
     e.preventDefault()
-    const startY = e.clientY
-    const startH = listHeight
+    const startX = e.clientX
+    const startW = listWidth
     function onMove(ev) {
-      setListHeight(Math.max(140, Math.min(600, startH - (ev.clientY - startY))))
+      setListWidth(Math.max(250, Math.min(800, startW - (ev.clientX - startX))))
     }
     function onUp() {
       window.removeEventListener('pointermove', onMove)
@@ -453,46 +500,60 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
           </div>
         )}
       </div>
-      {panel && (
-        <div className="shrink-0 border-b border-line-2 bg-surf-2 max-h-[38vh] overflow-auto px-6 py-3 no-scrollbar">
-          <Kicker>{panel === 'is' ? 'Flow Instruction Set' : 'Flow Knowledge Base'}</Kicker>
-          {!flow.flowRecordId ? (
-            <p className="text-[12px] text-mute mt-2 leading-relaxed">
-              This flow isn’t named yet, so it has no {panel === 'is' ? 'Instruction Set' : 'Knowledge Base'}.
-              Name it via the MCP (<span className="font-mono">name_flow</span>) to attach one.
-            </p>
-          ) : panelEntries == null ? (
-            <p className="text-[12px] text-mute mt-2">Loading…</p>
-          ) : panelEntries.length === 0 ? (
-            <p className="text-[12px] text-mute mt-2 leading-relaxed">
-              {panel === 'is'
-                ? 'No flow IS — tasks in this flow use the project Instruction Set.'
-                : 'No flow Knowledge Base entries.'}
-            </p>
-          ) : (
-            <div className="flex flex-col gap-3 mt-2">
-              {panelEntries.map(e => (
-                <div key={e.id}>
-                  <p className="text-[12.5px] font-semibold text-ink">{e.title}</p>
-                  <p className="text-[12px] text-ink-2 whitespace-pre-wrap leading-relaxed mt-0.5">{e.content}</p>
+      <div className="flex-1 flex min-h-0 relative">
+        {/* Left Pane: Map / Graph */}
+        <div className="flex-1 flex flex-col min-w-0 bg-[#151515] relative">
+          {panel && (
+            <div className="shrink-0 border-b border-line-2 bg-surf-2 max-h-[38vh] overflow-auto px-6 py-3 no-scrollbar z-10 shadow-md">
+              <Kicker>{panel === 'is' ? 'Flow Instruction Set' : 'Flow Knowledge Base'}</Kicker>
+              {!flow.flowRecordId ? (
+                <p className="text-[12px] text-mute mt-2 leading-relaxed">
+                  This flow isn’t named yet, so it has no {panel === 'is' ? 'Instruction Set' : 'Knowledge Base'}.
+                  Name it via the MCP (<span className="font-mono">name_flow</span>) to attach one.
+                </p>
+              ) : panelEntries == null ? (
+                <p className="text-[12px] text-mute mt-2">Loading…</p>
+              ) : panelEntries.length === 0 ? (
+                <p className="text-[12px] text-mute mt-2 leading-relaxed">
+                  {panel === 'is'
+                    ? 'No flow IS — tasks in this flow use the project Instruction Set.'
+                    : 'No flow Knowledge Base entries.'}
+                </p>
+              ) : (
+                <div className="flex flex-col gap-3 mt-2">
+                  {panelEntries.map(e => (
+                    <div key={e.id}>
+                      <p className="text-[12.5px] font-semibold text-ink">{e.title}</p>
+                      <p className="text-[12px] text-ink-2 whitespace-pre-wrap leading-relaxed mt-0.5">{e.content}</p>
+                    </div>
+                  ))}
                 </div>
-              ))}
+              )}
             </div>
           )}
+          <div className="flex-1 relative min-h-0">
+            <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
+          </div>
         </div>
-      )}
-      <div className="flex-1 relative min-h-0">
-        <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
-      </div>
-      <div
-        onPointerDown={startResize}
-        title="Drag to resize"
-        className="group shrink-0 h-2 flex items-center justify-center cursor-row-resize border-y border-line-2 bg-surf-2 hover:bg-surf transition-colors"
-      >
-        <span className="w-8 h-0.5 rounded-full bg-line group-hover:bg-mute-2 transition-colors" />
-      </div>
-      <div className="shrink-0 overflow-auto px-4 py-3 no-scrollbar" style={{ height: listHeight }}>
-        <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
+
+        {/* Resizer */}
+        <div
+          onPointerDown={startResizeX}
+          title="Drag to resize"
+          className="group shrink-0 w-1.5 flex flex-col items-center justify-center cursor-col-resize border-l border-line-2 bg-surf-2 hover:bg-surf transition-colors z-20"
+        >
+          <span className="w-0.5 h-8 rounded-full bg-line group-hover:bg-mute-2 transition-colors" />
+        </div>
+
+        {/* Right Pane: Action Center / Cockpit */}
+        <div className="shrink-0 flex flex-col min-w-0 bg-paper z-10" style={{ width: listWidth }}>
+          <div className="shrink-0 border-b border-line-2 bg-surf-2 px-5 py-3">
+            <LiveStatusBanner flow={flow} />
+          </div>
+          <div className="flex-1 overflow-y-auto px-3 py-3 no-scrollbar relative">
+            <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
+          </div>
+        </div>
       </div>
 
       {selectedTaskId && (() => {

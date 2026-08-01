@@ -118,13 +118,14 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
           .filter(Boolean)
           .sort((a, b) => a - b)
         return (
-          <div key={task.id} className="border-b border-line-2 last:border-b-0">
-            <div className="w-full flex items-center gap-2.5 py-2.5 px-2 rounded-md hover:bg-surf-2 transition-colors">
+          <div key={task.id} className={clsx("border-b border-line-2 last:border-b-0 relative", task.status === 'in_progress' && "bg-accent/5")}>
+            {task.status === 'in_progress' && <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent z-10" />}
+            <div className={clsx("w-full flex items-center gap-2.5 py-2.5 px-2 rounded-md transition-colors", task.status !== 'in_progress' && "hover:bg-surf-2")}>
               {/* Chevron toggles the INLINE contract view; the row body opens the full panel. */}
               <button
                 onClick={() => toggle(task.id)}
                 title={isOpen ? 'Hide contracts' : 'Show contracts inline'}
-                className="shrink-0 p-0.5 -m-0.5 text-mute-2 hover:text-ink transition-colors"
+                className="shrink-0 p-0.5 -m-0.5 text-mute-2 hover:text-ink transition-colors z-10"
               >
                 <ChevronRight size={13} className={clsx('transition-transform', isOpen && 'rotate-90')} />
               </button>
@@ -133,7 +134,7 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
                 className="flex-1 min-w-0 flex items-center gap-2.5 text-left"
               >
                 <span className="font-mono text-[10px] text-mute-2 shrink-0 w-5">{String(step).padStart(2, '0')}</span>
-                <span className="flex-1 text-[13px] font-medium text-ink truncate">{task.text}</span>
+                <span className={clsx("flex-1 text-[13px] font-medium truncate", task.status === 'in_progress' ? 'text-accent' : 'text-ink')}>{task.text}</span>
                 {(task.executor === 'user' || task.executor === 'external') && (
                   <ExecutorBadge executor={task.executor} />
                 )}
