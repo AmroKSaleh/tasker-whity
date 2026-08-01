@@ -122,10 +122,10 @@ export default function SummaryModal({ tasks, projects, projectId = null, onClos
               onChange={e => setScope(e.target.value)}
               className="bg-wash border border-line-2 rounded px-2 py-1 text-[12px] text-ink outline-none cursor-pointer"
             >
-              <option value="session">Session (Last 4h)</option>
-              <option value="today">Today</option>
-              <option value="yesterday">Yesterday</option>
-              <option value="3d">Past 3 Days</option>
+              <option value="session" className="text-black bg-white">Session (Last 4h)</option>
+              <option value="today" className="text-black bg-white">Today</option>
+              <option value="yesterday" className="text-black bg-white">Yesterday</option>
+              <option value="3d" className="text-black bg-white">Past 3 Days</option>
             </select>
           </div>
           <button onClick={onClose} className="text-mute hover:text-ink text-lg leading-none">×</button>
