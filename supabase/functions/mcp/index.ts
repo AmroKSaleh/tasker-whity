@@ -1906,7 +1906,7 @@ const TOOLS = [
   },
   {
     name: 'create_task',
-    description: 'Create a single task. For a multi-step process toward a goal, do NOT create tasks ad hoc — use build_new_flow instead. To create a SEED (a placeholder for underspecified work or a flow worth building later), pass kind:"seed" with seed_target plus open_questions and/or milestones — a unified checklist: open_questions are answered during resolution, milestones become prerequisites that soft-gate resolution. DYNAMIC SEEDS: Whenever you identify a new body of work but lack context or alignment to define the exact execution steps, DO NOT create a normal task. Instead, dynamically create a Context Seed (kind: "seed", seed_target: "task") and populate its checklist with the open questions and prerequisites that must be resolved first.',
+    description: 'Create a single task. For a multi-step process toward a goal, do NOT create tasks ad hoc ï¿½ use build_new_flow instead. To create a SEED (a placeholder for underspecified work or a flow worth building later), pass kind:"seed" with seed_target plus open_questions and/or milestones ï¿½ a unified checklist: open_questions are answered during resolution, milestones become prerequisites that soft-gate resolution. DYNAMIC SEEDS: Whenever you identify a new body of work but lack context or alignment to define the exact execution steps, DO NOT create a normal task. Instead, dynamically create a Context Seed (kind: "seed", seed_target: "task") and populate its checklist with the open questions and prerequisites that must be resolved first.',
     inputSchema: {
       type: 'object',
       properties: {

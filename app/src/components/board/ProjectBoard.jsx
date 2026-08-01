@@ -16,6 +16,7 @@ import { useIsDesktop } from './hooks/useMediaQuery'
 import { useTaskPanelState } from './hooks/useTaskPanelState'
 import { useHorizontalWheelScroll } from './hooks/useHorizontalWheelScroll'
 import { updateProject } from '../../hooks/useProjects'
+import { useProjectUpdates } from '../../hooks/useProjectUpdates'
 import { useGoogleCalendar } from '../../hooks/useGoogleCalendar'
 import { useGitHub } from '../../hooks/useGitHub'
 import AppShell from '../editorial/AppShell'
@@ -483,6 +484,8 @@ export default function ProjectBoard({ project }) {
   const { isConnected, pushTask, removeTask } = useGoogleCalendar()
   const { isConnected: ghConnected, syncIssues } = useGitHub()
   const [ghSyncing, setGhSyncing] = useState(false)
+
+  const { updates: projectUpdates, publishUpdate, discardUpdate } = useProjectUpdates(project.id)
 
   const [statusFilter, setStatusFilter] = useState('pending')
   const [priorityFilter, setPriorityFilter] = useState(null)
@@ -1016,8 +1019,11 @@ export default function ProjectBoard({ project }) {
               project={project}
               tasks={boardTasks}
               sections={enrichedSections}
+              projectUpdates={projectUpdates}
+              onPublishUpdate={publishUpdate}
+              onDiscardUpdate={discardUpdate}
               onOpenTask={openTask}
-              onPause={toggleInProgressWithWarning}
+              onPause={t => toggleInProgressWithWarning(t.id, t.status === 'in_progress' ? 'pending' : 'in_progress')}
               onFocusSection={setFocusedSectionId}
             />
           )}

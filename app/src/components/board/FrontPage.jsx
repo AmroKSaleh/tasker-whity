@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import clsx from 'clsx'
-import { Play, Pause } from 'lucide-react'
+import { Play, Pause, X } from 'lucide-react'
 import { rankTasks } from '../../lib/scoring'
 import { Kicker } from '../editorial/atoms'
 import AwaitingInputStrip from './AwaitingInputStrip'
@@ -215,7 +214,7 @@ function LeadCard({ task, prefix, onOpenTask }) {
 // Attention-first landing for the project: lead slot (escalations, then in-flight),
 // ranked Next Up (lib/scoring), Just Shipped, and the sections digest.
 // Recomposes when the lead is empty: Next Up takes the lead column.
-export default function FrontPage({ project, tasks, sections, onOpenTask, onPause, onFocusSection }) {
+export default function FrontPage({ project, tasks, sections, projectUpdates = [], onPublishUpdate, onDiscardUpdate, onOpenTask, onPause, onFocusSection }) {
   const sectionById = useMemo(() => new Map(sections.map(s => [s.id, s])), [sections])
   const sectionName = (id) => sectionById.get(id)?.name ?? ''
 
@@ -229,7 +228,12 @@ export default function FrontPage({ project, tasks, sections, onOpenTask, onPaus
       .slice(0, 5),
     [tasks])
 
-  const hasLead = needsYou.length > 0 || inFlight.length > 0
+  const draftUpdate = useMemo(() => projectUpdates.find(u => u.status === 'draft'), [projectUpdates])
+  const latestPublished = useMemo(() => projectUpdates.find(u => u.status === 'published'), [projectUpdates])
+  const history = useMemo(() => projectUpdates.filter(u => u.status === 'published'), [projectUpdates])
+  const [showHistory, setShowHistory] = useState(false)
+
+  const hasLead = needsYou.length > 0 || inFlight.length > 0 || draftUpdate || latestPublished
 
   return (
     <div className="flex-1 min-h-0 overflow-y-auto bg-paper">
@@ -242,7 +246,54 @@ export default function FrontPage({ project, tasks, sections, onOpenTask, onPaus
           <section className="lg:col-span-8">
             {hasLead ? (
               <>
-                <div className="flex items-baseline justify-between mb-4">
+                {draftUpdate && (
+                  <article className="rounded-xl border border-accent/30 bg-accent/[0.03] px-6 py-5 mb-4 shadow-sm">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="font-mono text-[9.5px] tracking-[0.15em] text-accent font-bold uppercase">
+                        Draft Update Ready
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => onDiscardUpdate(draftUpdate.id)} className="text-xs text-mute hover:text-red-400 transition-colors">Discard</button>
+                        <button onClick={() => onPublishUpdate(draftUpdate.id)} className="text-xs font-bold bg-accent text-white px-3 py-1.5 rounded hover:bg-accent-dark transition-colors shadow-sm">Publish update</button>
+                      </div>
+                    </div>
+                    <div className="text-[13.5px] leading-relaxed text-ink mb-4 whitespace-pre-wrap">{draftUpdate.body}</div>
+                    
+                    <div className="bg-surf-2 border border-line-2 rounded-lg p-3">
+                      <div className="text-[10px] font-bold text-mute-2 uppercase tracking-wider mb-2">Attached metrics (Delta)</div>
+                      <div className="flex gap-6">
+                        <div className="flex flex-col"><span className="text-[15px] font-semibold text-ink">{draftUpdate.delta?.tasks_completed || 0}</span><span className="text-[10px] text-mute">Completed</span></div>
+                        <div className="flex flex-col"><span className="text-[15px] font-semibold text-ink">{draftUpdate.delta?.tasks_added || 0}</span><span className="text-[10px] text-mute">Added</span></div>
+                        <div className="flex flex-col"><span className="text-[15px] font-semibold text-ink">{draftUpdate.delta?.blocked_items || 0}</span><span className="text-[10px] text-mute">Blocked</span></div>
+                      </div>
+                    </div>
+                  </article>
+                )}
+
+                {latestPublished && !draftUpdate && (
+                  <article className="rounded-xl border border-line-2 bg-paper px-6 py-5 mb-4 shadow-sm hover:border-line hover:shadow-card transition-all">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        {latestPublished.health === 'on_track' && <span className="w-2.5 h-2.5 rounded-full bg-priority-done" title="On Track" />}
+                        {latestPublished.health === 'at_risk' && <span className="w-2.5 h-2.5 rounded-full bg-amber-500" title="At Risk" />}
+                        {latestPublished.health === 'off_track' && <span className="w-2.5 h-2.5 rounded-full bg-red-500" title="Off Track" />}
+                        <span className="font-mono text-[10px] tracking-[0.1em] text-mute-2 uppercase font-medium">{agoLabel(latestPublished.created_at)}</span>
+                      </div>
+                      {history.length > 1 && (
+                        <button onClick={() => setShowHistory(true)} className="text-[10px] font-mono tracking-wider text-mute hover:text-ink">SEE HISTORY</button>
+                      )}
+                    </div>
+                    <div className="text-[13.5px] leading-relaxed text-ink mt-2 whitespace-pre-wrap">{latestPublished.body}</div>
+                    {(latestPublished.delta?.tasks_completed > 0 || latestPublished.delta?.tasks_added > 0) && (
+                      <div className="flex gap-4 mt-3 pt-3 border-t border-line-2">
+                        {latestPublished.delta?.tasks_completed > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_completed} completed</span>}
+                        {latestPublished.delta?.tasks_added > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_added} added</span>}
+                      </div>
+                    )}
+                  </article>
+                )}
+
+                <div className="flex items-baseline justify-between mb-4 mt-2">
                   <Kicker>Happening now</Kicker>
                   <Kicker>{inFlight.length + needsYou.length} in flight{needsYou.length > 0 ? ` · ${needsYou.length} need${needsYou.length === 1 ? 's' : ''} you` : ''}</Kicker>
                 </div>
@@ -319,8 +370,42 @@ export default function FrontPage({ project, tasks, sections, onOpenTask, onPaus
             </div>
           </section>
         </div>
-
       </div>
+
+      {showHistory && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/40">
+          <div className="w-[480px] h-full bg-paper shadow-2xl flex flex-col border-l border-line" style={{ animation: 'slideInRight 0.2s ease-out' }}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-line-2">
+              <h2 className="text-[16px] font-medium text-ink">Project History</h2>
+              <button onClick={() => setShowHistory(false)} className="text-mute hover:text-ink"><X size={18} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-6">
+              {history.map(update => (
+                <div key={update.id} className="pb-6 border-b border-line-2 last:border-0 last:pb-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    {update.health === 'on_track' && <span className="w-2.5 h-2.5 rounded-full bg-priority-done" />}
+                    {update.health === 'at_risk' && <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />}
+                    {update.health === 'off_track' && <span className="w-2.5 h-2.5 rounded-full bg-red-500" />}
+                    <span className="font-mono text-[10px] tracking-wider text-mute-2 font-medium">{new Date(update.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                  </div>
+                  <div className="text-[13px] leading-relaxed text-ink whitespace-pre-wrap">{update.body}</div>
+                  
+                  {update.delta && (update.delta.tasks_completed > 0 || update.delta.tasks_added > 0) && (
+                    <div className="mt-3 pt-3 border-t border-line-2 flex flex-col gap-2">
+                      <div className="text-[10px] font-mono tracking-wider text-mute-2 uppercase">Metrics</div>
+                      <div className="flex gap-4">
+                        <span className="text-[11px] text-mute font-medium">{update.delta.tasks_completed || 0} completed</span>
+                        <span className="text-[11px] text-mute font-medium">{update.delta.tasks_added || 0} added</span>
+                        <span className="text-[11px] text-mute font-medium">{update.delta.blocked_items || 0} blocked</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
