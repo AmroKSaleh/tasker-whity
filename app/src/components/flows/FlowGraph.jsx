@@ -87,7 +87,7 @@ function buildLayout(steps, prefix, onTaskClick) {
         id: `${src}->${s.task.id}`,
         source: src,
         target: s.task.id,
-        type: 'default', // Bezier curve
+        type: 'smoothstep', // Orthogonal lines with rounded corners
         style: { stroke: 'var(--color-line)', strokeWidth: 2 },
       })
     })
