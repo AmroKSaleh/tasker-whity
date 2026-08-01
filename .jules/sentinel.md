@@ -1,0 +1,6 @@
+# Sentinel Security Journal
+
+## 2026-08-01 - OAuth Redirect Hijacking & Open Redirect Vulnerability in OAuthAuthorizePage
+**Vulnerability:** The OAuth flow in `OAuthAuthorizePage.jsx` parsed `client_id` and `redirect_uri` directly from URL query parameters on mount but performed no validation against registered clients. If the user clicked "Allow", an authorization code would be sent to an arbitrary `redirect_uri` (redirect hijacking). If the user clicked "Deny", the application would redirect the user to the unvalidated `redirect_uri` with an error code (open redirect).
+**Learning:** Lack of server-side state/client registration validation on the authorization page frontend mount allows malicious actors to exploit OAuth endpoints. Even when authorization codes are verified on the backend token exchange, the authorization screen itself must validate incoming redirect URIs against a pre-registered whitelist to prevent credential leaks and open redirects.
+**Prevention:** Always perform an upfront check on authorization page mount to verify that `client_id` exists and that the requested `redirect_uri` is present in the registered client's allowed redirect URIs list. If invalid, fail securely by displaying a warning and completely disabling authorization/redirection.

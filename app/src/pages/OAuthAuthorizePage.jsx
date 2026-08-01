@@ -31,14 +31,47 @@ export default function OAuthAuthorizePage() {
   const [error, setError] = useState('')
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setLoading(false)
-      if (!session) {
+    let active = true
+    async function init() {
+      const { data: { session: currentSession } } = await supabase.auth.getSession()
+      if (!active) return
+      setSession(currentSession)
+      if (!currentSession) {
+        setLoading(false)
         navigate(`/login?next=${encodeURIComponent(location.pathname + location.search)}`, { replace: true })
+        return
       }
-    })
-  }, [])
+      if (!clientId || !redirectUri) {
+        setError(!clientId ? 'Missing client_id' : 'Missing redirect_uri')
+        setLoading(false)
+        return
+      }
+      try {
+        const { data: client, error: dbErr } = await supabase
+          .from('oauth_clients')
+          .select('redirect_uris')
+          .eq('client_id', clientId)
+          .maybeSingle()
+        if (dbErr) throw dbErr
+        if (!client) {
+          setError('Unauthorized: Unregistered client_id.')
+          setLoading(false)
+          return
+        }
+        if (!client.redirect_uris?.includes(redirectUri)) {
+          setError('Unauthorized: redirect_uri is not registered.')
+          setLoading(false)
+          return
+        }
+      } catch (err) {
+        setError(`Database error: ${err.message}`)
+      } finally {
+        setLoading(false)
+      }
+    }
+    init()
+    return () => { active = false }
+  }, [clientId, redirectUri, navigate, location.pathname, location.search])
 
   async function handleApprove() {
     if (!redirectUri) { setError('Missing redirect_uri'); return }
@@ -125,14 +158,14 @@ export default function OAuthAuthorizePage() {
           <div className="px-6 py-4 flex gap-3">
             <button
               onClick={handleDeny}
-              disabled={working}
+              disabled={working || !!error}
               className="flex-1 h-9 border border-line rounded-lg text-[13px] font-semibold text-mute hover:text-ink hover:border-ink-2 transition-colors disabled:opacity-40"
             >
               Deny
             </button>
             <button
               onClick={handleApprove}
-              disabled={working}
+              disabled={working || !!error}
               className="flex-1 h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors disabled:opacity-40"
             >
               {working ? 'Connecting…' : 'Allow'}
