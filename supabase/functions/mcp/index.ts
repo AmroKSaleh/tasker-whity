@@ -106,8 +106,8 @@ async function userTimezone(sb: any, userId: string): Promise<string | null> {
 // ── Auth ─────────────────────────────────────────────────────
 
 async function getScopedClient(userId: string) {
-  const secretStr = Deno.env.get('SUPABASE_AUTH_JWT_SECRET')
-  if (!secretStr) throw new Error('SUPABASE_AUTH_JWT_SECRET is required to generate scoped tokens.')
+  const secretStr = Deno.env.get('AUTH_JWT_SECRET')
+  if (!secretStr) throw new Error('AUTH_JWT_SECRET is required to generate scoped tokens.')
   const secret = new TextEncoder().encode(secretStr)
   const jwt = await new jose.SignJWT({ sub: userId, role: 'authenticated' })
     .setProtectedHeader({ alg: 'HS256' })
@@ -582,7 +582,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
     const project = await resolveProject(sb, userId, prefix)
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict')
+        .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict, tags')
         .eq('project_id', project.id).eq('short_id', shortId).eq('user_id', userId)
         .maybeSingle()
       if (task) return task
@@ -590,7 +590,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
   }
   // Fall back to UUID
   const { data } = await sb.from('tasks')
-    .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict').eq('id', taskRef).eq('user_id', userId).maybeSingle()
+    .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict, tags').eq('id', taskRef).eq('user_id', userId).maybeSingle()
   return data ?? null
 }
 
@@ -1924,6 +1924,7 @@ const TOOLS = [
         human_guidance: { type: 'string', description: 'user/external steps only: human-facing instructions shown in guide mode. Distinct from detail (AI-facing). Write as an action directive — what the person must do, where, and how to verify it worked.' },
         relay_context:  { type: 'string', description: 'RELAY MODE: set only when handing this task to someone else. Curated, not a transcript dump: who it is for, key decisions and WHY, rejected approaches, intent, open questions, watch-outs. Setting it marks the task as a relay.' },
         allow_duplicate: { type: 'boolean', description: 'Creation is REFUSED if a near-identical open task exists (matches listed in the response). Pass true only when genuinely distinct — otherwise work the existing task or merge_task_as_duplicate.' },
+        tags:           { type: 'array', items: { type: 'string' }, description: 'Tags used to filter which Instruction Sets are loaded into this task\'s context.' },
       },
       required: ['project_id', 'text'],
     },
@@ -1987,6 +1988,7 @@ const TOOLS = [
         agent_ready:    { type: 'boolean', description: 'Mark "ready for the agent" — enters the autonomous work queue (get_ready_work). Usually set by the human ("Hand to agent"); false pulls it back.' },
         agent_proposal: { type: 'string', description: 'Prepare→confirm→execute: the agent\'s PREPARED proposal (a concise summary of what it will do). Setting it puts the task in the web Agent Queue "Awaiting confirmation" tab. Clear it (empty string) once confirmed-and-executed, or if declined.' },
         agent_proposal_confirmed: { type: 'boolean', description: 'Usually set by the human (the "Confirm" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. Normally reset to false only by clearing the proposal after executing.' },
+        tags:           { type: 'array', items: { type: 'string' }, description: 'Tags used to filter which Instruction Sets are loaded into this task\'s context.' },
       },
       required: ['task_id'],
     },
@@ -2100,6 +2102,7 @@ const TOOLS = [
         title:      { type: 'string', description: 'Short title for the directive' },
         content:    { type: 'string', description: 'The instruction content (markdown supported)' },
         universal:  { type: 'boolean', description: 'If true, this rule always applies, even inside a flow with its own IS. Default false.' },
+        tags:       { type: 'array', items: { type: 'string' }, description: 'Tags used to scope this instruction set to tasks with matching tags. Omit or empty array means it applies to all tasks.' },
       },
       required: ['project_id', 'title', 'content'],
     },
@@ -2113,6 +2116,7 @@ const TOOLS = [
         title:     { type: 'string', description: 'Short title for the directive' },
         content:   { type: 'string', description: 'The instruction content (markdown supported)' },
         universal: { type: 'boolean', description: 'If true, seeded entries apply even inside flows with their own IS. Default false.' },
+        tags:      { type: 'array', items: { type: 'string' }, description: 'Tags used to scope this instruction set to tasks with matching tags. Omit or empty array means it applies to all tasks.' },
       },
       required: ['title', 'content'],
     },
@@ -2132,6 +2136,7 @@ const TOOLS = [
         title:     { type: 'string' },
         content:   { type: 'string' },
         universal: { type: 'boolean' },
+        tags:      { type: 'array', items: { type: 'string' } },
       },
       required: ['entry_id'],
     },
@@ -2540,6 +2545,7 @@ const TOOLS = [
         title:     { type: 'string', description: 'New title (optional)' },
         content:   { type: 'string', description: 'New content (optional, markdown supported)' },
         universal: { type: 'boolean', description: 'Set true so this rule applies even inside flows with their own IS; false to scope it to non-flow / fallback only.' },
+        tags:      { type: 'array', items: { type: 'string' }, description: 'New tags (optional).' },
       },
       required: ['entry_id'],
     },
@@ -2590,6 +2596,7 @@ const TOOLS = [
         project_id: { type: 'string', description: 'Narrows a flow-name lookup' },
         title:      { type: 'string', description: 'Short title for the directive' },
         content:    { type: 'string', description: 'The instruction content (markdown supported)' },
+        tags:       { type: 'array', items: { type: 'string' }, description: 'Tags used to scope this instruction set to tasks with matching tags. Omit or empty array means it applies to all tasks in the flow.' },
       },
       required: ['title', 'content'],
     },
@@ -2603,6 +2610,7 @@ const TOOLS = [
         entry_id: { type: 'string', description: 'UUID of the flow IS entry (from list_flow_is_entries)' },
         title:    { type: 'string', description: 'New title (optional)' },
         content:  { type: 'string', description: 'New content (optional)' },
+        tags:     { type: 'array', items: { type: 'string' }, description: 'New tags (optional).' },
       },
       required: ['entry_id'],
     },
@@ -2809,6 +2817,19 @@ const TOOLS = [
         section_id: { type: 'string', description: 'Section UUID' },
       },
       required: ['project_id', 'section_id'],
+    },
+  },
+  {
+    name: 'add_task_link',
+    description: 'Attach a URL link (e.g. a deployed webpage, PR, or reference) to a task\'s output. This powers the Links section in the Summary.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        task_id: { type: 'string', description: 'Task UUID or short ID' },
+        url: { type: 'string', description: 'The URL to attach' },
+        title: { type: 'string', description: 'Optional human-readable title for the link' },
+      },
+      required: ['task_id', 'url'],
     },
   },
   {
@@ -4340,6 +4361,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         executor: resolvedExecutor,
         human_guidance: human_guidance ?? null,
         relay_context: (typeof relay_context === 'string' && relay_context.trim()) ? relay_context.trim() : null,
+        tags: args.tags && Array.isArray(args.tags) ? args.tags : [],
       }).select().single()
       if (error) throw new Error(error.message)
       const clean = (xs: any) => (Array.isArray(xs) ? xs : []).map((x: any) => String(x).trim()).filter(Boolean)
@@ -4487,7 +4509,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready', 'agent_proposal', 'agent_proposal_confirmed']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready', 'agent_proposal', 'agent_proposal_confirmed', 'tags']
       const patch: Record<string, any> = {}
       const nullable = (k: string) => k === 'group_id' || k === 'delegated_to' || k === 'agent_proposal'   // clearable via null/empty
       for (const k of allowed) if (nullable(k) ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
@@ -4971,17 +4993,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         // - Task in a flow with no flow IS → full project IS (safe fallback).
         if (full.project_id) {
           const { data: projIs } = await sb.from('project_instructions')
-            .select('title, content, universal')
+            .select('title, content, universal, tags')
             .eq('project_id', full.project_id)
             .order('created_at')
           let flowIs: any[] = []
           if (full.flow_id) {
             const { data } = await sb.from('flow_instructions')
-              .select('title, content').eq('flow_id', full.flow_id).order('created_at')
+              .select('title, content, tags').eq('flow_id', full.flow_id).order('created_at')
             flowIs = data || []
           }
+          
+          // TDE-782: Filter IS entries by tags. An entry applies if it has NO tags, or if its tags intersect the task's tags.
+          const taskTags = Array.isArray(full.tags) ? full.tags : []
+          const applies = (entry: any) => {
+            const t = entry.tags
+            if (!Array.isArray(t) || t.length === 0) return true
+            return t.some((tag: string) => taskTags.includes(tag))
+          }
+          const filteredProjIs = (projIs || []).filter(applies)
+          flowIs = flowIs.filter(applies)
+
           if (flowIs.length) {
-            const universalProj = (projIs || []).filter((e: any) => e.universal)
+            const universalProj = filteredProjIs.filter((e: any) => e.universal)
             if (universalProj.length) {
               lines.push('\n---')
               lines.push('# Project Instruction Set (universal)')
@@ -4990,10 +5023,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
             lines.push('\n---')
             lines.push('# Flow Instruction Set (governs this flow — replaces the project\'s non-universal IS)')
             for (const entry of flowIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
-          } else if (projIs?.length) {
+          } else if (filteredProjIs.length) {
             lines.push('\n---')
             lines.push('# Project Instruction Set')
-            for (const entry of projIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
+            for (const entry of filteredProjIs) lines.push(`\n## ${entry.title}\n\n${entry.content}`)
           }
         }
 
@@ -5054,14 +5087,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data: entries } = await sb.from('project_instructions')
-        .select('id, title, content')
+        .select('id, title, content, tags')
         .eq('project_id', project.id)
         .order('created_at')
       if (!entries?.length) return `No instruction set defined for "${project.name}". Add entries via the IS button in the project header.`
       return [
         `# Instruction Set — ${project.name}`,
         '',
-        ...entries.map((e: any) => `## ${e.title}  (id: ${e.id})\n\n${e.content}`),
+        ...entries.map((e: any) => `## ${e.title}  (id: ${e.id})${e.tags?.length ? ` [Tags: ${e.tags.join(', ')}]` : ''}\n\n${e.content}`),
       ].join('\n\n---\n\n')
     }
 
@@ -5081,7 +5114,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data, error } = await sb.from('project_instructions')
-        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content, universal: args.universal === true })
+        .insert({ project_id: project.id, user_id: userId, title: args.title, content: args.content, universal: args.universal === true, tags: args.tags && Array.isArray(args.tags) ? args.tags : [] })
         .select().single()
       if (error) throw new Error(error.message)
       return `Created IS entry "${data.title}" in "${project.name}".${data.universal ? ' Marked universal — it applies even inside flows that have their own IS.' : ''}`
@@ -5242,11 +5275,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const project = await resolveProject(sb, userId, args.project_id, logCtx)
       if (!project) return `Project "${args.project_id}" not found.`
       const { data } = await sb.from('project_instructions')
-        .select('id, title, updated_at')
+        .select('id, title, updated_at, tags')
         .eq('project_id', project.id)
         .order('created_at')
       if (!data?.length) return `No instruction set entries for "${project.name}".`
-      return data.map((e: any) => `[id: ${e.id}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+      return data.map((e: any) => `[id: ${e.id}] ${e.title}  (updated ${e.updated_at})${e.tags?.length ? ` [Tags: ${e.tags.join(', ')}]` : ''}`).join('\n')
     }
 
     case 'update_is_entry': {
@@ -5254,7 +5287,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (args.title     !== undefined) fields.title     = args.title
       if (args.content   !== undefined) fields.content   = args.content
       if (args.universal !== undefined) fields.universal = args.universal === true
-      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, or universal.'
+      if (args.tags      !== undefined) fields.tags      = Array.isArray(args.tags) ? args.tags : []
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, universal, or tags.'
       const { data, error } = await sb.from('project_instructions')
         .update(fields)
         .eq('id', args.entry_id)
@@ -5284,7 +5318,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .select('sort_order').eq('user_id', userId).order('sort_order', { ascending: false }).limit(1).maybeSingle()
       const sort_order = ((last?.sort_order) ?? -1) + 1
       const { data, error } = await sb.from('default_instructions')
-        .insert({ user_id: userId, title: args.title, content: args.content, universal: args.universal === true, sort_order })
+        .insert({ user_id: userId, title: args.title, content: args.content, universal: args.universal === true, sort_order, tags: args.tags && Array.isArray(args.tags) ? args.tags : [] })
         .select().single()
       if (error) throw new Error(error.message)
       return `Created personal default IS entry "${data.title}". It will auto-seed every NEW project${data.universal ? ' (universal — applies even inside flows)' : ''}. Existing projects are unchanged.`
@@ -5292,11 +5326,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'list_default_is_entries': {
       const { data } = await sb.from('default_instructions')
-        .select('id, title, universal, updated_at')
+        .select('id, title, universal, updated_at, tags')
         .eq('user_id', userId)
         .order('sort_order')
       if (!data?.length) return 'No personal default Instruction Set entries. Create one with create_default_is_entry to auto-seed it into every new project.'
-      return data.map((e: any) => `[id: ${e.id}] ${e.title}${e.universal ? ' (universal)' : ''}`).join('\n')
+      return data.map((e: any) => `[id: ${e.id}] ${e.title}${e.universal ? ' (universal)' : ''}${e.tags?.length ? ` [Tags: ${e.tags.join(', ')}]` : ''}`).join('\n')
     }
 
     case 'update_default_is_entry': {
@@ -5304,7 +5338,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (args.title     !== undefined) fields.title     = args.title
       if (args.content   !== undefined) fields.content   = args.content
       if (args.universal !== undefined) fields.universal = args.universal === true
-      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, or universal.'
+      if (args.tags      !== undefined) fields.tags      = Array.isArray(args.tags) ? args.tags : []
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, universal, or tags.'
       const { data, error } = await sb.from('default_instructions')
         .update(fields).eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
       if (error) throw new Error(error.message)
@@ -5324,21 +5359,21 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'get_flow_is': {
       const flow = await resolveFlow(sb, userId, args)
       if (!flow) return `Flow not found. Pass flow_id (UUID or name) or a task_id that belongs to the flow.`
-      const { data: entries } = await sb.from('flow_instructions').select('id, title, content').eq('flow_id', flow.id).order('created_at')
+      const { data: entries } = await sb.from('flow_instructions').select('id, title, content, tags').eq('flow_id', flow.id).order('created_at')
       if (!entries?.length) return `No flow IS defined for "${flow.name}". Tasks in this flow fall back to the project IS.`
-      return [`# Flow Instruction Set — ${flow.name}`, '', ...entries.map((e: any) => `## ${e.title}  (id: ${e.id})\n\n${e.content}`)].join('\n\n---\n\n')
+      return [`# Flow Instruction Set — ${flow.name}`, '', ...entries.map((e: any) => `## ${e.title}  (id: ${e.id})${e.tags?.length ? ` [Tags: ${e.tags.join(', ')}]` : ''}\n\n${e.content}`)].join('\n\n---\n\n')
     }
     case 'list_flow_is_entries': {
       const flow = await resolveFlow(sb, userId, args)
       if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
-      const { data } = await sb.from('flow_instructions').select('id, title, updated_at').eq('flow_id', flow.id).order('created_at')
+      const { data } = await sb.from('flow_instructions').select('id, title, updated_at, tags').eq('flow_id', flow.id).order('created_at')
       if (!data?.length) return `No flow IS entries for "${flow.name}".`
-      return data.map((e: any) => `[id: ${e.id}] ${e.title}  (updated ${e.updated_at})`).join('\n')
+      return data.map((e: any) => `[id: ${e.id}] ${e.title}  (updated ${e.updated_at})${e.tags?.length ? ` [Tags: ${e.tags.join(', ')}]` : ''}`).join('\n')
     }
     case 'create_flow_is_entry': {
       const flow = await resolveFlow(sb, userId, args)
       if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
-      const { data, error } = await sb.from('flow_instructions').insert({ flow_id: flow.id, user_id: userId, title: args.title, content: args.content }).select().single()
+      const { data, error } = await sb.from('flow_instructions').insert({ flow_id: flow.id, user_id: userId, title: args.title, content: args.content, tags: args.tags && Array.isArray(args.tags) ? args.tags : [] }).select().single()
       if (error) throw new Error(error.message)
       return `Created flow IS entry "${data.title}" on flow "${flow.name}". Flow IS now governs this flow's tasks (replacing the project's non-universal IS).`
     }
@@ -5346,7 +5381,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const fields: any = {}
       if (args.title   !== undefined) fields.title   = args.title
       if (args.content !== undefined) fields.content = args.content
-      if (!Object.keys(fields).length) return 'No fields to update. Provide title or content.'
+      if (args.tags    !== undefined) fields.tags    = Array.isArray(args.tags) ? args.tags : []
+      if (!Object.keys(fields).length) return 'No fields to update. Provide title, content, or tags.'
       const { data, error } = await sb.from('flow_instructions').update(fields).eq('id', args.entry_id).eq('user_id', userId).select().maybeSingle()
       if (error) throw new Error(error.message)
       if (!data) return `Flow IS entry "${args.entry_id}" not found.`
@@ -7834,6 +7870,16 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         },
         project_context: { sections: sectionList, tasks: taskList },
       })
+    }
+    case 'add_task_link': {
+      const task = await resolveTask(sb, userId, args.task_id)
+      if (!task) return `Task "${args.task_id}" not found.`
+      const prev = (task.output && typeof task.output === 'object') ? task.output : {}
+      const links = Array.isArray(prev.links) ? prev.links : []
+      links.push({ url: args.url, title: args.title || args.url, added_at: new Date().toISOString() })
+      const { error } = await sb.from('tasks').update({ output: { ...prev, links } }).eq('id', task.id)
+      if (error) throw new Error(error.message)
+      return `Attached link to task "${task.text}": ${args.url}`
     }
 
     case 'set_task_input': {

@@ -11,7 +11,7 @@ import AppShell from '../components/editorial/AppShell'
 import { Kicker, Chip, Pill, TaskRow, SectionHead, MiniCalendar } from '../components/editorial/atoms'
 import TaskDetailSheet from '../components/board/TaskDetailSheet'
 import FocusOverlay from '../components/focus/FocusOverlay'
-import DaySummaryModal from '../components/today/DaySummaryModal'
+import SummaryModal from '../components/today/SummaryModal'
 
 function isoWeek(d) {
   const date = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()))
@@ -341,7 +341,7 @@ export default function TodayPage() {
       )}
 
       {showDaySummary && (
-        <DaySummaryModal tasks={tasks} projects={projects} onClose={() => setShowDaySummary(false)} />
+        <SummaryModal tasks={tasks} projects={projects} onClose={() => setShowDaySummary(false)} />
       )}
 
       {undoToast && (

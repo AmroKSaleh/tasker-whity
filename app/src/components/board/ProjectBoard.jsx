@@ -36,6 +36,7 @@ import BlueprintView from './BlueprintView'
 import PhaseBar, { phaseTally } from './PhaseBar'
 import PhasesModal from './PhasesModal'
 import { usePhases, phaseTint } from '../../hooks/usePhases'
+import SummaryModal from '../today/SummaryModal'
 
 function matchFilter(t, statusFilter, priorityFilter) {
   const statusOk = statusFilter === 'all' ||
@@ -493,6 +494,7 @@ export default function ProjectBoard({ project }) {
   const [showCreateTask, setShowCreateTask] = useState(false)
   const [showFiles, setShowFiles] = useState(false)
   const [showQueue, setShowQueue] = useState(false)
+  const [showSummary, setShowSummary] = useState(false)
   const [showContext, setShowContext] = useState(false)
   // const [showFocus, setShowFocus] = useState(false) — DISABLED
   // const [focusTaskId, setFocusTaskId] = useState(null) — DISABLED
@@ -846,6 +848,7 @@ export default function ProjectBoard({ project }) {
                     title="Search everything"
                     className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink"
                   >⌘K</button>
+                  <button onClick={() => setShowSummary(true)} title="Summary — recap recent project activity" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">Summary</button>
                   <button onClick={() => setShowKB(true)} title="Knowledge Base — persistent project knowledge the AI accumulates" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">KB</button>
                   <button onClick={() => setShowIS(true)} title="Instruction Set — per-project rules that shape AI behavior" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">IS</button>
                   <button onClick={() => setShowFiles(true)} title="Files — documents & files stored in this project's Google Drive folder" className="btn btn-sm font-mono text-[10px] tracking-[0.12em] uppercase text-mute hover:text-ink">Files</button>
@@ -1118,6 +1121,14 @@ export default function ProjectBoard({ project }) {
       )}
       {showFiles && (
         <ProjectFilesModal projectId={project.id} projectName={project.name} onClose={() => setShowFiles(false)} />
+      )}
+      {showSummary && (
+        <SummaryModal
+          tasks={tasks}
+          projects={[project]}
+          projectId={project.id}
+          onClose={() => setShowSummary(false)}
+        />
       )}
       {showQueue && (
         <AgentQueuePanel projectId={project.id} prefix={project.prefix} onClose={() => setShowQueue(false)} onOpenTask={openTask} />

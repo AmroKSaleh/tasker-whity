@@ -65,6 +65,11 @@
       "order": 21
     },
     {
+      "id": "tags-system",
+      "name": "Tags System",
+      "order": 22
+    },
+    {
       "id": "unfiled",
       "name": "Unfiled",
       "order": 9990
