@@ -156,33 +156,63 @@ export default function InstructionSetModal({ projectId, onClose }) {
                 </p>
               </div>
             ) : (
-              <ul className="divide-y divide-line-2">
-                {entries.map(entry => (
-                  <li key={entry.id}>
-                    <button
-                      onClick={() => openEntry(entry)}
-                      className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-surf-2 transition-colors text-left gap-3"
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <span className="text-mute-2 text-[12px] shrink-0">◈</span>
-                        <span className="text-[14px] text-ink truncate">{entry.title}</span>
-                        {entry.tags?.length > 0 && (
-                          <div className="flex gap-1 overflow-hidden shrink-0">
-                            {entry.tags.map(tag => (
-                              <span key={tag} className="font-mono text-[9px] text-ink border border-line rounded px-1.5 py-0.5 whitespace-nowrap">
-                                #{tag}
-                              </span>
-                            ))}
+              <div className="flex flex-col">
+                {(() => {
+                  const globalEntries = entries.filter(e => !e.tags || e.tags.length === 0)
+                  const taggedEntries = entries.filter(e => e.tags && e.tags.length > 0)
+                  
+                  const renderEntry = (entry) => (
+                    <li key={entry.id}>
+                      <button
+                        onClick={() => openEntry(entry)}
+                        className="w-full flex items-center justify-between px-5 py-3.5 hover:bg-surf-2 transition-colors text-left gap-3"
+                      >
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="text-mute-2 text-[12px] shrink-0">◈</span>
+                          <span className="text-[14px] text-ink truncate">{entry.title}</span>
+                          {entry.tags?.length > 0 && (
+                            <div className="flex gap-1 overflow-hidden shrink-0">
+                              {entry.tags.map(tag => (
+                                <span key={tag} className="font-mono text-[9px] text-ink border border-line rounded px-1.5 py-0.5 whitespace-nowrap">
+                                  #{tag}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                        <span className="font-mono text-[10px] text-mute-2 shrink-0">
+                          {new Date(entry.updated_at).toLocaleDateString()}
+                        </span>
+                      </button>
+                    </li>
+                  )
+
+                  return (
+                    <>
+                      {globalEntries.length > 0 && (
+                        <div className="border-b border-line-2 last:border-0">
+                          <div className="px-5 py-2.5 bg-surf text-[11px] font-semibold text-mute-2 uppercase tracking-wider">
+                            Global Instructions (All Tasks)
                           </div>
-                        )}
-                      </div>
-                      <span className="font-mono text-[10px] text-mute-2 shrink-0">
-                        {new Date(entry.updated_at).toLocaleDateString()}
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+                          <ul className="divide-y divide-line-2">
+                            {globalEntries.map(renderEntry)}
+                          </ul>
+                        </div>
+                      )}
+                      {taggedEntries.length > 0 && (
+                        <div className="border-b border-line-2 last:border-0">
+                          <div className="px-5 py-2.5 bg-surf text-[11px] font-semibold text-mute-2 uppercase tracking-wider">
+                            Tagged Instructions (Specific Tasks)
+                          </div>
+                          <ul className="divide-y divide-line-2">
+                            {taggedEntries.map(renderEntry)}
+                          </ul>
+                        </div>
+                      )}
+                    </>
+                  )
+                })()}
+              </div>
             )}
           </div>
         )}
