@@ -150,7 +150,7 @@ function TaskNode({ data }) {
 
   return (
     <div style={{
-      width: NODE_WIDTH, minHeight: NODE_HEIGHT,
+      width: NODE_WIDTH, height: NODE_HEIGHT,
       background: 'var(--color-paper)',
       border: `${isSelected ? 2 : 1.5}px solid ${borderColor}`,
       borderRadius: 8, padding: '10px 12px',
@@ -160,6 +160,7 @@ function TaskNode({ data }) {
       opacity: isDimmed ? 0 : 1,
       pointerEvents: isDimmed ? 'none' : undefined,
       transition: 'opacity 0.2s',
+      overflow: 'hidden',
     }}>
       <Handle type="target" position={Position.Left} style={{ opacity: 0, pointerEvents: 'none' }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>

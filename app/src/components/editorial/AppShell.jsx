@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
-import { Home, Folder, Layers, Building2, Workflow, Calendar, Search, BookOpen, Settings } from 'lucide-react'
+import { Home, Folder, Layers, Building2, Workflow, Calendar, Search, BookOpen, Settings, Trash2 } from 'lucide-react'
 import { useSidebarStore } from '../../store/useSidebarStore'
 import { useConnectedProviders } from '../../hooks/useConnectedProviders'
 import { useParkedCounts } from '../../hooks/useParkedCounts'
@@ -87,6 +87,7 @@ export default function AppShell({ active, rightRail, children, hideSidebar }) {
           )}
           <div className="flex-1" />
           <div className="flex flex-col gap-0.5">
+            <RailButton icon={Trash2} label="Recycle Bin" active={active === 'recycle-bin'} expanded={expanded} onClick={() => navigate('/recycle-bin')} />
             <RailButton icon={BookOpen} label="Docs"     active={active === 'docs'}     expanded={expanded} onClick={() => navigate('/docs')} />
             <RailButton icon={Settings} label="Settings" active={active === 'settings'} expanded={expanded} onClick={() => navigate('/settings')} />
           </div>

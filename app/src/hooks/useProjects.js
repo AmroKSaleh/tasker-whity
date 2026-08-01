@@ -48,6 +48,11 @@ export async function updateProject(id, updates) {
 }
 
 export async function deleteProject(id) {
+  await supabase.from('projects').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', id)
+  useProjectStore.getState().removeProject(id)
+}
+
+export async function hardDeleteProject(id) {
   const { data: secs } = await supabase.from('sections').select('id').eq('project_id', id)
   const sectionIds = (secs || []).map(s => s.id)
   if (sectionIds.length) {
@@ -64,13 +69,17 @@ export async function deleteProject(id) {
   useProjectStore.getState().removeProject(id)
 }
 
+export async function restoreProject(id) {
+  await supabase.from('projects').update({ is_deleted: false, deleted_at: null }).eq('id', id)
+}
+
 export function useProjects() {
   const { projects, setProjects } = useProjectStore()
   const [isLoading, setIsLoading] = useState(projects.length === 0)
 
   useEffect(() => {
     async function fetchProjects() {
-      const { data } = await supabase.from('projects').select('id, name, slug, sort_order, created_at, context, description, prefix, environment_id').order('sort_order').order('created_at')
+      const { data } = await supabase.from('projects').select('id, name, slug, sort_order, created_at, context, description, prefix, environment_id').is('is_deleted', false).order('sort_order').order('created_at')
       if (data) setProjects(data)
       setIsLoading(false)
     }

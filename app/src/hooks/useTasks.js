@@ -110,7 +110,7 @@ export function useTasks(projectId) {
     async function fetchAll() {
       const [{ data: secs }, { data: tsks }] = await Promise.all([
         supabase.from('sections').select('*').eq('project_id', projectId).order('sort_order'),
-        supabase.from('tasks').select('*, task_statuses(status_id, status:project_statuses(id, name, color, base_status))').eq('project_id', projectId).order('sort_order'),
+        supabase.from('tasks').select('*, task_statuses(status_id, status:project_statuses(id, name, color, base_status))').eq('project_id', projectId).is('is_deleted', false).order('sort_order'),
       ])
       if (secs) setSections(secs)
       if (tsks) setTasks(tsks)
@@ -271,10 +271,18 @@ export function useTasks(projectId) {
 
   async function deleteTask(taskId) {
     removeTask(taskId)
+    await supabase.from('tasks').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', taskId)
+  }
+
+  async function hardDeleteTask(taskId) {
     await Promise.all([
       supabase.from('task_discussions').delete().eq('task_id', taskId),
       supabase.from('tasks').delete().eq('id', taskId),
     ])
+  }
+
+  async function restoreTask(taskId) {
+    await supabase.from('tasks').update({ is_deleted: false, deleted_at: null }).eq('id', taskId)
   }
 
   async function deleteGroup(groupId) {
@@ -329,5 +337,5 @@ export function useTasks(projectId) {
     ))
   }
 
-  return { tasks, sections, groups, toggleDone, toggleInProgress, pinTask, createTask, createSection, createGroup, createGroupWithTasks, deleteTask, deleteGroup, deleteSection, reorderTasks, reorderSections, moveTask }
+  return { tasks, sections, groups, toggleDone, toggleInProgress, pinTask, createTask, createSection, createGroup, createGroupWithTasks, deleteTask, hardDeleteTask, restoreTask, deleteGroup, deleteSection, reorderTasks, reorderSections, moveTask }
 }

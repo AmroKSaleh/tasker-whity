@@ -18,9 +18,9 @@ export function useFlows() {
 
   const refetch = useCallback(async () => {
     const [{ data: projs }, { data: tsks }, { data: frecs }] = await Promise.all([
-      supabase.from('projects').select(PROJECT_FIELDS).order('created_at'),
-      supabase.from('tasks').select(TASK_FIELDS).order('sort_order'),
-      supabase.from('flows').select('id, name, short_id, gate_bypassed, gate_bypass_reason'),
+      supabase.from('projects').select(PROJECT_FIELDS).is('is_deleted', false).order('created_at'),
+      supabase.from('tasks').select(TASK_FIELDS).is('is_deleted', false).order('sort_order'),
+      supabase.from('flows').select('id, name, short_id, gate_bypassed, gate_bypass_reason').is('is_deleted', false),
     ])
     if (projs) setProjects(projs)
     if (tsks) setTasks(tsks)

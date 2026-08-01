@@ -1906,7 +1906,7 @@ const TOOLS = [
   },
   {
     name: 'create_task',
-    description: 'Create a single task. For a multi-step process toward a goal, do NOT create tasks ad hoc — use build_new_flow instead. To create a SEED (a placeholder for underspecified work or a flow worth building later), pass kind:"seed" with seed_target plus open_questions and/or milestones — a unified checklist: open_questions are answered during resolution, milestones become prerequisites that soft-gate resolution.',
+    description: 'Create a single task. For a multi-step process toward a goal, do NOT create tasks ad hoc � use build_new_flow instead. To create a SEED (a placeholder for underspecified work or a flow worth building later), pass kind:"seed" with seed_target plus open_questions and/or milestones � a unified checklist: open_questions are answered during resolution, milestones become prerequisites that soft-gate resolution. DYNAMIC SEEDS: Whenever you identify a new body of work but lack context or alignment to define the exact execution steps, DO NOT create a normal task. Instead, dynamically create a Context Seed (kind: "seed", seed_target: "task") and populate its checklist with the open questions and prerequisites that must be resolved first.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2395,7 +2395,8 @@ const TOOLS = [
       type: 'object',
       properties: {
         filename:  { type: 'string', description: 'Filename, e.g. "report.md" or "Article Draft". For docs/sheets the extension is cosmetic — Drive shows it as a native Doc/Sheet.' },
-        content:   { type: 'string', description: 'Text content of the file. For target_type "doc": pass HTML or Markdown. For "sheet": pass CSV.' },
+        content:   { type: 'string', description: 'Text content of the file. For target_type "doc": pass HTML or Markdown. For "sheet": pass CSV. If encoding is "base64", this must be the base64-encoded binary string.' },
+        encoding:  { type: 'string', enum: ['text', 'base64'], description: 'Encoding of the content string. Defaults to text. Use "base64" for binary files like .zip or images.' },
         task_id:   { type: 'string', description: 'Optional: task UUID or short ID. Places file in the right project/flow subfolder and records the Drive file ID on the task output.' },
         target_type: { type: 'string', enum: ['file', 'doc', 'sheet'], description: 'What to create. "file" (default) = raw file as-is. "doc" = editable Google Doc (converts from HTML/Markdown). "sheet" = editable Google Sheet (converts from CSV).' },
         mime_type: { type: 'string', description: 'Source content MIME — the format Drive converts FROM, not the Google-apps type. "file": default text/plain (text/markdown for .md). "doc": text/html (default) or text/markdown. "sheet": text/csv (default).' },
@@ -3568,7 +3569,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'list_projects': {
       const envFilter = args.environment_id || null
-      let projQuery = sb.from('projects').select('id, name, slug, prefix, context, environment_id').eq('user_id', userId).order('sort_order')
+      let projQuery = sb.from('projects').select('id, name, slug, prefix, context, environment_id').eq('user_id', userId).is('is_deleted', false).order('sort_order')
       if (envFilter) projQuery = projQuery.eq('environment_id', envFilter)
       const [{ data: projects }, { data: tasks }, { data: envRows }, { data: us }] = await Promise.all([
         projQuery,
@@ -3970,7 +3971,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         sb.from('project_knowledge').delete().eq('project_id', project.id),
         sb.from('project_instructions').delete().eq('project_id', project.id),
       ])
-      await sb.from('projects').delete().eq('id', project.id)
+      await sb.from('projects').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', project.id)
       return `Deleted project "${project.name}" and all its data.`
     }
 
@@ -4177,7 +4178,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'list_tasks': {
       const { project_id, section_id, status, confirmed, include_flow_steps } = args
-      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, updated_at, sort_order, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId)
+      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, updated_at, sort_order, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId).is('is_deleted', false)
       let resolvedProject: any = null
       if (project_id) {
         resolvedProject = await resolveProject(sb, userId, project_id)
@@ -4694,7 +4695,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (task.output?.drive_files?.length) {
         loadGoogleAccessToken(sb, userId).then(t => { if (t) moveDriveFilesToFolder(sb, t, task, userId, 'Archived') }).catch(() => {})
       }
-      await sb.from('tasks').delete().eq('id', task.id)
+      await sb.from('tasks').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', task.id)
       return `Deleted "${task.text}".`
     }
 
@@ -6184,7 +6185,27 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (native) metaObj.mimeType = native.metaMime
       const boundary = 'tasker_drive_boundary'
       const meta = JSON.stringify(metaObj)
-      const body = `--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentMime}\r\n\r\n${args.content}\r\n--${boundary}--`
+      
+      const encoder = new TextEncoder()
+      const metaBytes = encoder.encode(`--${boundary}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${meta}\r\n--${boundary}\r\nContent-Type: ${contentMime}\r\n\r\n`)
+      const footerBytes = encoder.encode(`\r\n--${boundary}--`)
+      
+      let contentBytes: Uint8Array
+      if (args.encoding === 'base64') {
+        const binaryStr = atob(args.content.replace(/\s+/g, ''))
+        contentBytes = new Uint8Array(binaryStr.length)
+        for (let i = 0; i < binaryStr.length; i++) {
+          contentBytes[i] = binaryStr.charCodeAt(i)
+        }
+      } else {
+        contentBytes = encoder.encode(args.content)
+      }
+      
+      const body = new Uint8Array(metaBytes.length + contentBytes.length + footerBytes.length)
+      body.set(metaBytes, 0)
+      body.set(contentBytes, metaBytes.length)
+      body.set(footerBytes, metaBytes.length + contentBytes.length)
+
       const uploadRes = await fetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart', {
         method: 'POST',
         headers: { Authorization: `Bearer ${gToken}`, 'Content-Type': `multipart/related; boundary=${boundary}` },
@@ -7112,7 +7133,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!project) return `Project "${args.project_id}" not found.`
       let q = sb.from('flows')
         .select('id, name, short_id, created_at, step_list_open')
-        .eq('project_id', project.id)
+        .eq('project_id', project.id).is('is_deleted', false)
         .eq('user_id', userId)
 
       const limit = clampLimit(args.limit)
@@ -8296,7 +8317,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       if (!flow) return 'Flow not found.'
       const { data: unlinked } = await sb.from('tasks').update({ flow_id: null, flow_step: null }).eq('flow_id', flow.id).eq('user_id', userId).select('id')
-      const { error } = await sb.from('flows').delete().eq('id', flow.id).eq('user_id', userId)
+      const { error } = await sb.from('flows').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', flow.id).eq('user_id', userId)
       if (error) throw new Error(error.message)
       const n = unlinked?.length ?? 0
       return `Deleted flow "${flow.name}". Unlinked ${n} task${n !== 1 ? 's' : ''} (the tasks and their I/O edges were kept).`
@@ -9493,3 +9514,4 @@ Deno.serve(async (req: Request) => {
     return rpcErr(-32603, err.message, id)
   }
 })
+

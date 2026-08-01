@@ -362,6 +362,17 @@ export default function NavigationRail() {
         {/* Settings + Sign out */}
         <div className="px-2 pt-3 border-t border-line-2 shrink-0 flex flex-col gap-0.5">
           <button
+            onClick={() => navigate('/recycle-bin')}
+            className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] transition-colors ${
+              location.pathname === '/recycle-bin'
+                ? 'bg-paper border border-line text-ink font-semibold shadow-sm'
+                : 'text-mute hover:bg-surf-2'
+            }`}
+          >
+            <span>🗑</span>
+            <span>Recycle Bin</span>
+          </button>
+          <button
             onClick={() => navigate('/settings')}
             className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] transition-colors ${
               location.pathname === '/settings'
