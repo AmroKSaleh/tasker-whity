@@ -245,10 +245,6 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
 // ── Section column ──
 // ── Draggable card wrapper ──
 function SortableCard({ task, sectionId, groupId, sortLocked = false, ...cardProps }) {
-  // When a section is in a non-manual sort (TDE-403) the visual order comes from the sort
-  // comparator, not from dnd-kit. Disabling the sortable there stops dnd-kit computing reorder
-  // transforms against a stale sort_order-based measurement — which otherwise shift cards on top
-  // of each other (overlap). Drag is intentionally locked in sorted sections anyway.
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: task.id,
     data: { type: 'task', sectionId, groupId: groupId ?? null },
@@ -257,9 +253,10 @@ function SortableCard({ task, sectionId, groupId, sortLocked = false, ...cardPro
   return (
     <div
       ref={setNodeRef}
+      className="shrink-0"
       {...(sortLocked ? {} : attributes)}
       {...(sortLocked ? {} : listeners)}
-      style={{ transform: sortLocked ? undefined : CSS.Translate.toString(transform), transition: sortLocked ? undefined : transition, opacity: isDragging ? 0.4 : 1 }}
+      style={{ transform: sortLocked || !isDragging ? undefined : CSS.Translate.toString(transform), transition: sortLocked ? undefined : transition, opacity: isDragging ? 0.4 : 1 }}
     >
       <BoardCard task={task} {...cardProps} />
     </div>
@@ -274,7 +271,7 @@ function DroppableList({ sectionId, groupId, items, children }) {
   })
   return (
     <SortableContext id={`${sectionId}::${groupId ?? ''}`} items={items} strategy={verticalListSortingStrategy}>
-      <div ref={setNodeRef} className="flex flex-col gap-1.5 min-h-[10px]">{children}</div>
+      <div ref={setNodeRef} className="flex flex-col gap-1.5 min-h-[10px] shrink-0">{children}</div>
     </SortableContext>
   )
 }
