@@ -5,6 +5,7 @@ import { useTaskStore } from '../../store/useTaskStore'
 import { updateTaskFields } from '../../hooks/useTasks'
 import { useSheetDrag } from './hooks/useSheetDrag'
 import { useTaskDiscussion } from '../../hooks/useTaskDiscussion'
+import { useAvailableTags } from '../../hooks/useAvailableTags'
 import { StatusSegmented, PrioritySegmented, DriveAttachments } from './TaskDetailPanel'
 import AgentActivityPanel from './AgentActivityPanel'
 import TaskGuidance from './TaskGuidance'
@@ -62,6 +63,15 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
   const tasks    = useTaskStore(s => s.tasks)
   const sections = useTaskStore(s => s.sections)
   const groups   = useTaskStore(s => s.groups)
+  
+  const availableTags = useAvailableTags(task?.project_id)
+
+  function toggleTag(tag) {
+    if (!task) return
+    const prev = task.tags || []
+    const updated = prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag]
+    patch({ tags: updated })
+  }
 
   const section = sections.find(s => s.id === task?.section_id)
   const group   = groups.find(g => g.id === task?.group_id)
@@ -316,6 +326,30 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
               onSave={(detail) => { if (detail !== (task.detail || '')) patch({ detail }) }}
             />
           </Field>
+
+          {availableTags.length > 0 && (
+            <Field label="Tags (from IS)">
+              <div className="flex gap-1 flex-wrap">
+                {availableTags.map(tag => {
+                  const selected = (task.tags || []).includes(tag)
+                  return (
+                    <button
+                      key={tag}
+                      type="button"
+                      onClick={() => toggleTag(tag)}
+                      className={`px-2.5 py-1 rounded-pill text-[12px] font-mono border transition-all ${
+                        selected
+                          ? 'bg-ink text-paper border-transparent'
+                          : 'border-line text-mute hover:bg-surf-2'
+                      }`}
+                    >
+                      #{tag}
+                    </button>
+                  )
+                })}
+              </div>
+            </Field>
+          )}
 
           {/* ── Milestones ── */}
           <Field label={milestoneTotal > 0 ? `Milestones · ${milestonePct}%` : 'Milestones'}>
