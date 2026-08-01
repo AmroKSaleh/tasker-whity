@@ -41,7 +41,7 @@ function FlowTaskNode({ data }) {
       <Handle 
         type="target" 
         position={Position.Left} 
-        style={{ background: 'var(--color-line)', width: 8, height: 8, border: 'none', left: -4, top: '50%', opacity: 1, pointerEvents: 'none' }} 
+        style={{ background: '#ff7300', width: 8, height: 8, border: 'none', left: -4, top: '50%', opacity: 1, pointerEvents: 'none' }} 
       />
       
       <div style={{ background: headerColor, padding: '4px 10px', display: 'flex', alignItems: 'center' }}>
@@ -62,7 +62,7 @@ function FlowTaskNode({ data }) {
       <Handle 
         type="source" 
         position={Position.Right} 
-        style={{ background: 'var(--color-line)', width: 8, height: 8, border: 'none', right: -4, top: '50%', opacity: 1, pointerEvents: 'none' }} 
+        style={{ background: '#ff7300', width: 8, height: 8, border: 'none', right: -4, top: '50%', opacity: 1, pointerEvents: 'none' }} 
       />
     </div>
   )
@@ -88,7 +88,7 @@ function buildLayout(steps, prefix, onTaskClick) {
         source: src,
         target: s.task.id,
         type: 'smoothstep', // Orthogonal lines with rounded corners
-        style: { stroke: 'var(--color-line)', strokeWidth: 2 },
+        style: { stroke: '#ff7300', strokeWidth: 2 },
       })
     })
   })
