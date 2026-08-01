@@ -502,7 +502,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
       </div>
       <div className="flex-1 flex min-h-0 relative">
         {/* Left Pane: Map / Graph */}
-        <div className="flex-1 flex flex-col min-w-0 bg-[#151515] relative">
+        <div className="flex-1 flex flex-col min-w-0 bg-surf relative">
           {panel && (
             <div className="shrink-0 border-b border-line-2 bg-surf-2 max-h-[38vh] overflow-auto px-6 py-3 no-scrollbar z-10 shadow-md">
               <Kicker>{panel === 'is' ? 'Flow Instruction Set' : 'Flow Knowledge Base'}</Kicker>

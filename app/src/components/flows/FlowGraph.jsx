@@ -27,10 +27,10 @@ function FlowTaskNode({ data }) {
       onClick={() => onTaskClick?.(task.id)}
       style={{
         width: NODE_W, minHeight: NODE_H, 
-        background: 'rgba(24, 24, 24, 0.95)',
-        border: '1px solid #333', 
+        background: 'var(--color-paper)',
+        border: '1px solid var(--color-line-2)', 
         borderRadius: 8,
-        boxShadow: '0 6px 12px rgba(0,0,0,0.4)',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.05)',
         boxSizing: 'border-box', fontFamily: 'inherit',
         cursor: onTaskClick ? 'pointer' : 'default',
         overflow: 'hidden',
@@ -41,18 +41,18 @@ function FlowTaskNode({ data }) {
       <Handle 
         type="target" 
         position={Position.Left} 
-        style={{ background: '#fff', width: 10, height: 10, border: '2px solid #333', left: -5, top: '50%', opacity: 1, pointerEvents: 'none' }} 
+        style={{ background: 'var(--color-line)', width: 8, height: 8, border: 'none', left: -4, top: '50%', opacity: 1, pointerEvents: 'none' }} 
       />
       
       <div style={{ background: headerColor, padding: '4px 10px', display: 'flex', alignItems: 'center' }}>
-        <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#fff', letterSpacing: '0.06em', fontWeight: 700, textShadow: '0 1px 2px rgba(0,0,0,0.3)' }}>
+        <span style={{ fontFamily: 'monospace', fontSize: 10, color: '#fff', letterSpacing: '0.06em', fontWeight: 700 }}>
           STEP {step}{prefix && task.short_id != null ? ` · ${prefix}-${task.short_id}` : ''}
         </span>
       </div>
       
       <div style={{
         padding: '10px 12px',
-        fontSize: 12.5, fontWeight: 500, color: '#fff', lineHeight: 1.35,
+        fontSize: 12.5, fontWeight: 500, color: 'var(--color-ink)', lineHeight: 1.35,
         display: '-webkit-box', WebkitLineClamp: 2, WebkitBoxOrient: 'vertical', overflow: 'hidden',
         flex: 1
       }}>
@@ -62,7 +62,7 @@ function FlowTaskNode({ data }) {
       <Handle 
         type="source" 
         position={Position.Right} 
-        style={{ background: '#fff', width: 10, height: 10, border: '2px solid #333', right: -5, top: '50%', opacity: 1, pointerEvents: 'none' }} 
+        style={{ background: 'var(--color-line)', width: 8, height: 8, border: 'none', right: -4, top: '50%', opacity: 1, pointerEvents: 'none' }} 
       />
     </div>
   )
@@ -88,7 +88,7 @@ function buildLayout(steps, prefix, onTaskClick) {
         source: src,
         target: s.task.id,
         type: 'default', // Bezier curve
-        style: { stroke: 'rgba(255,255,255,0.7)', strokeWidth: 2.5 },
+        style: { stroke: 'var(--color-line)', strokeWidth: 2 },
       })
     })
   })
@@ -128,7 +128,7 @@ function buildLayout(steps, prefix, onTaskClick) {
 export default function FlowGraph({ steps, prefix, onTaskClick }) {
   const { nodes, edges } = useMemo(() => buildLayout(steps, prefix, onTaskClick), [steps, prefix, onTaskClick])
   return (
-    <div style={{ width: '100%', height: '100%', background: '#151515' }}>
+    <div style={{ width: '100%', height: '100%', background: 'transparent' }}>
       <ReactFlow
         nodes={nodes}
         edges={edges}
@@ -143,8 +143,8 @@ export default function FlowGraph({ steps, prefix, onTaskClick }) {
         minZoom={0.2}
         maxZoom={1.5}
       >
-        <Background color="#333" gap={20} size={1.5} />
-        <Controls showInteractive={false} style={{ filter: 'invert(1)' }} />
+        <Background color="#ccc" gap={20} size={1.5} />
+        <Controls showInteractive={false} />
       </ReactFlow>
     </div>
   )
