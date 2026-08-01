@@ -25,11 +25,11 @@ export function useInstructionSet(projectId) {
     }
   }
 
-  async function createEntry(title, content) {
+  async function createEntry(title, content, tags = []) {
     const { data: { user } } = await supabase.auth.getUser()
     const { data } = await supabase
       .from('project_instructions')
-      .insert({ project_id: projectId, user_id: user.id, title, content })
+      .insert({ project_id: projectId, user_id: user.id, title, content, tags })
       .select().single()
     if (data) setEntries(prev => [...prev, data])
     return data

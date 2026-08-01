@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { useAvailableTags } from '../../hooks/useAvailableTags'
 
 // Global-ish "quick add" for the project board header (TDE-369): defaults to the project's
 // Backlog section so the task always lands somewhere visible on the board, but lets the user
@@ -9,6 +10,14 @@ export default function CreateTaskModal({ sections, onCreate, onCreateSection, o
   const [text, setText] = useState('')
   const [sectionId, setSectionId] = useState(backlog?.id ?? '')
   const [saving, setSaving] = useState(false)
+  
+  const projectId = sections[0]?.project_id
+  const availableTags = useAvailableTags(projectId)
+  const [selectedTags, setSelectedTags] = useState([])
+
+  function toggleTag(tag) {
+    setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag])
+  }
 
   async function handleSave(e) {
     e.preventDefault()
@@ -18,7 +27,7 @@ export default function CreateTaskModal({ sections, onCreate, onCreateSection, o
     // No Backlog section on this project yet (older project, or it was renamed/deleted) —
     // create it on the fly rather than blocking task creation on it.
     const targetId = sectionId || (await onCreateSection('Backlog'))?.id
-    if (targetId) await onCreate(targetId, v)
+    if (targetId) await onCreate(targetId, v, null, { tags: selectedTags })
     setSaving(false)
     onClose()
   }
@@ -56,6 +65,28 @@ export default function CreateTaskModal({ sections, onCreate, onCreateSection, o
               ))}
             </select>
           </div>
+
+          {availableTags.length > 0 && (
+            <div>
+              <label className="text-[11px] font-semibold text-mute uppercase tracking-wide mb-1 block">Tags (from IS)</label>
+              <div className="flex gap-1 flex-wrap">
+                {availableTags.map(tag => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleTag(tag)}
+                    className={`px-2.5 py-1 rounded-pill text-[12px] font-mono border transition-all ${
+                      selectedTags.includes(tag)
+                        ? 'bg-ink text-paper border-transparent'
+                        : 'border-line text-mute hover:bg-surf-2'
+                    }`}
+                  >
+                    #{tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           <div className="flex gap-2 justify-end pt-1">
             <button type="button" onClick={onClose} disabled={saving}

@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import { updateTaskFields } from '../../hooks/useTasks'
+import { useAvailableTags } from '../../hooks/useAvailableTags'
 import { supabase } from '../../lib/supabase'
 
 const PRIORITIES = [
@@ -18,6 +19,12 @@ export default function EditTaskModal({ task, onClose }) {
   const [saving, setSaving] = useState(false)
   const [statuses, setStatuses] = useState([])
   const [customStatusId, setCustomStatusId] = useState(task.custom_status_id ?? null)
+  const [selectedTags, setSelectedTags] = useState(task.tags || [])
+  const availableTags = useAvailableTags(task.project_id)
+
+  function toggleTag(tag) {
+    setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag])
+  }
 
   useEffect(() => {
     if (!task.project_id) return
@@ -40,6 +47,7 @@ export default function EditTaskModal({ task, onClose }) {
       priority: priority || null,
       due_date: dueDate || null,
       custom_status_id: customStatusId || null,
+      tags: selectedTags,
       ...(selectedStatus && { status: selectedStatus.base_status }),
     })
     onClose()
@@ -76,6 +84,29 @@ export default function EditTaskModal({ task, onClose }) {
               className="w-full bg-surf-2 rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none border border-line focus:border-ink transition-colors resize-none placeholder:text-mute-2"
             />
           </div>
+
+          {/* Tags */}
+          {availableTags.length > 0 && (
+            <div>
+              <label className="text-[11px] font-semibold text-mute uppercase tracking-wide mb-1 block">Tags (from IS)</label>
+              <div className="flex gap-1 flex-wrap">
+                {availableTags.map(tag => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleTag(tag)}
+                    className={`px-2.5 py-1 rounded-pill text-[12px] font-mono border transition-all ${
+                      selectedTags.includes(tag)
+                        ? 'bg-ink text-paper border-transparent'
+                        : 'border-line text-mute hover:bg-surf-2'
+                    }`}
+                  >
+                    #{tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {/* Priority + Due date row */}
           <div className="flex gap-4">

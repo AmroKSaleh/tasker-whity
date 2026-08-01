@@ -15,7 +15,7 @@ export default function DefaultInstructionsSection() {
       if (!user) { setLoading(false); return }
       setUserId(user.id)
       const { data } = await supabase.from('default_instructions')
-        .select('id, title, content, universal, sort_order').order('sort_order')
+        .select('id, title, content, universal, sort_order, tags').order('sort_order')
       setEntries(data ?? [])
       setLoading(false)
     })
@@ -24,8 +24,8 @@ export default function DefaultInstructionsSection() {
   async function addEntry() {
     const sort_order = (entries[entries.length - 1]?.sort_order ?? -1) + 1
     const { data } = await supabase.from('default_instructions')
-      .insert({ user_id: userId, title: 'New default', content: '', universal: false, sort_order })
-      .select('id, title, content, universal, sort_order').single()
+      .insert({ user_id: userId, title: 'New default', content: '', universal: false, sort_order, tags: [] })
+      .select('id, title, content, universal, sort_order, tags').single()
     if (data) setEntries(e => [...e, data])
   }
 
@@ -81,6 +81,13 @@ export default function DefaultInstructionsSection() {
                 placeholder="The instruction content (markdown supported)…"
                 rows={3}
                 className="bg-paper border border-line rounded-lg px-2.5 py-1.5 text-[12px] text-ink-2 outline-none focus:border-ink resize-y leading-relaxed"
+              />
+              <input
+                value={entry.tags ? entry.tags.join(', ') : ''}
+                onChange={e => patchLocal(entry.id, { tags: e.target.value.split(',').map(t => t.trim()).filter(Boolean) })}
+                onBlur={e => persist(entry.id, { tags: e.target.value.split(',').map(t => t.trim()).filter(Boolean) })}
+                placeholder="Tags (comma separated)…"
+                className="bg-paper border border-line rounded-lg px-2.5 py-1.5 text-[12px] font-mono text-ink outline-none focus:border-ink"
               />
               <label className="flex items-center gap-1.5 text-[11px] text-mute-2 cursor-pointer self-start">
                 <input

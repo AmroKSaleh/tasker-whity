@@ -9,12 +9,12 @@ export default function InstructionSetModal({ projectId, onClose }) {
   const fileInputRef = useRef(null)
 
   function openNew() {
-    setEditing({ id: null, title: '', content: '' })
+    setEditing({ id: null, title: '', content: '', tags: '' })
     setConfirmDelete(false)
   }
 
   function openEntry(entry) {
-    setEditing({ id: entry.id, title: entry.title, content: entry.content })
+    setEditing({ id: entry.id, title: entry.title, content: entry.content, tags: entry.tags ? entry.tags.join(', ') : '' })
     setConfirmDelete(false)
   }
 
@@ -25,7 +25,7 @@ export default function InstructionSetModal({ projectId, onClose }) {
     reader.onload = (ev) => {
       const content = ev.target.result
       const title = file.name.replace(/\.(md|txt)$/i, '')
-      setEditing({ id: null, title, content })
+      setEditing({ id: null, title, content, tags: '' })
     }
     reader.readAsText(file)
     e.target.value = ''
@@ -34,10 +34,11 @@ export default function InstructionSetModal({ projectId, onClose }) {
   async function handleSave() {
     if (!editing.title.trim()) return
     setSaving(true)
+    const parsedTags = (editing.tags || '').split(',').map(t => t.trim()).filter(Boolean)
     if (editing.id) {
-      await updateEntry(editing.id, { title: editing.title.trim(), content: editing.content })
+      await updateEntry(editing.id, { title: editing.title.trim(), content: editing.content, tags: parsedTags })
     } else {
-      await createEntry(editing.title.trim(), editing.content)
+      await createEntry(editing.title.trim(), editing.content, parsedTags)
     }
     setSaving(false)
     setEditing(null)
@@ -128,6 +129,12 @@ export default function InstructionSetModal({ projectId, onClose }) {
               placeholder="Entry title…"
               className="w-full rounded-lg border border-line bg-surf-2 px-3 py-2 text-[14px] text-ink placeholder:text-mute-2 outline-none focus:border-ink transition-colors"
             />
+            <input
+              value={editing.tags || ''}
+              onChange={e => setEditing(prev => ({ ...prev, tags: e.target.value }))}
+              placeholder="Tags (comma separated)…"
+              className="w-full rounded-lg border border-line bg-surf-2 px-3 py-2 text-[13px] text-ink placeholder:text-mute-2 outline-none focus:border-ink transition-colors"
+            />
             <textarea
               value={editing.content}
               onChange={e => setEditing(prev => ({ ...prev, content: e.target.value }))}
@@ -159,6 +166,15 @@ export default function InstructionSetModal({ projectId, onClose }) {
                       <div className="flex items-center gap-2.5 min-w-0">
                         <span className="text-mute-2 text-[12px] shrink-0">◈</span>
                         <span className="text-[14px] text-ink truncate">{entry.title}</span>
+                        {entry.tags?.length > 0 && (
+                          <div className="flex gap-1 overflow-hidden shrink-0">
+                            {entry.tags.map(tag => (
+                              <span key={tag} className="font-mono text-[9px] text-ink border border-line rounded px-1.5 py-0.5 whitespace-nowrap">
+                                #{tag}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <span className="font-mono text-[10px] text-mute-2 shrink-0">
                         {new Date(entry.updated_at).toLocaleDateString()}

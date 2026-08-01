@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
 import { getOrCreateBacklogSectionId } from '../hooks/useTasks'
+import { useAvailableTags } from '../hooks/useAvailableTags'
 
 const PRIORITIES = [
   { value: null,     label: 'None' },
@@ -37,8 +38,14 @@ export default function NewTaskPage() {
   )
   const [projectId, setProjectId] = useState('')
   const [projectNotFound, setProjectNotFound] = useState(false)
+  const availableTags = useAvailableTags(projectId)
+  const [selectedTags, setSelectedTags] = useState([])
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
+
+  function toggleTag(tag) {
+    setSelectedTags(prev => prev.includes(tag) ? prev.filter(t => t !== tag) : [...prev, tag])
+  }
 
   useEffect(() => {
     async function load() {
@@ -83,6 +90,7 @@ export default function NewTaskPage() {
         text: text.trim(),
         detail: detail.trim() || null,
         priority: priority || null,
+        tags: selectedTags,
         status: 'pending',
         sort_order: count ?? 0,
       }).select().single()
@@ -176,6 +184,28 @@ export default function NewTaskPage() {
               ))}
             </div>
           </div>
+
+          {availableTags.length > 0 && (
+            <div>
+              <label className="text-[11px] font-semibold text-mute uppercase tracking-wide mb-1 block">Tags (from IS)</label>
+              <div className="flex gap-1 flex-wrap">
+                {availableTags.map(tag => (
+                  <button
+                    key={tag}
+                    type="button"
+                    onClick={() => toggleTag(tag)}
+                    className={`px-2.5 py-1 rounded-pill text-[12px] font-mono border transition-all ${
+                      selectedTags.includes(tag)
+                        ? 'bg-ink text-paper border-transparent'
+                        : 'border-line text-mute hover:bg-surf-2'
+                    }`}
+                  >
+                    #{tag}
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
 
           {error && <p className="text-[12px] text-red-500 -mt-1">{error}</p>}
 
