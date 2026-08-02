@@ -33,7 +33,21 @@ services:
     build:
       context: ./.core
       dockerfile: Dockerfile
-    image: tasker-core:dev
+      # Deliberately NOT `target: base`, unlike frankenphp below. whity-core's
+      # own dev workflow (docs/wiki/Sprint-1-Setup.md) assumes the developer
+      # already ran `composer install` with a host-native PHP/Composer
+      # toolchain before Docker ever gets involved — that's why whity-core's
+      # own db-init service can get away with `target: base`, which has no
+      # composer/git/unzip. This machine (and a fresh clone in general) has
+      # no host PHP/Composer, so this service instead uses the `release`
+      # stage purely for its baked-in composer + git + unzip binaries, to run
+      # `composer install` AGAINST THE BIND-MOUNTED CHECKOUT below. The code
+      # `release` COPYs into the image is irrelevant and gets hidden by that
+      # same bind mount — only the tool binaries matter here. Tagged
+      # separately (`tasker-core:bootstrap`) from the runtime image so the
+      # two build targets never fight over one image tag.
+      target: release
+    image: tasker-core:bootstrap
     container_name: tasker_bootstrap
     depends_on:
       postgres:
@@ -61,6 +75,15 @@ services:
     build:
       context: ./.core
       dockerfile: Dockerfile
+      # Matches whity-core's own dev/staging convention exactly (see
+      # host/.core/Dockerfile's stage comments, and the frankenphp/db-init
+      # services in host/.core/docker-compose.yml): the runtime container
+      # ships no code of its own — the bind mount below supplies /app,
+      # including vendor/ (installed by the bootstrap service above, against
+      # this same checkout). Building `release` here would be pure waste:
+      # composer/git/unzip and a baked vendor/ snapshot that the bind mount
+      # immediately hides anyway.
+      target: base
     image: tasker-core:dev
     container_name: tasker_frankenphp
     depends_on:

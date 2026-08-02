@@ -33,6 +33,14 @@ before it can ever reach its first request.
 re-run after adding a migration without tearing the stack down) — both are
 idempotent, matching whity-core's own migrate/seed semantics.
 
+`host:up` always passes `--build`, so both the `bootstrap` and `frankenphp`
+images are rebuilt (from `host/.core`'s current `Dockerfile`) on every run —
+Docker's layer cache makes an unchanged Dockerfile a fast no-op, but a real
+Dockerfile change (new package, new PHP extension) in a freshly fetched core
+ref is never silently skipped the way a bare `docker compose up -d` (no
+`--build`) would skip it by reusing whatever image already sits under that
+tag.
+
 Host API: <http://localhost:8010/api> · Health: <http://localhost:8010/api/health>
 
 Seeded dev accounts come from `host/.env` (`INITIAL_ADMIN_PASSWORD`).
@@ -40,3 +48,5 @@ Seeded dev accounts come from `host/.env` (`INITIAL_ADMIN_PASSWORD`).
 ## Upgrading core
 
 Edit `host/core.version`, then `npm run core:fetch && npm run host:up`.
+`host:up`'s `--build` flag (see above) means this always rebuilds both
+images against the newly checked-out ref — no separate rebuild step needed.
