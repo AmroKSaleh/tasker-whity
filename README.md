@@ -196,3 +196,14 @@ to keep alive. **Out of scope for this CI**, because they need a live stack:
 `npm run mcp:check` (MCP tool-surface drift) and the browser round trips at
 `/dev/ping` on `:5174` and `:8010`. Those remain manual/local checks until a
 later plan wires up a CI-hosted stack for them.
+
+**This workflow has not yet run on GitHub Actions.** This repo currently has
+no git remote configured, so nothing has ever been pushed and no run has
+ever started; what is actually verified is a local reproduction of the
+plugin job's commands inside a `php:8.4-cli` container. The first real push
+may surface issues that only appear on GitHub's runners — in particular,
+that local reproduction copied an already-cloned `host/.core` rather than
+performing the literal network `git clone` `ci.yml` does, and relies on
+`actions/checkout@v4`'s documented no-git REST-API fallback for running
+before `git` is apt-installed in the container, both assumed equivalent
+here rather than proven.
