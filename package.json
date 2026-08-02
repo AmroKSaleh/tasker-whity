@@ -8,6 +8,9 @@
     "host:down": "docker compose -f host/docker-compose.yml down",
     "host:logs": "docker compose -f host/docker-compose.yml logs -f frankenphp",
     "host:migrate": "docker exec tasker_frankenphp php public/index.php migrate run",
-    "host:seed": "docker exec tasker_frankenphp php public/index.php seed"
+    "host:seed": "docker exec tasker_frankenphp php public/index.php seed",
+    "plugin:install": "powershell -NoProfile -ExecutionPolicy Bypass -File host/scripts/install-plugin.ps1 && npm run host:migrate",
+    "plugin:test": "docker run --rm -v \"%cd%:/repo\" -w /repo/plugin php:8.4-cli php vendor/bin/phpunit",
+    "plugin:stan": "docker run --rm -v \"%cd%:/repo\" -w /repo/plugin php:8.4-cli php vendor/bin/phpstan analyse"
   }
 }

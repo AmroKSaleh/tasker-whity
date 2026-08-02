@@ -1,0 +1,25 @@
+{
+  "name": "whity/plugin-tasker",
+  "description": "Tasker board plugin for Whity-based hosts",
+  "type": "library",
+  "version": "0.1.0",
+  "license": "AGPL-3.0-only",
+  "repositories": [
+    { "type": "path", "url": "../host/.core/sdk" }
+  ],
+  "require": {
+    "php": ">=8.4",
+    "whity/plugin-sdk": "^1.9"
+  },
+  "require-dev": {
+    "phpunit/phpunit": "^10.0",
+    "phpstan/phpstan": "^1.10"
+  },
+  "autoload": {
+    "psr-4": { "Tasker\\": "" },
+    "exclude-from-classmap": ["tests/", "stubs/"]
+  },
+  "autoload-dev": {
+    "psr-4": { "Tasker\\Tests\\": "tests/" }
+  }
+}
