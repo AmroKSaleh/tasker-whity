@@ -45,6 +45,15 @@ Host API: <http://localhost:8010/api> · Health: <http://localhost:8010/api/heal
 
 Seeded dev accounts come from `host/.env` (`INITIAL_ADMIN_PASSWORD`).
 
+Before `npm run dev` / `npm run app:build`: copy `app/.env.example` to
+`app/.env.local` (gitignored). The copied SPA still imports
+`@supabase/supabase-js` directly in 57 files, and `src/lib/supabase.js`
+calls `createClient()` eagerly at module load — without
+`VITE_SUPABASE_URL`/`VITE_SUPABASE_ANON_KEY` set, the whole app fails to
+boot, including routes unrelated to Supabase. `app/.env.example`'s
+placeholder values are temporary Task 6 scaffolding, removed once Plan C
+de-Supabases the app.
+
 ### Troubleshooting: the stack crash-loops on first boot
 
 This can happen on **any** `npm run host:up` (or any bare `docker compose up`

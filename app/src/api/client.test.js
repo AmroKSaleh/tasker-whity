@@ -74,4 +74,15 @@ describe('apiFetch', () => {
     expect(options.body).toBe('{"label":"x"}')
     expect(options.headers['Content-Type']).toBe('application/json')
   })
+
+  it('does not let a caller override the mandated CSRF header', async () => {
+    const fetchMock = stubFetch({ ok: true, status: 200, json: async () => ({ data: [] }) })
+
+    await apiFetch('/api/v1/tasker/pings', {
+      headers: { 'X-Requested-With': 'not-the-real-value' },
+    })
+
+    const [, options] = fetchMock.mock.calls[0]
+    expect(options.headers['X-Requested-With']).toBe('XMLHttpRequest')
+  })
 })

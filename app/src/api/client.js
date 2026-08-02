@@ -36,10 +36,13 @@ export async function apiFetch(path, options = {}) {
     method,
     credentials: 'include',
     headers: {
-      // Required by the host's CsrfGuard on every mutating request; harmless
-      // on reads, so it is unconditional rather than a per-call decision.
-      'X-Requested-With': 'XMLHttpRequest',
+      // Caller-supplied headers first, then the mandated header last, so it
+      // always wins even if a caller passes its own X-Requested-With (or a
+      // differently-cased variant). Required by the host's CsrfGuard on
+      // every mutating request; harmless on reads, so it is unconditional
+      // rather than a per-call decision — and non-negotiable by callers.
       ...headers,
+      'X-Requested-With': 'XMLHttpRequest',
     },
   }
 
