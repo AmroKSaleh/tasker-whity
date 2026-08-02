@@ -264,6 +264,9 @@ Server-side, driver and SQL errors are never leaked to clients. whity's plugin e
 | Custom statuses absent | D14 | The custom-status slice; `status` is free text so the change is additive |
 | No cross-client freshness | D7 | Revisited once real multi-user usage shows it matters |
 | Dead pages present but route-guarded | Their slices are not built yet | Each page's own slice |
+| Pre-existing vulnerabilities inherited with the SPA copy | The fork copies the app verbatim; fixing them is not slice one's job | Plan C, when each page is de-Supabased and rewired |
+
+**Inherited security findings.** A background scan of the SPA copy flagged issues in files that came across byte-identical from the original app — an authorization-bypass and a UI-spoofing risk in `OAuthAuthorizePage.jsx`, and credentials at rest in `SettingsPage.jsx`. They are inherited, not introduced. The `SettingsPage` finding is the same debt already recorded above for `tasker_user_ai_settings`: keys the client can retrieve, which the server-side AI slice removes. `OAuthAuthorizePage` is one of the route-guarded pages and is unreachable in slice one. Plan C must treat these as fix-on-touch rather than carrying them forward silently.
 
 ---
 
