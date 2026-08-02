@@ -82,5 +82,25 @@ export async function apiFetch(path, options = {}) {
     throw new ApiError(response.status, message)
   }
 
-  return response.json()
+  // 204 No Content carries no body by definition (every DELETE returns this)
+  // — calling .json() on it throws `SyntaxError: Unexpected end of JSON
+  // input` rather than returning anything useful, so short-circuit before
+  // ever attempting to parse one.
+  if (response.status === 204) {
+    return null
+  }
+
+  // Any other empty-bodied response (e.g. a 200 with no content) fails
+  // .json() the same way; treat that parse failure as "no body" too, rather
+  // than letting a SyntaxError escape as if it were a network/programming
+  // error. This mirrors the same-file precedent of swallowing a non-JSON
+  // body above.
+  try {
+    return await response.json()
+  } catch (err) {
+    if (err instanceof SyntaxError) {
+      return null
+    }
+    throw err
+  }
 }

@@ -8,9 +8,63 @@ A separate product from KeyHub: its own host, its own database, its own tenants.
 - `app/` — Vite React SPA
 - `plugin/` — `whity/plugin-tasker`, an SDK-only composer package
 - `host/` — Tasker's own whity-core deployment (core fetched at a pinned ref into `.core/`, never committed)
-- `docs/` — specs and plans
+- `docs/` — `mcp-tool-surface.json`, the committed MCP tool-surface snapshot (see "Enabling MCP" below)
+
+The design spec, the implementation plan, and the execution ledger for this
+port live in the OTHER repo, `tasker` (`docs/superpowers/specs/` and
+`docs/superpowers/plans/`) — not in this one.
+
+## Prerequisites
+
+- **Windows, with PowerShell 5.1+.** Every npm script in `package.json`
+  either shells out to `powershell.exe` directly or relies on cmd.exe-style
+  batch syntax, and `host/scripts/install-plugin.ps1` uses `robocopy`. This
+  repo's tooling is Windows-only today — porting it to work cross-platform
+  (macOS/Linux, or npm scripts runnable under a POSIX shell) is future work,
+  not something this repo currently supports. Do not assume `npm run dev` /
+  `host:up` / etc. work as documented on another OS.
+- **Docker Desktop**, for the host stack (`host:up`) and for running the
+  plugin's PHPUnit/PHPStan checks in containers (`plugin:test`, `plugin:stan`,
+  `plugin:deps`) without installing PHP or Composer natively.
+- **Node 20+** and **npm**, for the SPA (`app/`) and for every `npm run ...`
+  entry point in this README.
+- **Git**, to fetch the pinned `whity-core` ref into `host/.core`.
+
+## Setup
+
+One-time, from a fresh clone:
+
+```powershell
+npm run setup
+```
+
+This runs three steps in order (the order matters — `plugin:deps`'s
+Composer install needs `host/.core` to already exist, since the plugin's
+`composer.json` declares a path repository at `../host/.core/sdk`):
+
+1. `core:fetch` — clones `whity-core` at the pinned ref (`host/core.version`) into `host/.core` (gitignored).
+2. `plugin:deps` — `composer install` for `plugin/`, run inside a `php:8.4-cli`
+   container (no host PHP/Composer needed) that mounts the REPO ROOT rather
+   than just `plugin/`, because the SDK path-repository symlink
+   (`plugin/vendor/whity/plugin-sdk` → `../host/.core/sdk`) only resolves
+   when `host/.core` is visible in the same container.
+3. `app:deps` — `npm ci --prefix app`, installing `app/node_modules` from the
+   committed `app/package-lock.json`.
+
+Each step can also be run on its own (`npm run core:fetch`, `npm run
+plugin:deps`, `npm run app:deps`) — e.g. to re-run just `app:deps` after
+pulling a lockfile change — as long as the ordering constraint above is
+respected.
+
+`plugin/vendor/` and `app/node_modules/` are both gitignored; nothing else in
+this repo creates them, so a clean clone that skips this section will see
+`plugin:test`, `plugin:stan`, `app:test`, and `npm run dev` all fail.
 
 ## Dev loop
+
+Run `npm run setup` first (see above) if you have not already — the three
+commands below assume `host/.core`, `plugin/vendor`, and `app/node_modules`
+all already exist.
 
 ```powershell
 npm run host:up        # fetch pinned core, start Postgres, bootstrap (composer
@@ -20,10 +74,11 @@ npm run plugin:install # deploy-copy plugin into the host, then migrate
 npm run dev            # Vite on :5174, proxying /api to :8010
 ```
 
-`npm run host:up` alone is enough on a clean clone: `host/docker-compose.yml`
-runs a one-shot `bootstrap` service (composer install, then migrate, then
-seed) against the same bind-mounted `host/.core` checkout the FrankenPHP
-worker uses, and FrankenPHP only starts once `bootstrap` exits 0. This exists
+`npm run host:up` alone is enough to bring up a working host stack on a clean
+clone (once Setup has run — see above): `host/docker-compose.yml` runs a
+one-shot `bootstrap` service (composer install, then migrate, then seed)
+against the same bind-mounted `host/.core` checkout the FrankenPHP worker
+uses, and FrankenPHP only starts once `bootstrap` exits 0. This exists
 because the `./.core:/app` bind mount hides whatever `vendor/` the image
 build produced, and because FrankenPHP's persistent worker queries the
 database on boot — it must find installed dependencies and migrated tables

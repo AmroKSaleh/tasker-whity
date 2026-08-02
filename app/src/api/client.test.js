@@ -86,6 +86,24 @@ describe('apiFetch', () => {
     expect(options.headers['X-Requested-With']).toBe('XMLHttpRequest')
   })
 
+  it('returns null for a 204 No Content response instead of throwing', async () => {
+    stubFetch({
+      ok: true,
+      status: 204,
+      json: async () => {
+        // Real fetch's Response.json() throws exactly this on an empty body
+        // (e.g. every DELETE, per Plan C) — the mock reproduces that so the
+        // test actually exercises apiFetch's guard rather than a mock that
+        // just happens not to call .json().
+        throw new SyntaxError('Unexpected end of JSON input')
+      },
+    })
+
+    const result = await apiFetch('/api/v1/tasker/pings/1', { method: 'DELETE' })
+
+    expect(result).toBeNull()
+  })
+
   it('does not let a differently-cased caller header pollute the real outgoing header', async () => {
     const fetchMock = stubFetch({ ok: true, status: 200, json: async () => ({ data: [] }) })
 
