@@ -11,6 +11,8 @@
     "host:seed": "docker exec tasker_frankenphp php public/index.php seed",
     "plugin:install": "powershell -NoProfile -ExecutionPolicy Bypass -File host/scripts/install-plugin.ps1 && npm run host:migrate",
     "plugin:test": "docker run --rm -v \"%cd%:/repo\" -w /repo/plugin php:8.4-cli php vendor/bin/phpunit",
-    "plugin:stan": "docker run --rm -v \"%cd%:/repo\" -w /repo/plugin php:8.4-cli php vendor/bin/phpstan analyse"
+    "plugin:stan": "docker run --rm -v \"%cd%:/repo\" -w /repo/plugin php:8.4-cli php vendor/bin/phpstan analyse",
+    "mcp:tools": "powershell -NoProfile -ExecutionPolicy Bypass -File host/scripts/mcp-tools.ps1",
+    "mcp:check": "powershell -NoProfile -ExecutionPolicy Bypass -File host/scripts/mcp-check.ps1"
   }
 }

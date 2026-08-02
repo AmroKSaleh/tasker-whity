@@ -1,0 +1,26 @@
+﻿[
+    {
+        "name":  "create_ping",
+        "description":  "Create a connectivity ping in the caller\u0027s tenant",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "label":  {
+                                                             "type":  "string",
+                                                             "minLength":  1,
+                                                             "maxLength":  255
+                                                         }
+                                           },
+                            "required":  [
+                                             "label"
+                                         ]
+                        }
+    },
+    {
+        "name":  "list_pings",
+        "description":  "List the tenant\u0027s connectivity pings",
+        "inputSchema":  {
+                            "type":  "object"
+                        }
+    }
+]

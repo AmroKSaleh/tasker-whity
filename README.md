@@ -45,6 +45,67 @@ Host API: <http://localhost:8010/api> · Health: <http://localhost:8010/api/heal
 
 Seeded dev accounts come from `host/.env` (`INITIAL_ADMIN_PASSWORD`).
 
+### Enabling MCP (one-time per environment)
+
+whity-core derives MCP tools automatically from schema-bearing routes, but
+`POST /mcp` is gated TWICE, and both gates default to off:
+
+1. **Infrastructure gate** — `McpTransportHandler`'s `$enabled` flag, read
+   from the `MCP_ENABLED` env var in `public/index.php`. When unset/false,
+   `POST /mcp` returns a bare 503 for every caller, before auth is even
+   checked. `host/.env.example` (and `host/.env`) now set `MCP_ENABLED=true`,
+   so this is already handled for any clone that copies the example file —
+   just make sure `host/.env` has it (re-copy from `.env.example` if your
+   `.env` predates this change), then recreate the `frankenphp` container so
+   it picks up the new env var (`npm run host:up`, or
+   `docker compose --env-file host/.env -f host/docker-compose.yml up -d --force-recreate frankenphp`).
+
+2. **Per-tenant opt-in** — the `mcp.enabled` setting (`SettingsRegistry::MCP_ENABLED`),
+   default `'false'`, checked by the `tenantMcpEnabled` closure in
+   `public/index.php`. This is a database row in `tenant_settings`, not a
+   file, so it does **not** come back on a fresh database/clean clone — there
+   is no migration or seeder for it (a plugin migration setting a *core*
+   settings row would be the wrong layer; this is host-level, not Tasker's
+   concern). Enable it once per tenant, via the same settings API a tenant
+   admin would use from the Settings UI:
+
+   ```powershell
+   $base = 'http://localhost:8010'
+   $csrf = @{ 'X-Requested-With' = 'XMLHttpRequest' }
+   $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+   Invoke-RestMethod -Uri "$base/api/v1/login" -Method Post -ContentType 'application/json' `
+       -Headers $csrf -Body (@{ email = 'admin@example.com'; password = 'admin123' } | ConvertTo-Json) `
+       -WebSession $session | Out-Null
+   Invoke-RestMethod -Uri "$base/api/v1/settings" -Method Patch -ContentType 'application/json' `
+       -Headers $csrf -Body (@{ settings = @{ 'mcp.enabled' = 'true' } } | ConvertTo-Json) `
+       -WebSession $session | Out-Null
+   ```
+
+   Equivalently: log in to the app as `admin@example.com` and flip the MCP
+   toggle from `/admin/settings` (General tab). Either way it is a one-time
+   step per database — repeat it after any fresh `host:up` against a new
+   Postgres volume.
+
+Once both gates are open, `npm run mcp:tools` mints a short-lived MCP token
+and dumps Tasker's derived tools (`tools/list`, filtered to `*ping*`) as JSON.
+`npm run mcp:check` compares that live output against the committed
+`docs/mcp-tool-surface.json` snapshot and fails loudly on drift — e.g. if a
+route's `operationId` is renamed without updating the snapshot. Regenerate
+the snapshot deliberately with `powershell -File host/scripts/mcp-tools.ps1 -Write`
+after an intentional tool-surface change.
+
+**Troubleshooting a cold-boot crash loop:** on a Docker host with very few
+CPUs allocated (`docker info` reporting `NCPU: 1`), recreating `frankenphp`
+right after `bootstrap` reruns `composer install` can crash-loop with
+`Fatal error: Maximum execution time of 30 seconds exceeded` inside random
+`vendor/` files, because `composer install` rewrites the autoloader (busting
+opcache's per-file validation) and `FRANKENPHP_WORKERS` concurrent workers
+then contend for the one CPU while cold-recompiling the entire vendor tree,
+never finishing inside the 30s cap. If you hit this, temporarily set
+`FRANKENPHP_WORKERS=1` in `host/.env` and recreate `frankenphp` again — one
+worker gets the whole CPU and clears the cold-compile hump; you can raise the
+worker count back up afterwards once the container is healthy.
+
 ## Upgrading core
 
 Edit `host/core.version`, then `npm run core:fetch && npm run host:up`.
