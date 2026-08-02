@@ -9,15 +9,18 @@
 #      host/.env.example). Without it, POST /mcp returns a bare 503 for every
 #      caller, before auth is even checked.
 #   2. Per-tenant opt-in: the admin's tenant must have the mcp.enabled=true
-#      setting. This is a database row (tenant_settings), not a file, so a
-#      fresh clone/fresh database needs it set once via the settings API:
+#      setting. This is a database row (tenant_settings), not a file. On a
+#      fresh clone this is now applied automatically by
+#      host/scripts/enable-tenant-mcp.php, run as part of the `bootstrap`
+#      compose service (see host/docker-compose.yml) — `npm run host:up`
+#      alone is enough. If that step ever fails (see its own header comment
+#      for why it's non-fatal) or you are re-enabling MCP for a tenant that
+#      predates it, fall back to the settings API manually:
 #
 #        POST /api/v1/login            (admin@example.com / INITIAL_ADMIN_PASSWORD)
 #        PATCH /api/v1/settings        { "settings": { "mcp.enabled": "true" } }
 #
-#      See the README's dev-loop section for the exact commands. There is no
-#      migration/seeder for this — it is a per-tenant, per-database setting,
-#      same as any other tenant admin would flip from the Settings UI.
+#      See the README's dev-loop section for the exact commands.
 param([switch]$Write)
 
 $ErrorActionPreference = 'Stop'
@@ -61,13 +64,30 @@ try {
         }
     } | ConvertTo-Json -Depth 6
 
-    Invoke-RestMethod -Uri "$base/mcp" -Method Post `
-        -ContentType 'application/json' -Headers $headers -Body $init | Out-Null
+    $initResp = Invoke-RestMethod -Uri "$base/mcp" -Method Post `
+        -ContentType 'application/json' -Headers $headers -Body $init
+
+    # IMPORTANT: only McpFeatureDisabledException (tenant opt-in off) and
+    # McpRateLimitException map to a non-2xx HTTP status (403 / 429), which
+    # Invoke-RestMethod would throw on by itself. UNAUTHENTICATED (missing,
+    # invalid, or expired bearer token) is returned as HTTP 200 with a
+    # JSON-RPC-level `error` object instead (verified empirically) — that
+    # would otherwise sail straight through as a "successful" call with no
+    # tools, indistinguishable from a real empty result. Surface it as a
+    # genuine thrown error so callers (mcp-check.ps1) can tell "the check
+    # could not run" apart from "the tool surface actually changed".
+    if ($initResp.PSObject.Properties.Name -contains 'error') {
+        throw "MCP initialize failed: [$($initResp.error.code)] $($initResp.error.message)"
+    }
 
     $list = @{ jsonrpc = '2.0'; id = 2; method = 'tools/list'; params = @{} } | ConvertTo-Json -Depth 5
 
     $response = Invoke-RestMethod -Uri "$base/mcp" -Method Post `
         -ContentType 'application/json' -Headers $headers -Body $list
+
+    if ($response.PSObject.Properties.Name -contains 'error') {
+        throw "MCP tools/list failed: [$($response.error.code)] $($response.error.message)"
+    }
 
     $tools = $response.result.tools |
         Where-Object { $_.name -like '*ping*' } |

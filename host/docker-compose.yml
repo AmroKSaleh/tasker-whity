@@ -56,6 +56,15 @@ services:
       - .env
     volumes:
       - ./.core:/app
+      # Tasker's own dev-convenience script (Task 5, Finding 3) — NOT part of
+      # vendored core. Flips the per-tenant mcp.enabled setting so a clean
+      # clone reaches a working MCP surface via `npm run host:up` alone. Must
+      # run in-process here (not over HTTP): frankenphp isn't started yet at
+      # this point in the lifecycle (see its `depends_on: bootstrap:
+      # condition: service_completed_successfully` below), so the documented
+      # PATCH /api/v1/settings call has nothing to reach. See the script's
+      # own header comment for the full rationale.
+      - ./scripts/enable-tenant-mcp.php:/tmp/enable-tenant-mcp.php:ro
     working_dir: /app
     restart: "no"
     command:
@@ -69,6 +78,8 @@ services:
         php public/index.php migrate run;
         echo "[bootstrap] seeding database...";
         php public/index.php seed;
+        echo "[bootstrap] enabling MCP for the default tenant (dev convenience; see README's 'Enabling MCP' section)...";
+        php /tmp/enable-tenant-mcp.php || echo "[bootstrap] WARNING: could not enable mcp.enabled automatically -- fall back to the manual PATCH /api/v1/settings steps in README.md.";
         echo "[bootstrap] done.";
 
   frankenphp:
