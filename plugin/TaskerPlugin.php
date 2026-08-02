@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tasker;
 
+use Tasker\Migrations\CreateTaskerPingTable;
 use Whity\Sdk\PluginInterface;
 use Whity\Sdk\PluginRequirementsInterface;
 
@@ -76,6 +77,8 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      */
     public function getMigrations(): array
     {
-        return [];
+        return [
+            CreateTaskerPingTable::class,
+        ];
     }
 }
