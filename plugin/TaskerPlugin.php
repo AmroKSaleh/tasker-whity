@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace Tasker;
 
+use Tasker\Api\PingApiHandler;
 use Tasker\Migrations\CreateTaskerPingTable;
+use Tasker\Migrations\GrantTaskerPingPermissions;
+use Whity\Sdk\Http\Request;
+use Whity\Sdk\Http\Response;
 use Whity\Sdk\PluginInterface;
 use Whity\Sdk\PluginRequirementsInterface;
 
@@ -53,7 +57,90 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      */
     public function getRoutes(): array
     {
-        return [];
+        return [
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/pings',
+                'handler' => [$this, 'listPings'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_ping:view',
+                'schema' => [
+                    // operationId IS the derived MCP tool name. Never omit it.
+                    'operationId' => 'list_pings',
+                    'summary' => 'List the tenant\'s connectivity pings',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => 'TaskerPingListResponse',
+                        403 => ['description' => 'Missing tasker_ping:view or unresolved tenant context'],
+                    ],
+                    'components' => self::pingComponents(),
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/pings',
+                'handler' => [$this, 'createPing'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_ping:manage',
+                'schema' => [
+                    'operationId' => 'create_ping',
+                    'summary' => 'Create a connectivity ping in the caller\'s tenant',
+                    'tags' => ['tasker'],
+                    'request' => 'TaskerPingCreateRequest',
+                    'responses' => [
+                        201 => 'TaskerPingResponse',
+                        400 => ['description' => 'label missing, empty, or longer than 255 characters'],
+                        403 => ['description' => 'Missing tasker_ping:manage or unresolved tenant context'],
+                    ],
+                    'components' => self::pingComponents(),
+                ],
+            ],
+        ];
+    }
+
+    /**
+     * OpenAPI component schemas published by the ping resource.
+     *
+     * @return array<string, array<string, mixed>>
+     */
+    private static function pingComponents(): array
+    {
+        return [
+            'TaskerPing' => [
+                'type' => 'object',
+                'required' => ['id', 'tenantId', 'label', 'createdAt'],
+                'properties' => [
+                    'id' => ['type' => 'integer'],
+                    'tenantId' => ['type' => 'integer'],
+                    'label' => ['type' => 'string'],
+                    'createdAt' => ['type' => 'string', 'nullable' => true],
+                ],
+            ],
+            'TaskerPingListResponse' => [
+                'type' => 'object',
+                'required' => ['data'],
+                'properties' => [
+                    'data' => [
+                        'type' => 'array',
+                        'items' => ['$ref' => '#/components/schemas/TaskerPing'],
+                    ],
+                ],
+            ],
+            'TaskerPingResponse' => [
+                'type' => 'object',
+                'required' => ['data'],
+                'properties' => [
+                    'data' => ['$ref' => '#/components/schemas/TaskerPing'],
+                ],
+            ],
+            'TaskerPingCreateRequest' => [
+                'type' => 'object',
+                'required' => ['label'],
+                'properties' => [
+                    'label' => ['type' => 'string', 'minLength' => 1, 'maxLength' => 255],
+                ],
+            ],
+        ];
     }
 
     /**
@@ -61,7 +148,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      */
     public function getPermissions(): array
     {
-        return [];
+        return [
+            'tasker_ping:view',
+            'tasker_ping:manage',
+        ];
     }
 
     /**
@@ -79,6 +169,61 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     {
         return [
             CreateTaskerPingTable::class,
+            GrantTaskerPingPermissions::class,
         ];
+    }
+
+    /**
+     * GET /api/tasker/pings
+     *
+     * @param array<string, string> $params
+     */
+    public function listPings(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new PingApiHandler($this->resolvePdo()))->list($tenantId);
+    }
+
+    /**
+     * POST /api/tasker/pings
+     *
+     * @param array<string, string> $params
+     */
+    public function createPing(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new PingApiHandler($this->resolvePdo()))->create($tenantId, $request->getBody());
+    }
+
+    /**
+     * The caller's resolved tenant, or null when context is unresolved.
+     */
+    private function requireTenantId(): ?int
+    {
+        return \Whity\Core\Tenant\TenantContext::getTenantId();
+    }
+
+    /**
+     * Resolve a live PDO from the host container.
+     *
+     * Resolved per request, never cached, so the host's connection
+     * self-healing and recycling are honoured.
+     */
+    private function resolvePdo(): \PDO
+    {
+        $database = \Whity\app(\Whity\Database\Database::class);
+        if (!$database instanceof \Whity\Database\Database) {
+            throw new \RuntimeException('The host did not register the shared Database service');
+        }
+
+        return $database->getPdo();
     }
 }
