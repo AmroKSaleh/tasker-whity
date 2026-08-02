@@ -24,6 +24,15 @@
 
 **Prerequisites:** Docker Desktop running, Node 20+, Git. No local PHP needed — PHP runs in containers.
 
+## Verified host contract (established during Task 2 — treat as fact, do not re-derive)
+
+These were confirmed empirically against the running host and against `host/.core/public/index.php`. Earlier drafts of this plan got them wrong; these supersede any `/api/…` path written elsewhere in this document.
+
+- **Routes are versioned.** The router is built as `new Router('/v1')`, and `register()` injects `/v1` after `/api`. So a plugin route *declared* as `/api/tasker/pings` is *served* at **`/api/v1/tasker/pings`**. Declare without `/v1`; call with it.
+- **Four routes are unversioned** (`registerUnversioned`): `GET /api/health`, `GET /api/version`, `GET /api/openapi.json`, and `POST|GET /mcp`. Note the OpenAPI document is at `/api/openapi.json`, and the MCP transport is at `/mcp` — outside `/api` entirely.
+- **Mutating requests are CSRF-guarded.** `CsrfGuard` rejects them with 403 `{"error":"Cross-site request rejected"}` unless the request carries **`X-Requested-With: XMLHttpRequest`**. `POST /api/v1/login` with that header and the seeded `admin@example.com` / `admin123` returns 200. Every API client in this plan — including the SPA's `client.js` — must send it.
+- **MCP is a per-tenant opt-in.** `Dispatcher` calls a `tenantMcpEnabled` closure and raises `McpFeatureDisabledException` when the caller's tenant has not enabled MCP. An unauthenticated `POST /mcp` currently returns 503. Task 5 must enable MCP for the tenant and authenticate with a bearer token before `tools/list` will answer.
+
 ---
 
 ### Task 1: Repo scaffold and host stack
@@ -1425,21 +1434,23 @@ Run:
 npm run plugin:install
 
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-Invoke-RestMethod -Uri http://localhost:8010/api/login -Method Post `
-  -ContentType 'application/json' `
+$csrf = @{ 'X-Requested-With' = 'XMLHttpRequest' }
+
+Invoke-RestMethod -Uri http://localhost:8010/api/v1/login -Method Post `
+  -ContentType 'application/json' -Headers $csrf `
   -Body (@{ email = 'admin@example.com'; password = 'admin123' } | ConvertTo-Json) `
   -WebSession $session | Out-Null
 
-Invoke-RestMethod -Uri http://localhost:8010/api/tasker/pings -Method Post `
-  -ContentType 'application/json' `
+Invoke-RestMethod -Uri http://localhost:8010/api/v1/tasker/pings -Method Post `
+  -ContentType 'application/json' -Headers $csrf `
   -Body (@{ label = 'first light' } | ConvertTo-Json) -WebSession $session
 
-Invoke-RestMethod -Uri http://localhost:8010/api/tasker/pings -WebSession $session | ConvertTo-Json -Depth 5
+Invoke-RestMethod -Uri http://localhost:8010/api/v1/tasker/pings -WebSession $session | ConvertTo-Json -Depth 5
 ```
 
 Expected: the POST returns the created ping with an integer `tenantId`; the GET returns `{ data: [ { label: 'first light', ... } ] }`.
 
-The login route is `POST /api/login` — verified in `host/.core/public/index.php`. Core registers plugin-style routes under `/api/…`, not `/api/v1/…`; the spec's `/api/v1/` paths refer to the version-rewritten alias the frontend-features layer emits. Use `/api/…` everywhere in this plan, matching the HelloWorld reference plugin.
+Mind the split between declaration and call, per the verified host contract above: the route is **declared** as `/api/tasker/pings` in `getRoutes()` and **served** at `/api/v1/tasker/pings`, because the router injects `/v1`. Do not put `/v1` in the declaration. The `X-Requested-With` header is mandatory on both POSTs — without it `CsrfGuard` answers 403 before the handler runs.
 
 - [ ] **Step 9: Commit**
 
@@ -1469,15 +1480,20 @@ Run:
 
 ```powershell
 docker exec tasker_frankenphp php public/index.php generate:openapi
-Invoke-RestMethod http://localhost:8010/openapi.json |
-  ForEach-Object { $_.paths.'/api/tasker/pings' } | ConvertTo-Json -Depth 6
+$spec = Invoke-RestMethod http://localhost:8010/api/openapi.json
+$spec.paths.PSObject.Properties | Where-Object { $_.Name -like '*tasker*' } |
+  ForEach-Object { "$($_.Name): " + (($_.Value.PSObject.Properties | ForEach-Object { "$($_.Name)=$($_.Value.operationId)" }) -join ', ') }
 ```
+
+The spec is served at `/api/openapi.json` (unversioned). The path key it lists may be either the declared or the versioned form — the assertion that matters is the operationId values, not the key.
 
 Expected: the `get` and `post` operations carry `operationId` values `list_pings` and `create_ping`. If they show derived names like `getApiTaskerPings` instead, the `schema.operationId` key is in the wrong place — it belongs inside `schema`, not at the route's top level.
 
 - [ ] **Step 2: Write `host/scripts/mcp-tools.ps1`**
 
-Three verified facts drive this script. The MCP transport is `POST /mcp` (not under `/api`). It authenticates with `Authorization: Bearer <mcp-token>`, **not** the session cookie. That token is minted by `POST /api/mcp/tokens` using a normal logged-in session, and the response returns `{ jti, token, name, scope, expires_at }` with `token` shown only once.
+Four verified facts drive this script. The MCP transport is `POST /mcp` — unversioned, outside `/api`. It authenticates with `Authorization: Bearer <mcp-token>`, **not** the session cookie. That token is minted by `POST /api/v1/mcp/tokens` using a normal logged-in session, returning `{ jti, token, name, scope, expires_at }` with `token` shown only once. And **MCP is a per-tenant opt-in**: `Dispatcher` consults a `tenantMcpEnabled` closure and raises `McpFeatureDisabledException` when the caller's tenant has not enabled it.
+
+**Enable MCP for the tenant before anything else in this task.** An unauthenticated `POST /mcp` currently returns 503, and a bearer token alone will not fix that if the tenant flag is off. Find the switch — check the admin UI at `/admin/mcp-tools`, the settings registry (`host/.core/src/Core/Settings/SettingsRegistry.php`), and `host/.core/docs/wiki/MCP-Operator-Runbook.md` — enable it, and record in your report exactly how you did it, because the answer belongs in the README's dev loop. If MCP genuinely cannot be enabled in this deployment, stop and report BLOCKED rather than skipping the task's gate.
 
 ```powershell
 #Requires -Version 5.1
@@ -1494,19 +1510,23 @@ $base     = 'http://localhost:8010'
 
 $password = if ($env:INITIAL_ADMIN_PASSWORD) { $env:INITIAL_ADMIN_PASSWORD } else { 'admin123' }
 
-# 1. Log in as a human user (cookie session).
+# CsrfGuard rejects mutating requests without this header.
+$csrf = @{ 'X-Requested-With' = 'XMLHttpRequest' }
+
+# 1. Log in as a human user (cookie session). Routes are versioned: /api/v1/...
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
-Invoke-RestMethod -Uri "$base/api/login" -Method Post `
-    -ContentType 'application/json' `
+Invoke-RestMethod -Uri "$base/api/v1/login" -Method Post `
+    -ContentType 'application/json' -Headers $csrf `
     -Body (@{ email = 'admin@example.com'; password = $password } | ConvertTo-Json) `
     -WebSession $session | Out-Null
 
 # 2. Mint a short-lived MCP bearer token with that session.
-$minted = Invoke-RestMethod -Uri "$base/api/mcp/tokens" -Method Post `
-    -ContentType 'application/json' `
+$minted = Invoke-RestMethod -Uri "$base/api/v1/mcp/tokens" -Method Post `
+    -ContentType 'application/json' -Headers $csrf `
     -Body (@{ name = 'tasker-surface-check'; scope = @('tools:call') } | ConvertTo-Json) `
     -WebSession $session
 
+# The MCP transport itself is unversioned and bearer-authenticated.
 $headers = @{ Authorization = "Bearer $($minted.token)" }
 
 try {
@@ -1695,13 +1715,22 @@ describe('apiFetch', () => {
       json: async () => ({ data: [{ id: 1 }] }),
     })
 
-    const result = await apiFetch('/api/tasker/pings')
+    const result = await apiFetch('/api/v1/tasker/pings')
 
     expect(result).toEqual({ data: [{ id: 1 }] })
     expect(fetchMock).toHaveBeenCalledWith(
-      '/api/tasker/pings',
+      '/api/v1/tasker/pings',
       expect.objectContaining({ credentials: 'include' }),
     )
+  })
+
+  it('always sends the CSRF header the host requires', async () => {
+    const fetchMock = stubFetch({ ok: true, status: 200, json: async () => ({ data: [] }) })
+
+    await apiFetch('/api/v1/tasker/pings')
+
+    const [, options] = fetchMock.mock.calls[0]
+    expect(options.headers['X-Requested-With']).toBe('XMLHttpRequest')
   })
 
   it('throws ApiError carrying the status and server message', async () => {
@@ -1711,7 +1740,7 @@ describe('apiFetch', () => {
       json: async () => ({ error: 'Tenant context is required' }),
     })
 
-    await expect(apiFetch('/api/tasker/pings')).rejects.toMatchObject({
+    await expect(apiFetch('/api/v1/tasker/pings')).rejects.toMatchObject({
       status: 403,
       message: 'Tenant context is required',
     })
@@ -1726,7 +1755,7 @@ describe('apiFetch', () => {
       },
     })
 
-    const error = await apiFetch('/api/tasker/pings').catch((e) => e)
+    const error = await apiFetch('/api/v1/tasker/pings').catch((e) => e)
 
     expect(error).toBeInstanceOf(ApiError)
     expect(error.status).toBe(500)
@@ -1735,7 +1764,7 @@ describe('apiFetch', () => {
   it('serialises a JSON body and sets the content type', async () => {
     const fetchMock = stubFetch({ ok: true, status: 201, json: async () => ({ data: {} }) })
 
-    await apiFetch('/api/tasker/pings', { method: 'POST', body: { label: 'x' } })
+    await apiFetch('/api/v1/tasker/pings', { method: 'POST', body: { label: 'x' } })
 
     const [, options] = fetchMock.mock.calls[0]
     expect(options.body).toBe('{"label":"x"}')
@@ -1783,6 +1812,12 @@ Create `app/src/api/client.js`:
  * environments and the SameSite=Lax session cookie is sent automatically.
  * Nothing here ever touches a token: the JWT lives in an httpOnly cookie the
  * browser handles for us.
+ *
+ * Two host contract details are baked in here rather than left to callers:
+ * every request carries X-Requested-With, because the host's CsrfGuard 403s
+ * mutating requests without it; and callers pass versioned paths
+ * (/api/v1/...), because the router injects /v1 into everything except
+ * /api/health, /api/version, /api/openapi.json and /mcp.
  */
 
 export class ApiError extends Error {
@@ -1796,7 +1831,7 @@ export class ApiError extends Error {
 /**
  * Perform an API request.
  *
- * @param {string} path Absolute API path, e.g. '/api/tasker/pings'.
+ * @param {string} path Absolute API path, e.g. '/api/v1/tasker/pings'.
  * @param {{ method?: string, body?: unknown, headers?: Record<string,string> }} [options]
  * @returns {Promise<any>} The parsed JSON response body.
  * @throws {ApiError} When the response status is not ok.
@@ -1807,7 +1842,12 @@ export async function apiFetch(path, options = {}) {
   const init = {
     method,
     credentials: 'include',
-    headers: { ...headers },
+    headers: {
+      // Required by the host's CsrfGuard on every mutating request; harmless
+      // on reads, so it is unconditional rather than a per-call decision.
+      'X-Requested-With': 'XMLHttpRequest',
+      ...headers,
+    },
   }
 
   if (body !== undefined) {
@@ -1857,7 +1897,7 @@ import { apiFetch } from './client'
  * @returns {Promise<Array<{id: number, tenantId: number, label: string, createdAt: string|null}>>}
  */
 export async function listPings() {
-  const payload = await apiFetch('/api/tasker/pings')
+  const payload = await apiFetch('/api/v1/tasker/pings')
   return payload.data
 }
 
@@ -1866,7 +1906,7 @@ export async function listPings() {
  * @returns {Promise<{id: number, tenantId: number, label: string, createdAt: string|null}>}
  */
 export async function createPing(label) {
-  const payload = await apiFetch('/api/tasker/pings', {
+  const payload = await apiFetch('/api/v1/tasker/pings', {
     method: 'POST',
     body: { label },
   })
@@ -1878,14 +1918,14 @@ export async function createPing(label) {
  * @param {string} password
  */
 export async function login(email, password) {
-  return apiFetch('/api/login', {
+  return apiFetch('/api/v1/login', {
     method: 'POST',
     body: { email, password },
   })
 }
 ```
 
-`POST /api/login` sets the httpOnly session cookie; because Vite proxies `/api` to the host, the browser treats this as same-origin and stores it exactly as it will in production.
+`POST /api/v1/login` sets the httpOnly session cookie; because Vite proxies `/api` to the host, the browser treats this as same-origin and stores it exactly as it will in production. `apiFetch` supplies the `X-Requested-With` header the CSRF guard demands, so callers do not pass it themselves.
 
 - [ ] **Step 8: Write the dev check screen**
 
