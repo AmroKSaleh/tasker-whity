@@ -85,4 +85,24 @@ describe('apiFetch', () => {
     const [, options] = fetchMock.mock.calls[0]
     expect(options.headers['X-Requested-With']).toBe('XMLHttpRequest')
   })
+
+  it('does not let a differently-cased caller header pollute the real outgoing header', async () => {
+    const fetchMock = stubFetch({ ok: true, status: 200, json: async () => ({ data: [] }) })
+
+    await apiFetch('/api/v1/tasker/pings', {
+      headers: { 'x-requested-with': 'evil-value' },
+    })
+
+    const [, options] = fetchMock.mock.calls[0]
+    // A plain-object assertion cannot catch this: HTTP header names are
+    // case-insensitive, but {'x-requested-with': ..., 'X-Requested-With': ...}
+    // survive as two distinct properties on a JS object. The real Fetch
+    // algorithm normalises through a Headers instance, which COMBINES
+    // same-name (case-insensitively) headers with a comma rather than
+    // letting either one win — so we build the actual Headers the browser's
+    // fetch would build from this init, and assert on that.
+    const normalized = new Headers(options.headers)
+    expect(normalized.get('x-requested-with')).toBe('XMLHttpRequest')
+    expect([...normalized.entries()]).toEqual([['x-requested-with', 'XMLHttpRequest']])
+  })
 })

@@ -32,16 +32,30 @@ export class ApiError extends Error {
 export async function apiFetch(path, options = {}) {
   const { method = 'GET', body, headers = {} } = options
 
+  // HTTP header names are case-insensitive, but a plain-object spread is not:
+  // {'x-requested-with': ..., 'X-Requested-With': ...} would survive as two
+  // distinct properties, and the Fetch spec's Headers normalisation COMBINES
+  // same-name headers with a comma rather than letting either win outright
+  // (verified: new Headers({'x-requested-with':'evil','X-Requested-With':'XMLHttpRequest'})
+  // produces a single header whose value is "evil, XMLHttpRequest"). So any
+  // caller-supplied key that case-insensitively matches x-requested-with is
+  // dropped here, before the mandated header is applied, rather than relying
+  // on later-key-wins semantics that only hold for exact-case duplicates in
+  // a plain object.
+  const callerHeaders = Object.fromEntries(
+    Object.entries(headers).filter(([key]) => key.toLowerCase() !== 'x-requested-with'),
+  )
+
   const init = {
     method,
     credentials: 'include',
     headers: {
       // Caller-supplied headers first, then the mandated header last, so it
-      // always wins even if a caller passes its own X-Requested-With (or a
-      // differently-cased variant). Required by the host's CsrfGuard on
-      // every mutating request; harmless on reads, so it is unconditional
+      // always wins — regardless of casing, since same-case-insensitive
+      // keys were already stripped above. Required by the host's CsrfGuard
+      // on every mutating request; harmless on reads, so it is unconditional
       // rather than a per-call decision — and non-negotiable by callers.
-      ...headers,
+      ...callerHeaders,
       'X-Requested-With': 'XMLHttpRequest',
     },
   }
