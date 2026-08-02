@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Google connection</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+</head>
+<body style="font:14px system-ui,sans-serif;padding:24px;color:#333">
+  Finishing…
+  <script>
+    (function () {
+      var status = new URLSearchParams(location.search).get('status') || 'error';
+      try {
+        if (window.opener && !window.opener.closed) {
+          // Opener is the Tasker app on this same origin.
+          window.opener.postMessage({ source: 'tasker-google', status: status }, location.origin);
+          window.close();
+          return;
+        }
+      } catch (e) { /* ignore */ }
+      // Not a popup (full-page fallback) — go to settings.
+      location.replace('/settings?google=' + status);
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,71 @@
+import { useState, useEffect } from 'react'
+import { supabase } from '../lib/supabase'
+
+export function useKnowledgeBase(projectId) {
+  const [entries, setEntries] = useState([])
+
+  useEffect(() => {
+    if (!projectId) return
+    try {
+      const cached = JSON.parse(localStorage.getItem(`tasker-kb-${projectId}`) || 'null')
+      if (cached) setEntries(cached)
+    } catch {}
+    fetchEntries()
+  }, [projectId])
+
+  async function fetchEntries() {
+    const { data } = await supabase
+      .from('project_knowledge')
+      .select('*')
+      .eq('project_id', projectId)
+      .order('created_at')
+    if (data) {
+      setEntries(data)
+      try { localStorage.setItem(`tasker-kb-${projectId}`, JSON.stringify(data)) } catch {}
+    }
+  }
+
+  async function createEntry(title, content, source = 'user') {
+    const { data: { user } } = await supabase.auth.getUser()
+    const { data } = await supabase
+      .from('project_knowledge')
+      .insert({ project_id: projectId, user_id: user.id, title, content, source })
+      .select().single()
+    if (data) setEntries(prev => [...prev, data])
+    return data
+  }
+
+  async function updateEntry(id, updates) {
+    const { data } = await supabase
+      .from('project_knowledge')
+      .update({ ...updates, updated_at: new Date().toISOString() })
+      .eq('id', id)
+      .select().single()
+    if (data) setEntries(prev => prev.map(e => e.id === id ? data : e))
+  }
+
+  async function deleteEntry(id) {
+    await supabase.from('project_knowledge').delete().eq('id', id)
+    setEntries(prev => prev.filter(e => e.id !== id))
+  }
+
+  async function archiveEntry(id, restore = false) {
+    const { data } = await supabase
+      .from('project_knowledge')
+      .update({ archived_at: restore ? null : new Date().toISOString() })
+      .eq('id', id)
+      .select().single()
+    if (data) setEntries(prev => prev.map(e => e.id === id ? data : e))
+  }
+
+  async function reviewEntry(id) {
+    const { data } = await supabase
+      .from('project_knowledge')
+      .update({ reviewed_at: new Date().toISOString() })
+      .eq('id', id)
+      .select().single()
+    if (data) setEntries(prev => prev.map(e => e.id === id ? data : e))
+  }
+
+  return { entries, createEntry, updateEntry, deleteEntry, archiveEntry, reviewEntry }
+}

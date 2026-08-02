@@ -1,0 +1,7 @@
+/api/mcp  https://rzjhmipbamyvpwlkfvxx.supabase.co/functions/v1/mcp  200!
+/api/oauth/token  https://rzjhmipbamyvpwlkfvxx.supabase.co/functions/v1/oauth-token  200!
+/api/oauth/register  https://rzjhmipbamyvpwlkfvxx.supabase.co/functions/v1/oauth-register  200!
+/api/rest/*  https://rzjhmipbamyvpwlkfvxx.supabase.co/functions/v1/rest-api/:splat  200!
+/gatetest  /gatetest.html  200
+/testgate  /testgate.html  200
+/*  /index.html  200

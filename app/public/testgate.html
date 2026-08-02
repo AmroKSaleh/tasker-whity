@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Tasker Is Here — Task Management That Actually Speaks AI</title>
+<style>
+  :root{--paper:#faf9f7;--ink:#1b1a18;--mute:#6b6760;--line:#e6e2db;--accent:#d97757;}
+  *{box-sizing:border-box}
+  html{-webkit-text-size-adjust:100%}
+  body{margin:0;background:var(--paper);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;line-height:1.7;font-size:18px;-webkit-font-smoothing:antialiased;}
+  .wrap{max-width:720px;margin:0 auto;padding:clamp(24px,5vw,64px) clamp(18px,5vw,32px) 96px;}
+  .chip{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.7rem;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);border:1px solid var(--line);border-radius:999px;padding:4px 10px;margin-bottom:22px;}
+  h1{font-size:clamp(1.7rem,5.5vw,2.5rem);line-height:1.15;letter-spacing:-.02em;margin:0 0 28px;padding-bottom:18px;border-bottom:3px solid var(--accent);}
+  h2{font-size:clamp(1.15rem,3.8vw,1.5rem);letter-spacing:-.01em;margin:38px 0 6px;}
+  p{margin:16px 0;}
+  strong{font-weight:700;} em{font-style:italic;}
+  a{color:var(--accent);text-decoration:underline;text-underline-offset:2px;}
+  @media(max-width:600px){body{font-size:17px;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Tasker Is Here: Task Management That Actually Speaks AI</h1>
+
+  <p>The bottleneck has moved. For years, the slow part of building software was writing the code. Now your AI assistant writes a feature in the time it takes to refill your coffee. The new slow part is everything around the code: keeping track of what needs doing, what's in flight, and what's already shipped. And if you work with Claude Code or Cursor, you know the ritual that fills that gap. You describe a task in chat. The AI does it. Then you switch windows, find your task list, and update it by hand. The next morning you tell the AI what to work on, copying context back out of the same list. Copy out, paste in, copy out, paste in. The tools never talk to each other, so you become the integration layer.</p>
+
+  <p>Today, that ends. Tasker is now available.</p>
+
+  <h2>The problem</h2>
+  <p>Task managers were built for humans clicking buttons. That made sense when humans did the work. But you don't do most of the work anymore, your AI assistant does. The trouble is that the assistant can't see your task list, can't update it, and can't pull context from it. So every handoff between you and the AI is a manual copy-paste, and every copy-paste is a chance to lose context, forget a detail, or let the list drift out of sync with reality.</p>
+  <p>The result is a quiet tax on everything you build. The faster your AI works, the more handoffs you make, and the more time you spend being a clipboard. A tool that was supposed to save you time turns into one more window you have to babysit. The problem isn't that task managers are bad at managing tasks. It's that none of them were built for a world where your most active collaborator isn't a person.</p>
+
+  <h2>Why Tasker is different</h2>
+  <p>Tasker treats your AI assistant as a first-class user of the task manager, not a bystander. The assistant reads, creates, and updates tasks directly, with the same standing you have. It is a real user of the system, not a guest you copy text to.</p>
+  <p>That access runs through MCP, the Model Context Protocol, and MCP is Tasker's primary interface, not a side feature bolted onto a web app. Claude Code and Cursor connect to Tasker over MCP and work with your tasks natively. The web app is there when you want to see the board with your own eyes, but the assistant doesn't need it, because the integration, not the screen, is the front door.</p>
+  <p>Here is what that looks like in practice. You tell Claude Code, "Add a task to rate-limit the login endpoint, and start on it." Over MCP, Claude Code creates the task in Tasker, marks it in progress, and writes the code. When it finishes, it marks the task done and leaves a note about the approach it took, all without you touching the task list. The next morning you ask, "What's left in the auth section?" The assistant reads your open tasks straight from Tasker and picks up exactly where it left off, with full context, because the list never left the conversation. No window switching. No copy-paste. No drift between what the AI did and what your tasks say.</p>
+  <p>Because the task list and the AI workflow share one source of truth, they can't fall out of step. What the assistant does is what your tasks say, automatically. You stop being the integration layer between your tools and get back to deciding what to build.</p>
+
+  <h2>Get started</h2>
+  <p>Stop copying tasks between your AI and your task list. Start your first project at <a href="https://smarttasksxdd.netlify.app">https://smarttasksxdd.netlify.app</a> and let your tasks keep up with your ideas.</p>
+</div>
+</body>
+</html>
