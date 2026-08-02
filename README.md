@@ -158,3 +158,41 @@ tool-surface change.
 Edit `host/core.version`, then `npm run core:fetch && npm run host:up`.
 `host:up`'s `--build` flag (see above) means this always rebuilds both
 images against the newly checked-out ref — no separate rebuild step needed.
+
+## Verified against
+
+- whity-core: pinned in `host/core.version`
+- whity/plugin-sdk: ^1.9
+- PHP 8.4 · PostgreSQL 15 · Node 20
+
+## Foundation checks
+
+- `npm run plugin:test` — PHPUnit incl. tenant-isolation conformance
+- `npm run plugin:stan` — PHPStan level 6
+- `npm run app:test` — Vitest over the API client
+- `npm run mcp:check` — derived MCP tool surface matches `docs/mcp-tool-surface.json` (needs a running host)
+- <http://localhost:5174/dev/ping> — full round trip through the dev proxy
+- <http://localhost:8010/dev/ping> — same round trip through Caddy, production topology
+
+## CI
+
+`.github/workflows/ci.yml` runs on every push to `main` and on every pull
+request, in two independent jobs:
+
+- **plugin** — runs inside a `php:8.4-cli` container. Clones whity-core at
+  the SHA pinned in `host/core.version` into `host/.core` (so the plugin's
+  `../host/.core/sdk` path repository resolves and `plugin/vendor/whity/plugin-sdk`
+  symlinks correctly), installs Composer by hand, runs `composer install`
+  (no lockfile is committed — `plugin/composer.lock` is gitignored on
+  purpose), then `phpunit` and `phpstan analyse`. This mirrors
+  `npm run plugin:test` / `npm run plugin:stan` exactly, without needing
+  Docker inside CI: the job itself runs in a container, not a container it launches.
+- **app** — plain `ubuntu-latest`, Node 20, `npm ci` against the committed
+  `app/package-lock.json`, then `npm test` (Vitest) and `npm run build`.
+
+Both jobs run against in-memory SQLite / pure Vitest and need neither Docker,
+a running host, nor a database — deliberately, so CI has no infrastructure
+to keep alive. **Out of scope for this CI**, because they need a live stack:
+`npm run mcp:check` (MCP tool-surface drift) and the browser round trips at
+`/dev/ping` on `:5174` and `:8010`. Those remain manual/local checks until a
+later plan wires up a CI-hosted stack for them.
