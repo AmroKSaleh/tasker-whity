@@ -18,6 +18,45 @@ services:
       timeout: 5s
       retries: 20
 
+  # Dev-only one-shot bootstrap. The frankenphp service below bind-mounts
+  # ./.core over /app, which hides whatever vendor/ the image build produced
+  # (Dockerfile's `release` stage bakes vendor/ in, but that copy lives only
+  # inside the image layer, not on the host checkout the bind mount exposes).
+  # It also means the FrankenPHP persistent worker would otherwise boot
+  # straight into `public/index.php`, which queries app_settings before
+  # serving any request — and fails to ever reach frankenphp_handle_request()
+  # if migrations haven't run yet. This service installs composer
+  # dependencies against the MOUNTED checkout, then migrates and seeds,
+  # before frankenphp is allowed to start (see its `depends_on` below).
+  # Mirrors whity-core's own db-init pattern (host/.core/docker-compose.yml).
+  bootstrap:
+    build:
+      context: ./.core
+      dockerfile: Dockerfile
+    image: tasker-core:dev
+    container_name: tasker_bootstrap
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    volumes:
+      - ./.core:/app
+    working_dir: /app
+    restart: "no"
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        echo "[bootstrap] installing composer dependencies against the mounted checkout...";
+        composer install --no-progress --no-interaction;
+        echo "[bootstrap] running migrations...";
+        php public/index.php migrate run;
+        echo "[bootstrap] seeding database...";
+        php public/index.php seed;
+        echo "[bootstrap] done.";
+
   frankenphp:
     build:
       context: ./.core
@@ -27,6 +66,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      bootstrap:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
