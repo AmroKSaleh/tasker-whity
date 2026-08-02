@@ -1,0 +1,18 @@
+# whity-core is fetched at a pinned ref, never committed
+host/.core/
+
+# env
+host/.env
+.env
+.env.local
+
+# node
+node_modules/
+app/node_modules/
+app/dist/*
+!app/dist/.gitkeep
+
+# php
+plugin/vendor/
+plugin/.phpunit.cache/
+plugin/composer.lock

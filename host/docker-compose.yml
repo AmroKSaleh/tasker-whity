@@ -1,0 +1,49 @@
+name: tasker
+
+services:
+  postgres:
+    image: postgres:15
+    container_name: tasker_postgres
+    environment:
+      POSTGRES_DB: ${DB_NAME:-tasker}
+      POSTGRES_USER: ${DB_USER:-tasker}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-tasker_dev}
+    ports:
+      - "5433:5432"
+    volumes:
+      - tasker_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-tasker} -d ${DB_NAME:-tasker}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  frankenphp:
+    build:
+      context: ./.core
+      dockerfile: Dockerfile
+    image: tasker-core:dev
+    container_name: tasker_frankenphp
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      # Verified against whity-core's own compose file: the container
+      # listens on :80, the Caddyfile lives at /etc/frankenphp/Caddyfile,
+      # and these four variables are consumed by that Caddyfile.
+      CADDY_GLOBAL_OPTIONS: "auto_https off"
+      SERVER_NAME: ":80"
+      SERVER_ROOT: "public/"
+      FRANKENPHP_WORKERS: ${FRANKENPHP_WORKERS:-4}
+      FRANKENPHP_TIMEOUT: ${FRANKENPHP_TIMEOUT:-60s}
+    ports:
+      - "8010:80"
+    volumes:
+      - ./.core:/app
+      - ./Caddyfile:/etc/frankenphp/Caddyfile
+      - ../app/dist:/app/public/spa
+
+volumes:
+  tasker_pgdata:

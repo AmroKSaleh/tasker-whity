@@ -1,0 +1,32 @@
+{
+	# Caddy global options — preserved verbatim from whity-core's Caddyfile.
+	skip_install_trust
+	{$CADDY_GLOBAL_OPTIONS}
+
+	frankenphp {
+		# The persistent worker pool. Do not remove.
+		worker /app/public/index.php {$FRANKENPHP_WORKERS:8}
+
+		# Max wait time in queue before 504 Gateway Timeout
+		max_wait_time {$FRANKENPHP_TIMEOUT:60s}
+	}
+}
+
+{$SERVER_NAME:localhost} {
+	encode zstd gzip
+
+	# Everything the backend owns. /mcp is the MCP JSON-RPC transport and
+	# lives OUTSIDE /api — routing it to the SPA would break every agent.
+	@backend path /api/* /mcp /mcp/* /openapi.json
+	handle @backend {
+		root * /app/{$SERVER_ROOT:public/}
+		php_server
+	}
+
+	# Everything else is the SPA, with history-API fallback.
+	handle {
+		root * /app/public/spa
+		try_files {path} /index.html
+		file_server
+	}
+}

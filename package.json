@@ -1,0 +1,13 @@
+{
+  "name": "tasker-whity",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "core:fetch": "powershell -NoProfile -ExecutionPolicy Bypass -File host/scripts/fetch-core.ps1",
+    "host:up": "npm run core:fetch && docker compose --env-file host/.env -f host/docker-compose.yml up -d",
+    "host:down": "docker compose -f host/docker-compose.yml down",
+    "host:logs": "docker compose -f host/docker-compose.yml logs -f frankenphp",
+    "host:migrate": "docker exec tasker_frankenphp php public/index.php migrate run",
+    "host:seed": "docker exec tasker_frankenphp php public/index.php seed"
+  }
+}
