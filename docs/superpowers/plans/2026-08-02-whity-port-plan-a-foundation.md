@@ -135,39 +135,73 @@ services:
     build:
       context: ./.core
       dockerfile: Dockerfile
+    image: tasker-core:dev
     container_name: tasker_frankenphp
     depends_on:
       postgres:
         condition: service_healthy
     env_file:
       - .env
+    environment:
+      # Verified against whity-core's own compose file: the container
+      # listens on :80, the Caddyfile lives at /etc/frankenphp/Caddyfile,
+      # and these four variables are consumed by that Caddyfile.
+      CADDY_GLOBAL_OPTIONS: "auto_https off"
+      SERVER_NAME: ":80"
+      SERVER_ROOT: "public/"
+      FRANKENPHP_WORKERS: ${FRANKENPHP_WORKERS:-4}
+      FRANKENPHP_TIMEOUT: ${FRANKENPHP_TIMEOUT:-60s}
     ports:
-      - "8010:8000"
+      - "8010:80"
     volumes:
       - ./.core:/app
-      - ./Caddyfile:/etc/caddy/Caddyfile:ro
-      - ../app/dist:/app/public/spa:ro
+      - ./Caddyfile:/etc/frankenphp/Caddyfile
+      - ../app/dist:/app/public/spa
 
 volumes:
   tasker_pgdata:
 ```
 
+Four details here are load-bearing and were verified against `host/.core/docker-compose.yml` rather than assumed:
+
+- The container listens on **:80**, so the mapping is `8010:80` — not `8010:8000`.
+- The Caddyfile mounts at **`/etc/frankenphp/Caddyfile`** — not `/etc/caddy/Caddyfile`.
+- `SERVER_NAME`, `SERVER_ROOT`, `CADDY_GLOBAL_OPTIONS`, and the two `FRANKENPHP_*` variables are read by the Caddyfile; omitting them breaks startup.
+- `../app/dist` must exist before the stack starts, or Docker creates it as a root-owned empty directory. Task 1 Step 9a creates it.
+
 - [ ] **Step 6: Write `host/Caddyfile`**
 
-Caddy serves the built SPA at `/` and hands everything under `/api` to the PHP worker, which is what makes the cookie flow same-origin in production.
+Caddy serves the built SPA at `/` and hands the API paths to the PHP worker, which is what makes the cookie flow same-origin in production.
+
+**This file is a derivative of whity-core's own `Caddyfile`, not a replacement for it.** The global `frankenphp { worker … }` block is what puts FrankenPHP into persistent-worker mode — the platform's entire performance premise. Dropping it silently downgrades the host to classic per-request PHP. Diff this against `host/.core/Caddyfile` after every core upgrade.
 
 ```caddyfile
 {
-	frankenphp
-	auto_https off
+	# Caddy global options — preserved verbatim from whity-core's Caddyfile.
+	skip_install_trust
+	{$CADDY_GLOBAL_OPTIONS}
+
+	frankenphp {
+		# The persistent worker pool. Do not remove.
+		worker /app/public/index.php {$FRANKENPHP_WORKERS:8}
+
+		# Max wait time in queue before 504 Gateway Timeout
+		max_wait_time {$FRANKENPHP_TIMEOUT:60s}
+	}
 }
 
-:8000 {
-	root * /app/public
+{$SERVER_NAME:localhost} {
+	encode zstd gzip
 
-	@api path /api/*
-	php_server @api
+	# Everything the backend owns. /mcp is the MCP JSON-RPC transport and
+	# lives OUTSIDE /api — routing it to the SPA would break every agent.
+	@backend path /api/* /mcp /mcp/* /openapi.json
+	handle @backend {
+		root * /app/{$SERVER_ROOT:public/}
+		php_server
+	}
 
+	# Everything else is the SPA, with history-API fallback.
 	handle {
 		root * /app/public/spa
 		try_files {path} /index.html
@@ -243,6 +277,22 @@ seed:
 
 dev:
 	npm run dev
+```
+
+- [ ] **Step 9a: Create the SPA mount target before Docker does**
+
+`host/docker-compose.yml` bind-mounts `../app/dist`. If that path does not exist when the stack starts, Docker silently creates it as an empty directory owned by root, which later breaks `vite build` writing into it. Create it first, with a tracked placeholder so a fresh clone has it too.
+
+```powershell
+New-Item -ItemType Directory -Force app\dist | Out-Null
+Set-Content -Path app\dist\.gitkeep -Value '' -Encoding ascii
+```
+
+Add a negation to `.gitignore` so the placeholder survives the `app/dist/` ignore rule:
+
+```gitignore
+app/dist/
+!app/dist/.gitkeep
 ```
 
 - [ ] **Step 10: Bring the stack up**
