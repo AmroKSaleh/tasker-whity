@@ -10,13 +10,24 @@ const ITEMS = NAV.flatMap(s => s.items)
 
 marked.setOptions({ gfm: true })
 
+function escapeHtml(str) {
+  if (!str) return ''
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+    .replace(/`/g, '&#96;')
+}
+
 export default function DocsV2Page() {
   const params = useParams()
   const slug = params['*'] || ''
   const item = ITEMS.find(i => i.slug === slug)
   const body = PAGES[slug] || (item
     ? `# ${item.title}\n\n${item.purpose}\n\n*Full content coming soon.*`
-    : `# Page not found\n\nNothing lives at \`/docsV2/${slug}\`. [Back to the start](/docsV2).`)
+    : `# Page not found\n\nNothing lives at \`/docsV2/${escapeHtml(slug)}\`. [Back to the start](/docsV2).`)
   const html = useMemo(() => marked.parse(body), [body])
   return (
     <div className="min-h-screen bg-paper text-ink flex flex-col">
