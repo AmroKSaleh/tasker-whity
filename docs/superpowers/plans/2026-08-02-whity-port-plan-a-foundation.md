@@ -13,7 +13,7 @@
 - Every plugin table carries `tenant_id INTEGER NOT NULL`. Every SELECT/UPDATE/DELETE on it binds an explicit parameterised `tenant_id` predicate. No exceptions without a `@tenant-guard-ignore: <reason>` comment.
 - The plugin depends on `whity/plugin-sdk` **only** — never on `whity-core`. Host classes (`\Whity\app()`, `\Whity\Database\Database`, `\Whity\Core\Tenant\TenantContext`) are runtime seams, resolved at request time and stubbed for PHPStan.
 - API handlers receive `int $tenantId` as an argument. Only `TaskerPlugin`'s route methods touch `TenantContext`. This keeps handlers host-free and unit-testable.
-- Table prefix is `tasker_`. Permission slugs use `resource:action` colon notation matching `/^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/`.
+- Table prefix is `tasker_`. Permission slugs use `resource:action` notation matching `/^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/` — **exactly one colon**. Multi-word resources use an underscore (`tasker_ping:view`), never a second colon (`tasker:ping:view`), which the loader rejects by silently dropping the route with only a logged warning.
 - Every route declares an explicit `schema.operationId` — it becomes the MCP tool name.
 - `host/.core/` is gitignored and never committed. Real plugins are never committed into whity-core.
 - Ports: `8010` host API, `5433` Postgres, `5174` Vite dev. Compose project name `tasker`.

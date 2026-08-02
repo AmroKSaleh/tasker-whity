@@ -35,6 +35,15 @@ These shaped the design and are recorded because they are not obvious from the r
 - **whity OUs use `SERIAL` integer primary keys**; Tasker uses uuid throughout.
 - **whity auth supports both** httpOnly cookies (`SameSite=Lax`) and a token-body/Bearer mode intended for native clients.
 
+### Host contract confirmed during Plan A implementation
+
+Recorded here because §7 and §8 depend on it and earlier drafts of this document guessed wrong in places:
+
+- **Routes are versioned.** The router is `new Router('/v1')`; `register()` injects `/v1` after `/api`. A plugin route declared `/api/tasker/pings` is served at `/api/v1/tasker/pings`. Declare without `/v1`, call with it. Only `GET /api/health`, `GET /api/version`, `GET /api/openapi.json` and `POST|GET /mcp` are unversioned.
+- **Mutating requests are CSRF-guarded.** Without `X-Requested-With: XMLHttpRequest` the host returns 403 `{"error":"Cross-site request rejected"}` before the handler runs. The SPA's `client.js` must send it on every request, login included.
+- **MCP is a per-tenant opt-in**, gated by a `tenantMcpEnabled` closure that raises `McpFeatureDisabledException`. Enabling it is a deployment step, not a default.
+- **Permission slugs carry exactly one colon** — see §7.
+
 ---
 
 ## 3. Decisions
@@ -175,7 +184,11 @@ The board endpoint replaces four-to-five Supabase round trips and eliminates the
 
 Registered by the plugin and attached to roles by a grant migration:
 
-`tasker:project:view`, `tasker:project:manage`, `tasker:task:view`, `tasker:task:edit`, `tasker:task:complete`, `tasker:task:delete`, `tasker:structure:manage`, `tasker:milestone:edit`.
+`tasker_project:view`, `tasker_project:manage`, `tasker_task:view`, `tasker_task:edit`, `tasker_task:complete`, `tasker_task:delete`, `tasker_structure:manage`, `tasker_milestone:edit`.
+
+**Slugs carry exactly one colon.** The host validates every permission against `PluginLoader::PERMISSION_PATTERN`, which is `/^[a-z][a-z0-9_]*:[a-z][a-z0-9_]*$/` — so the three-segment form this document originally used (`tasker:project:view`) is rejected. The resource half therefore uses an underscore: `tasker_project`, not `tasker:project`. Discovered during Plan A implementation, where the invalid form was the cause of a real failure.
+
+**The failure mode is silent.** An invalid slug does not raise an error — the loader fails closed and drops the route with only a logged warning, so the endpoint simply does not exist. Any permission rename must be applied consistently across route `requiredPermission` values, `getPermissions()`, and the grant migration's `up()` and `down()`, or routes disappear without an obvious cause.
 
 Declaring `requiredPermission` on a route yields enforcement in `RbacMiddleware` **and** in the MCP access map simultaneously.
 
