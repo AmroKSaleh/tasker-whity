@@ -98,6 +98,19 @@ tag.
 
 Host API: <http://localhost:8010/api> · Health: <http://localhost:8010/api/health>
 
+- Admin UI (whity's, unmodified): <http://localhost:3010>
+
+The admin is whity-core's own Next.js app, served straight from `host/.core/web`
+with no patches, so it stays current with every core upgrade. It provides user,
+role, OU, tenant, plugin, MCP-token and audit administration, plus account
+self-service: 2FA enrolment, session revocation, and email management. Tasker's
+own SPA deliberately does not duplicate these.
+
+The browser only ever talks to `:3010`; that Next server proxies `/api` to the
+backend in-network. Because cookies are scoped per host and ignore the port, one
+login is shared across the SPA (`:5174`), the API (`:8010`) and the admin
+(`:3010`).
+
 Seeded dev accounts come from `host/.env` (`INITIAL_ADMIN_PASSWORD`).
 
 Before `npm run dev` / `npm run app:build`: copy `app/.env.example` to

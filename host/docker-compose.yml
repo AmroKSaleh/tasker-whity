@@ -120,5 +120,32 @@ services:
       - ./Caddyfile:/etc/frankenphp/Caddyfile
       - ../app/dist:/app/public/spa
 
+  admin:
+    image: node:20
+    container_name: tasker_admin
+    working_dir: /app/web
+    depends_on:
+      frankenphp:
+        condition: service_started
+    environment:
+      # Server-side proxy target: the backend's in-network address and port.
+      WHITY_BACKEND_URL: http://frankenphp:80
+      NEXT_PUBLIC_API_URL: /api
+      NODE_ENV: production
+      HOSTNAME: 0.0.0.0
+    ports:
+      - "3010:3000"
+    volumes:
+      - ./.core:/app
+    command:
+      - sh
+      - -c
+      - |
+        set -e
+        cd /app
+        npm ci --no-audit --no-fund --include=dev
+        npm run build --workspace=web
+        npm run start --workspace=web
+
 volumes:
   tasker_pgdata:
