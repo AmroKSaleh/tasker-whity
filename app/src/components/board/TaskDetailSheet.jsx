@@ -319,6 +319,19 @@ export default function TaskDetailSheet({ taskId, onClose, onFocus, onMilestoneC
             </div>
           </Field>
 
+          <Field label="Relay Context (AI Handoff)">
+            <textarea
+              defaultValue={task.relay_context || ''}
+              key={task.id + '-relay'}
+              onBlur={(e) => {
+                const relay_context = e.currentTarget.value || null
+                if (relay_context !== (task.relay_context || null)) patch({ relay_context })
+              }}
+              placeholder="Hand-off notes..."
+              className="w-full min-h-[50px] rounded-md border border-line-2 bg-surf-2 p-3 font-sans text-[13px] leading-[1.55] text-ink-2 resize-y focus:outline-none focus:border-accent focus:bg-paper"
+            />
+          </Field>
+
           <Field label="Context">
             <ContextTextarea
               taskId={task.id}

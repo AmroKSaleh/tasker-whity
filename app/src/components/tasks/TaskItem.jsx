@@ -155,17 +155,24 @@ export default function TaskItem({
             <span
               onClick={() => {
                 if (onSelect) { onSelect(task.id) }
-                else if (task.detail) { setExpanded(e => !e) }
+                else if (task.detail || task.relay_context) { setExpanded(e => !e) }
               }}
-              className={`text-[13px] font-medium leading-snug line-clamp-3 ${(task.detail || onSelect) ? 'cursor-pointer' : ''} ${
+              className={`text-[13px] font-medium leading-snug line-clamp-3 ${(task.detail || task.relay_context || onSelect) ? 'cursor-pointer' : ''} ${
                 isDone ? 'line-through text-mute' : 'text-ink'
               }`}
             >
               {task.text}
             </span>
 
+            {expanded && task.relay_context && (
+              <div className="bg-surf rounded-md p-2 mb-0.5 border border-line-2">
+                <span className="text-[10px] font-bold uppercase tracking-wider text-mute mb-1 block">[Recording context for the task]</span>
+                <p className="text-[12px] text-ink leading-relaxed whitespace-pre-wrap">{task.relay_context}</p>
+              </div>
+            )}
+
             {expanded && task.detail && (
-              <p className="text-[12px] text-mute leading-relaxed">{task.detail}</p>
+              <p className="text-[12px] text-mute leading-relaxed whitespace-pre-wrap">{task.detail}</p>
             )}
 
             {/* Bottom row: priority/tags on left, actions on right */}
@@ -242,13 +249,6 @@ export default function TaskItem({
                         ◎
                       </button>
                     )}
-                    <button
-                      onClick={() => setEditing(true)}
-                      title="Edit task"
-                      className="w-7 h-7 flex items-center justify-center rounded text-sm text-mute hover:text-ink transition-colors"
-                    >
-                      ✎
-                    </button>
                     {onDelete && (
                       <button
                         onClick={() => onDelete(task.id)}

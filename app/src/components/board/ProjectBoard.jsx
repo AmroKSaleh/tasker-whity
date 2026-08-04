@@ -346,6 +346,33 @@ function SectionViewControls({ prefs, sorted, onChange }) {
 }
 
 function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTask, onAddDetailed, onAddGroup, onOpen, onToggle, onToggleIP, onFocus, onPin, onDelete, onFocusSection, onDeleteSection, onUpdateViewPrefs, showUnphased = false }) {
+  const [width, setWidth] = useState(() => {
+    const saved = localStorage.getItem(`section-width-${section.id}`)
+    return saved ? parseInt(saved, 10) : 264
+  })
+
+  const handleResizeStart = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startWidth = width;
+
+    const onMouseMove = (moveEvent) => {
+      const newWidth = Math.max(200, Math.min(800, startWidth + moveEvent.clientX - startX));
+      setWidth(newWidth);
+    };
+
+    const onMouseUp = (upEvent) => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      const finalWidth = Math.max(200, Math.min(800, startWidth + upEvent.clientX - startX));
+      localStorage.setItem(`section-width-${section.id}`, finalWidth.toString());
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }
+
   const dim = /done|complete/i.test(section.name)
   const prefs = readViewPrefs(section)
   const sorted = prefs.sort !== 'manual'
@@ -365,8 +392,8 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
   return (
     <div
       ref={setNodeRef}
-      style={{ transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
-      className="w-[264px] shrink-0 flex flex-col border-r border-line min-h-0"
+      style={{ width: `${width}px`, transform: CSS.Translate.toString(transform), transition, opacity: isDragging ? 0.5 : 1 }}
+      className="shrink-0 flex flex-col border-r border-line min-h-0 relative group/section"
     >
       <div className="relative h-11 px-3.5 flex items-center justify-between border-b border-line-2 bg-surf-2 sticky top-0 z-[2]">
         <div className="flex items-center gap-1.5 min-w-0 cursor-pointer hover:opacity-80 transition-opacity mr-1" onClick={() => onFocusSection(section.id)}>
@@ -467,6 +494,12 @@ function SectionColumn({ section, statusFilter, priorityFilter, prefix, onAddTas
       <div className="border-t border-line-2 px-2.5 py-1.5 shrink-0">
         <AddTaskInline sectionId={section.id} groupId={null} onAdd={onAddTask} onAddDetailed={onAddDetailed} />
       </div>
+      
+      {/* Resizer Handle */}
+      <div 
+        className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-ink/10 active:bg-ink/20 z-10 opacity-0 group-hover/section:opacity-100 transition-opacity"
+        onMouseDown={handleResizeStart}
+      />
     </div>
   )
 }

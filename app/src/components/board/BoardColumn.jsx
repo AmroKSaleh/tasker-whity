@@ -35,6 +35,33 @@ export default function BoardColumn({
   milestoneProgress = {},
 }) {
   const [collapsed, setCollapsed] = useState(false)
+  
+  const [width, setWidth] = useState(() => {
+    const saved = localStorage.getItem(`section-width-${section.id}`)
+    return saved ? parseInt(saved, 10) : 300
+  })
+
+  const handleResizeStart = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    const startX = e.clientX;
+    const startWidth = width;
+
+    const onMouseMove = (moveEvent) => {
+      const newWidth = Math.max(250, Math.min(800, startWidth + moveEvent.clientX - startX));
+      setWidth(newWidth);
+    };
+
+    const onMouseUp = (upEvent) => {
+      document.removeEventListener('mousemove', onMouseMove);
+      document.removeEventListener('mouseup', onMouseUp);
+      const finalWidth = Math.max(250, Math.min(800, startWidth + upEvent.clientX - startX));
+      localStorage.setItem(`section-width-${section.id}`, finalWidth.toString());
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+  }
 
   const {
     attributes, listeners, setNodeRef,
@@ -90,9 +117,9 @@ export default function BoardColumn({
   return (
     <div
       ref={setNodeRef}
-      style={{ transform: CSS.Translate.toString(transform), transition }}
+      style={{ width: `${width}px`, transform: CSS.Translate.toString(transform), transition }}
       className={clsx(
-        'flex h-full w-[300px] shrink-0 flex-col overflow-hidden rounded-xl border border-line-2 bg-paper',
+        'relative flex h-full shrink-0 flex-col overflow-hidden rounded-xl border border-line-2 bg-paper',
         isDragging && '-rotate-1 -translate-y-1 shadow-drag z-10 opacity-90',
       )}
     >
@@ -174,6 +201,12 @@ export default function BoardColumn({
           onAdd={onAddTask}
         />
       </div>
+      
+      {/* Resizer Handle */}
+      <div 
+        className="absolute right-0 top-0 bottom-0 w-2 cursor-col-resize hover:bg-ink/10 active:bg-ink/20 z-10"
+        onMouseDown={handleResizeStart}
+      />
     </div>
   )
 }

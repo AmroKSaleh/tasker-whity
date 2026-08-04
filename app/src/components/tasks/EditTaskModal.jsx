@@ -14,6 +14,7 @@ const PRIORITIES = [
 export default function EditTaskModal({ task, onClose }) {
   const [text, setText] = useState(task.text ?? '')
   const [detail, setDetail] = useState(task.detail ?? '')
+  const [relayContext, setRelayContext] = useState(task.relay_context ?? '')
   const [priority, setPriority] = useState(task.priority ?? null)
   const [dueDate, setDueDate] = useState(task.due_date ?? '')
   const [saving, setSaving] = useState(false)
@@ -44,6 +45,7 @@ export default function EditTaskModal({ task, onClose }) {
     await updateTaskFields(task.id, {
       text: text.trim(),
       detail: detail.trim() || null,
+      relay_context: relayContext.trim() || null,
       priority: priority || null,
       due_date: dueDate || null,
       custom_status_id: customStatusId || null,
@@ -81,6 +83,21 @@ export default function EditTaskModal({ task, onClose }) {
               onChange={e => setDetail(e.target.value)}
               rows={3}
               placeholder="Additional context…"
+              className="w-full bg-surf-2 rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none border border-line focus:border-ink transition-colors resize-none placeholder:text-mute-2"
+            />
+          </div>
+
+          {/* Relay Context */}
+          <div>
+            <label className="text-[11px] font-semibold text-mute uppercase tracking-wide mb-1 flex items-center justify-between">
+              <span>Relay Context</span>
+              <span className="text-[9px] bg-surf px-1.5 py-0.5 rounded text-mute">AI Handoff</span>
+            </label>
+            <textarea
+              value={relayContext}
+              onChange={e => setRelayContext(e.target.value)}
+              rows={2}
+              placeholder="Hand-off notes from previous agent or teammate…"
               className="w-full bg-surf-2 rounded-lg px-3 py-2.5 text-[13px] text-ink outline-none border border-line focus:border-ink transition-colors resize-none placeholder:text-mute-2"
             />
           </div>

@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Play, Pause, X } from 'lucide-react'
+import clsx from 'clsx'
+import { Play, Pause, X, Maximize2 } from 'lucide-react'
 import { rankTasks } from '../../lib/scoring'
 import { Kicker } from '../editorial/atoms'
 import AwaitingInputStrip from './AwaitingInputStrip'
