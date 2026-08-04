@@ -1,10 +1,34 @@
+import { useEffect, useState } from 'react'
+import { getSsoProviders, startSsoUrl } from '../../api/auth'
+
 /**
- * Renders whity's configured SSO provider buttons (Google, GitHub, or
- * whatever the admin has enabled). Task 6 fills this in by calling
- * getSsoProviders() and rendering a button per provider that navigates to
- * startSsoUrl(provider.id). Until then this is a no-op placeholder so
- * LoginPage can render without it.
+ * One sign-in link per configured identity provider.
+ *
+ * Renders nothing when no providers exist or the lookup fails: SSO is optional
+ * configuration, so its absence must never block password login.
  */
 export default function SsoButtons() {
-  return null
+  const [providers, setProviders] = useState([])
+
+  useEffect(() => {
+    let cancelled = false
+    getSsoProviders()
+      .then((list) => { if (!cancelled) setProviders(list) })
+      .catch(() => { if (!cancelled) setProviders([]) })
+    return () => { cancelled = true }
+  }, [])
+
+  if (providers.length === 0) {
+    return null
+  }
+
+  return (
+    <div>
+      {providers.map((p) => (
+        <a key={p.id} href={startSsoUrl(p.id)}>
+          Continue with {p.name}
+        </a>
+      ))}
+    </div>
+  )
 }
