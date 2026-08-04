@@ -1,4 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'
+import { SessionProvider } from './auth/SessionProvider'
 import AuthGuard from './components/layout/AuthGuard'
 import LoginPage from './pages/LoginPage'
 import HomePage from './pages/HomePage'
@@ -31,45 +32,47 @@ import RouteNotAvailable from './components/layout/RouteNotAvailable'
 export default function App() {
   return (
     <BrowserRouter>
-      <Routes>
-        <Route path="/dev/ping" element={<PingCheck />} />
-        <Route path="/" element={<Navigate to="/home" replace />} />
-        <Route path="/today" element={<Navigate to="/home" replace />} />
-        <Route path="/home" element={<AuthGuard><TodayPage /></AuthGuard>} />
-        <Route path="/projects" element={<AuthGuard><HomePage /></AuthGuard>} />
-        <Route path="/environments" element={<AuthGuard><EnvironmentsPage /></AuthGuard>} />
-        <Route path="/organizations" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
-        {/* <Route path="/organizations" element={<AuthGuard><OrganizationsPage /></AuthGuard>} /> */}
-        <Route path="/flows" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
-        {/* <Route path="/flows" element={<AuthGuard><FlowsPage /></AuthGuard>} /> */}
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="/invite/:token" element={<RouteNotAvailable />} />
-        {/* <Route path="/invite/:token" element={<InvitePage />} /> */}
-        <Route path="/docs/*" element={<DocsPage />} />
-        <Route path="/docsV2/*" element={<DocsV2Page />} />
-        <Route path="/oauth/authorize" element={<RouteNotAvailable />} />
-        {/* <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} /> */}
-        <Route
-          path="/dashboard/*"
-          element={
-            <AuthGuard>
-              <DashboardPage />
-            </AuthGuard>
-          }
-        />
-        <Route
-          path="/settings"
-          element={
-            <AuthGuard>
-              <SettingsPage />
-            </AuthGuard>
-          }
-        />
-        <Route path="/connectors/gmail" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
-        {/* <Route path="/connectors/gmail" element={<AuthGuard><GmailPanelPage /></AuthGuard>} /> */}
-        <Route path="/connectors/google-tasks" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
-        {/* <Route path="/connectors/google-tasks" element={<AuthGuard><GoogleTasksPage /></AuthGuard>} /> */}
-      </Routes>
+      <SessionProvider>
+        <Routes>
+          <Route path="/dev/ping" element={<PingCheck />} />
+          <Route path="/" element={<Navigate to="/home" replace />} />
+          <Route path="/today" element={<Navigate to="/home" replace />} />
+          <Route path="/home" element={<AuthGuard><TodayPage /></AuthGuard>} />
+          <Route path="/projects" element={<AuthGuard><HomePage /></AuthGuard>} />
+          <Route path="/environments" element={<AuthGuard><EnvironmentsPage /></AuthGuard>} />
+          <Route path="/organizations" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
+          {/* <Route path="/organizations" element={<AuthGuard><OrganizationsPage /></AuthGuard>} /> */}
+          <Route path="/flows" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
+          {/* <Route path="/flows" element={<AuthGuard><FlowsPage /></AuthGuard>} /> */}
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/invite/:token" element={<RouteNotAvailable />} />
+          {/* <Route path="/invite/:token" element={<InvitePage />} /> */}
+          <Route path="/docs/*" element={<DocsPage />} />
+          <Route path="/docsV2/*" element={<DocsV2Page />} />
+          <Route path="/oauth/authorize" element={<RouteNotAvailable />} />
+          {/* <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} /> */}
+          <Route
+            path="/dashboard/*"
+            element={
+              <AuthGuard>
+                <DashboardPage />
+              </AuthGuard>
+            }
+          />
+          <Route
+            path="/settings"
+            element={
+              <AuthGuard>
+                <SettingsPage />
+              </AuthGuard>
+            }
+          />
+          <Route path="/connectors/gmail" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
+          {/* <Route path="/connectors/gmail" element={<AuthGuard><GmailPanelPage /></AuthGuard>} /> */}
+          <Route path="/connectors/google-tasks" element={<AuthGuard><RouteNotAvailable /></AuthGuard>} />
+          {/* <Route path="/connectors/google-tasks" element={<AuthGuard><GoogleTasksPage /></AuthGuard>} /> */}
+        </Routes>
+      </SessionProvider>
     </BrowserRouter>
   )
 }
