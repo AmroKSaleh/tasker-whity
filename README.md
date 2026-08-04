@@ -241,11 +241,13 @@ images against the newly checked-out ref — no separate rebuild step needed.
 - `npm run mcp:check` — derived MCP tool surface matches `docs/mcp-tool-surface.json` (needs a running host)
 - <http://localhost:5174/dev/ping> — full round trip through the dev proxy
 - <http://localhost:8010/dev/ping> — same round trip through Caddy, production topology
+- <http://localhost:3010> — whity's admin UI; one login is shared with the SPA
+- <http://localhost:5174/login> — password login, 2FA challenge, tenant selection
 
 ## CI
 
 `.github/workflows/ci.yml` runs on every push to `main` and on every pull
-request, in two independent jobs:
+request, in three independent jobs:
 
 - **plugin** — runs inside a `php:8.4-cli` container. Clones whity-core at
   the SHA pinned in `host/core.version` into `host/.core` (so the plugin's
@@ -257,6 +259,11 @@ request, in two independent jobs:
   Docker inside CI: the job itself runs in a container, not a container it launches.
 - **app** — plain `ubuntu-latest`, Node 20, `npm ci` against the committed
   `app/package-lock.json`, then `npm test` (Vitest) and `npm run build`.
+- **admin** — plain `ubuntu-latest`, Node 20. Clones whity-core at the SHA
+  pinned in `host/core.version` into `host/.core` (same pin, same clone
+  step as **plugin**, since the admin source lives inside whity-core, not
+  this repo), then `npm ci` and `npm run build` in `host/.core/web`. Catches
+  a core upgrade that breaks the admin build before it reaches a machine.
 
 Both jobs run against in-memory SQLite / pure Vitest and need neither Docker,
 a running host, nor a database — deliberately, so CI has no infrastructure

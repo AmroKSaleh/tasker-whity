@@ -13,7 +13,6 @@ import EnvironmentsPage from './pages/EnvironmentsPage'
 import OrganizationsPage from './pages/OrganizationsPage'
 import GmailPanelPage from './pages/GmailPanelPage'
 import GoogleTasksPage from './pages/GoogleTasksPage'
-import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
 import InvitePage from './pages/InvitePage'
 import PingCheck from './dev/PingCheck'
 import RouteNotAvailable from './components/layout/RouteNotAvailable'
@@ -27,7 +26,7 @@ import RouteNotAvailable from './components/layout/RouteNotAvailable'
 // SettingsPage: it is in scope for slice one (its webhooks/connectors
 // sections are a separate, later concern).
 // Guarded: FlowsPage, OrganizationsPage, GmailPanelPage, GoogleTasksPage,
-// InvitePage, OAuthAuthorizePage.
+// InvitePage.
 
 export default function App() {
   return (
@@ -50,7 +49,6 @@ export default function App() {
           <Route path="/docs/*" element={<DocsPage />} />
           <Route path="/docsV2/*" element={<DocsV2Page />} />
           <Route path="/oauth/authorize" element={<RouteNotAvailable />} />
-          {/* <Route path="/oauth/authorize" element={<OAuthAuthorizePage />} /> */}
           <Route
             path="/dashboard/*"
             element={

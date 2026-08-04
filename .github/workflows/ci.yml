@@ -58,3 +58,25 @@ jobs:
       - name: Build
         working-directory: app
         run: npm run build
+
+  admin:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch pinned whity-core (the admin source lives here)
+        run: |
+          git clone https://github.com/AmroKSaleh/whity-core.git host/.core
+          git -C host/.core checkout "$(cat host/core.version)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install
+        working-directory: host/.core/web
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        working-directory: host/.core/web
+        run: npm run build

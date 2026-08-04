@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../lib/supabase'
+import { useSession } from '../auth/SessionProvider'
 import AppShell from '../components/editorial/AppShell'
 import { Kicker } from '../components/editorial/atoms'
 import { getAISettings, saveAISettings, PROVIDERS } from '../lib/aiSettings'
@@ -537,6 +538,7 @@ function ComingSoon({ label }) {
 // ── Main settings page ────────────────────────────────────────
 export default function SettingsPage() {
   const navigate = useNavigate()
+  const { signOut } = useSession()
   const [settings, setSettings] = useState(getAISettings)
   const [showKey, setShowKey] = useState(false)
   const [testStatus, setTestStatus] = useState(null)
@@ -553,7 +555,7 @@ export default function SettingsPage() {
   }, [])
 
   async function handleSignOut() {
-    await supabase.auth.signOut()
+    await signOut()
     navigate('/login', { replace: true })
   }
 

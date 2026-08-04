@@ -4,7 +4,7 @@ import GlobalSearch from './GlobalSearch'
 import { DndContext, closestCenter, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
 import { SortableContext, verticalListSortingStrategy, arrayMove, useSortable } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { supabase } from '../../lib/supabase'
+import { useSession } from '../../auth/SessionProvider'
 import { useProjectStore } from '../../store/useProjectStore'
 import { deleteProject, reorderProjects, updateProject } from '../../hooks/useProjects'
 import { prefetchBoard, prefetchToday } from '../../lib/prefetch'
@@ -93,6 +93,7 @@ function SortableSheetItem({ project, onDelete, onRename }) {
 export default function NavigationRail() {
   const navigate = useNavigate()
   const location = useLocation()
+  const { signOut } = useSession()
   const { projects } = useProjectStore()
   const [showModal, setShowModal] = useState(false)
   const [showReorder, setShowReorder] = useState(false)
@@ -380,7 +381,7 @@ export default function NavigationRail() {
             <span>Feedback and Suggestions</span>
           </button>
           <button
-            onClick={() => supabase.auth.signOut()}
+            onClick={async () => { await signOut(); navigate('/login', { replace: true }) }}
             className="w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] text-mute hover:bg-surf-2 transition-colors"
           >
             <span>⇠</span>
