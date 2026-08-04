@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { apiFetch, ApiError } from './client'
+import { apiFetch, ApiError, setUnauthorizedHandler } from './client'
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -122,5 +122,79 @@ describe('apiFetch', () => {
     const normalized = new Headers(options.headers)
     expect(normalized.get('x-requested-with')).toBe('XMLHttpRequest')
     expect([...normalized.entries()]).toEqual([['x-requested-with', 'XMLHttpRequest']])
+  })
+})
+
+describe('apiFetch 401 handling', () => {
+  it('refreshes once and retries the original request', async () => {
+    const calls = []
+    const fetchMock = vi.fn(async (path) => {
+      calls.push(path)
+      if (path === '/api/v1/tasker/pings' && calls.filter((p) => p === '/api/v1/tasker/pings').length === 1) {
+        return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) }
+      }
+      if (path === '/api/v1/auth/refresh') {
+        return { ok: true, status: 200, json: async () => ({ data: {} }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ data: [{ id: 1 }] }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await apiFetch('/api/v1/tasker/pings')
+
+    expect(result).toEqual({ data: [{ id: 1 }] })
+    expect(calls).toEqual([
+      '/api/v1/tasker/pings',
+      '/api/v1/auth/refresh',
+      '/api/v1/tasker/pings',
+    ])
+  })
+
+  it('does not attempt a second refresh when the refresh itself 401s', async () => {
+    const calls = []
+    const fetchMock = vi.fn(async (path) => {
+      calls.push(path)
+      return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(apiFetch('/api/v1/me')).rejects.toMatchObject({ status: 401 })
+    expect(calls).toEqual(['/api/v1/me', '/api/v1/auth/refresh'])
+  })
+
+  it('invokes the unauthorized handler when the refresh fails', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }),
+    })))
+    const onUnauthorized = vi.fn()
+    setUnauthorizedHandler(onUnauthorized)
+
+    await expect(apiFetch('/api/v1/me')).rejects.toMatchObject({ status: 401 })
+    expect(onUnauthorized).toHaveBeenCalledTimes(1)
+
+    setUnauthorizedHandler(null)
+  })
+
+  it('never tries to refresh the refresh endpoint itself', async () => {
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn(async (path) => {
+      calls.push(path)
+      return { ok: false, status: 401, json: async () => ({ error: 'nope' }) }
+    }))
+
+    await expect(apiFetch('/api/v1/auth/refresh', { method: 'POST' })).rejects.toMatchObject({ status: 401 })
+    expect(calls).toEqual(['/api/v1/auth/refresh'])
+  })
+})
+
+describe('apiFetch body parsing', () => {
+  it('still throws when a 200 carries a malformed body', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('Unexpected end of JSON input') },
+    })))
+
+    await expect(apiFetch('/api/v1/me')).rejects.toThrow(SyntaxError)
   })
 })

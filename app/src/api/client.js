@@ -21,6 +21,20 @@ export class ApiError extends Error {
   }
 }
 
+const REFRESH_PATH = '/api/v1/auth/refresh'
+
+let unauthorizedHandler = null
+
+/**
+ * Register a callback invoked when a 401 could not be recovered by refreshing.
+ * The app uses this to clear session state and route to login.
+ *
+ * @param {(() => void) | null} fn
+ */
+export function setUnauthorizedHandler(fn) {
+  unauthorizedHandler = fn
+}
+
 /**
  * Perform an API request.
  *
@@ -30,6 +44,41 @@ export class ApiError extends Error {
  * @throws {ApiError} When the response status is not ok.
  */
 export async function apiFetch(path, options = {}) {
+  let response = await sendRequest(path, options)
+
+  // A 401 on anything except the refresh endpoint itself gets one recovery
+  // attempt. Refreshing the refresh call would recurse.
+  if (response.status === 401 && path !== REFRESH_PATH) {
+    const refreshed = await sendRequest(REFRESH_PATH, { method: 'POST' })
+    if (refreshed.ok) {
+      response = await sendRequest(path, options)
+    }
+  }
+
+  if (!response.ok) {
+    if (response.status === 401) {
+      unauthorizedHandler?.()
+    }
+    throw new ApiError(response.status, await errorMessage(response))
+  }
+
+  // 204 No Content carries no body at all; anything else that fails to parse
+  // is a real error and must surface rather than becoming null.
+  if (response.status === 204) {
+    return null
+  }
+
+  return response.json()
+}
+
+/**
+ * Issue one request with the mandated headers. No 401 handling here.
+ *
+ * @param {string} path
+ * @param {{ method?: string, body?: unknown, headers?: Record<string,string> }} options
+ * @returns {Promise<Response>}
+ */
+async function sendRequest(path, options = {}) {
   const { method = 'GET', body, headers = {} } = options
 
   // HTTP header names are case-insensitive, but a plain-object spread is not:
@@ -65,42 +114,22 @@ export async function apiFetch(path, options = {}) {
     init.body = JSON.stringify(body)
   }
 
-  const response = await fetch(path, init)
+  return fetch(path, init)
+}
 
-  if (!response.ok) {
-    let message = `Request failed with status ${response.status}`
-    try {
-      const payload = await response.json()
-      if (payload && typeof payload.error === 'string') {
-        message = payload.error
-      } else if (payload && typeof payload.message === 'string') {
-        message = payload.message
-      }
-    } catch {
-      // Non-JSON error body — keep the generic message.
-    }
-    throw new ApiError(response.status, message)
-  }
-
-  // 204 No Content carries no body by definition (every DELETE returns this)
-  // — calling .json() on it throws `SyntaxError: Unexpected end of JSON
-  // input` rather than returning anything useful, so short-circuit before
-  // ever attempting to parse one.
-  if (response.status === 204) {
-    return null
-  }
-
-  // Any other empty-bodied response (e.g. a 200 with no content) fails
-  // .json() the same way; treat that parse failure as "no body" too, rather
-  // than letting a SyntaxError escape as if it were a network/programming
-  // error. This mirrors the same-file precedent of swallowing a non-JSON
-  // body above.
+/**
+ * Extract a human-readable message from an error response.
+ *
+ * @param {Response} response
+ * @returns {Promise<string>}
+ */
+async function errorMessage(response) {
   try {
-    return await response.json()
-  } catch (err) {
-    if (err instanceof SyntaxError) {
-      return null
-    }
-    throw err
+    const payload = await response.json()
+    if (payload && typeof payload.error === 'string') return payload.error
+    if (payload && typeof payload.message === 'string') return payload.message
+  } catch {
+    // Non-JSON error body — fall through to the generic message.
   }
+  return `Request failed with status ${response.status}`
 }
