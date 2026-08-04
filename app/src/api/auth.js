@@ -1,20 +1,27 @@
 import { apiFetch } from './client'
 
 /**
- * Interpret whity's login-family response as one of three outcomes.
+ * Interpret whity's login-family response as one of four outcomes.
  *
- * The server answers a login attempt in one of three ways (see
- * host/.core/src/Auth/AuthHandler.php): a 202 carrying requires_2fa, a 200
- * carrying requires_tenant_selection plus the caller's memberships, or a 200
- * meaning the session is established. 2FA completion can itself require tenant
- * selection, so both entry points share this interpreter.
+ * The server answers a login attempt in one of four ways (see
+ * host/.core/src/Auth/AuthHandler.php): a 202 carrying requires_2fa, a 202
+ * carrying requires_2fa_enrollment (an admin-mandated 2FA policy the caller
+ * hasn't enrolled in yet — enrollment itself happens in whity's admin UI,
+ * out of scope here), a 200 carrying requires_tenant_selection plus the
+ * caller's memberships, or a 200 meaning the session is established. 2FA
+ * completion can itself require tenant selection (or hit the enrollment
+ * gate), so all three entry points (login, completeTwoFactor, selectTenant)
+ * share this interpreter.
  *
  * @param {any} payload
- * @returns {{status: 'authenticated'|'requires_2fa'|'requires_tenant_selection', memberships?: Array<{tenant_id:number,tenant_name:string,role:string}>, user?: any}}
+ * @returns {{status: 'authenticated'|'requires_2fa'|'requires_2fa_enrollment'|'requires_tenant_selection', memberships?: Array<{tenant_id:number,tenant_name:string,role:string}>, user?: any}}
  */
 function interpret(payload) {
   if (payload?.requires_2fa) {
     return { status: 'requires_2fa' }
+  }
+  if (payload?.requires_2fa_enrollment) {
+    return { status: 'requires_2fa_enrollment' }
   }
   if (payload?.requires_tenant_selection) {
     return {

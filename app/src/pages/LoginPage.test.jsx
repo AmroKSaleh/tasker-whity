@@ -81,6 +81,21 @@ describe('LoginPage', () => {
     await waitFor(() => expect(refresh).toHaveBeenCalledTimes(1))
   })
 
+  it('shows the enrollment-required message instead of silently redirecting when the server mandates 2FA enrollment', async () => {
+    login.mockResolvedValue({ status: 'requires_2fa_enrollment' })
+    setup()
+    await submitCredentials()
+
+    // Before Fix 4, this outcome fell through to the 'authenticated' branch,
+    // calling refresh() (which the test would observe here) and navigating
+    // away with no explanation. It must NOT do that, and must instead show
+    // a clear message with a link to the admin portal.
+    await waitFor(() => expect(screen.getByRole('heading', { name: /two-factor authentication required/i })).toBeTruthy())
+    expect(screen.getByText(/organization requires two-factor authentication/i)).toBeTruthy()
+    expect(screen.getByRole('link', { name: /admin portal/i }).getAttribute('href')).toBe('http://localhost:3010/login')
+    expect(refresh).not.toHaveBeenCalled()
+  })
+
   it('surfaces the server error message on a failed login', async () => {
     login.mockRejectedValue(Object.assign(new Error('Invalid credentials'), { status: 401 }))
     setup()

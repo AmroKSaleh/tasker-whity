@@ -25,6 +25,16 @@ export default function LoginPage() {
       setStep('two_factor')
       return
     }
+    if (outcome.status === 'requires_2fa_enrollment') {
+      // An admin-mandated 2FA policy the caller hasn't enrolled in yet.
+      // There is no session to refresh into and no enrollment UI in this
+      // SPA (whity's admin owns that) — without this branch, falling
+      // through to the refresh()/navigate below would silently bounce the
+      // user back to /login with no explanation, since getMe() 401s and
+      // flips the session to anonymous.
+      setStep('2fa_enrollment_required')
+      return
+    }
     if (outcome.status === 'requires_tenant_selection') {
       setMemberships(outcome.memberships)
       setStep('tenant')
@@ -181,6 +191,22 @@ export default function LoginPage() {
                 </button>
               ))}
             </div>
+          </div>
+        )}
+
+        {step === '2fa_enrollment_required' && (
+          <div className="p-6">
+            <h2 className="text-[16px] font-semibold text-ink mb-4">Two-factor authentication required</h2>
+            <p className="text-[13px] text-ink-2 leading-relaxed">
+              Your organization requires two-factor authentication. Please set
+              it up at the admin portal before signing in.
+            </p>
+            <a
+              href="http://localhost:3010/login"
+              className="mt-4 inline-block w-full text-center h-10 leading-10 bg-ink text-paper rounded-md text-[13px] font-semibold tracking-tight transition-all duration-150 hover:bg-ink-2"
+            >
+              Go to admin portal
+            </a>
           </div>
         )}
 

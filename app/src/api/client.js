@@ -25,6 +25,16 @@ const REFRESH_PATH = '/api/v1/auth/refresh'
 
 let unauthorizedHandler = null
 
+// Shared in-flight refresh, so N concurrent callers that all 401 at once
+// (e.g. a page firing several parallel resource fetches right as the access
+// token expires) issue exactly one POST /api/v1/auth/refresh between them
+// rather than one each. The assignment below happens synchronously — before
+// any `await` — so every caller that calls refreshSession() before the
+// in-flight one settles observes the same non-null promise instead of racing
+// to start its own. Cleared in .finally() so the NEXT real 401 (a later,
+// unrelated expiry) starts a fresh refresh rather than reusing a stale one.
+let refreshPromise = null
+
 /**
  * Register a callback invoked when a 401 could not be recovered by refreshing.
  * The app uses this to clear session state and route to login.
@@ -36,12 +46,27 @@ export function setUnauthorizedHandler(fn) {
 }
 
 /**
+ * Start (or join) the single in-flight session refresh.
+ *
+ * @returns {Promise<Response>}
+ */
+function refreshSession() {
+  if (!refreshPromise) {
+    refreshPromise = sendRequest(REFRESH_PATH, { method: 'POST' }).finally(() => {
+      refreshPromise = null
+    })
+  }
+  return refreshPromise
+}
+
+/**
  * Perform an API request.
  *
  * @param {string} path Absolute API path, e.g. '/api/v1/tasker/pings'.
  * @param {{ method?: string, body?: unknown, headers?: Record<string,string> }} [options]
  * @returns {Promise<any>} The parsed JSON response body.
- * @throws {ApiError} When the response status is not ok.
+ * @throws {ApiError} When the response status is not ok, or when an
+ *   otherwise-ok non-204 response's body cannot be parsed as JSON.
  */
 export async function apiFetch(path, options = {}) {
   let response = await sendRequest(path, options)
@@ -49,7 +74,7 @@ export async function apiFetch(path, options = {}) {
   // A 401 on anything except the refresh endpoint itself gets one recovery
   // attempt. Refreshing the refresh call would recurse.
   if (response.status === 401 && path !== REFRESH_PATH) {
-    const refreshed = await sendRequest(REFRESH_PATH, { method: 'POST' })
+    const refreshed = await refreshSession()
     if (refreshed.ok) {
       response = await sendRequest(path, options)
     }
@@ -68,7 +93,19 @@ export async function apiFetch(path, options = {}) {
     return null
   }
 
-  return response.json()
+  try {
+    return await response.json()
+  } catch (err) {
+    // The response was ok (2xx) but had no body, or a body that isn't valid
+    // JSON. That is still a real failure — this deliberately does not widen
+    // the 204-only null-return carve-out above — but it must surface as an
+    // ApiError, not a bare SyntaxError, so every apiFetch failure carries the
+    // same `.status` shape for callers' catch blocks. There's no HTTP status
+    // for "the body didn't parse", so the response's own (successful) status
+    // is attached: it's the closest available answer to "what request was
+    // this", not a claim that this status code implies a parse failure.
+    throw new ApiError(response.status, `Response body could not be parsed as JSON: ${err.message}`)
+  }
 }
 
 /**

@@ -31,6 +31,24 @@ describe('login', () => {
     expect((await login('a@b.c', 'pw')).status).toBe('requires_2fa')
   })
 
+  it('reports requires_2fa_enrollment on a 202 mandatory-enrollment refusal', async () => {
+    // See host/.core/src/Auth/AuthHandler.php's twoFactorPolicyRefusal():
+    // an admin-mandated 2FA policy whose grace period has expired refuses
+    // the login with this shape instead of establishing a session. Without
+    // recognizing it, interpret() falls through to the 'authenticated'
+    // branch with user: null, which silently bounces the caller back to
+    // /login (LoginPage.applyOutcome calls refresh() -> getMe() 401s).
+    stubJson(202, {
+      requires_2fa_enrollment: true,
+      enrollment_token: 'header.payload.sig',
+      enrollment_deadline: 1234567890,
+    })
+
+    const result = await login('a@b.c', 'pw')
+
+    expect(result).toEqual({ status: 'requires_2fa_enrollment' })
+  })
+
   it('reports requires_tenant_selection and passes the memberships through', async () => {
     stubJson(200, {
       requires_tenant_selection: true,
@@ -69,6 +87,15 @@ describe('completeTwoFactor', () => {
     expect(fetchMock.mock.calls[0][0]).toBe('/api/v1/login/2fa')
     expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ code: '123456' })
     expect(result.status).toBe('requires_tenant_selection')
+  })
+
+  it('can also hit the mandatory-enrollment gate, via the same shared interpreter', async () => {
+    // Proves the fix in interpret() covers this entry point too, without
+    // any change to completeTwoFactor itself — all three login-family
+    // functions funnel through interpret().
+    stubJson(202, { requires_2fa_enrollment: true })
+
+    expect((await completeTwoFactor('123456')).status).toBe('requires_2fa_enrollment')
   })
 })
 

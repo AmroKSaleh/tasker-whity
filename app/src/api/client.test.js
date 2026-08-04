@@ -195,6 +195,102 @@ describe('apiFetch body parsing', () => {
       json: async () => { throw new SyntaxError('Unexpected end of JSON input') },
     })))
 
-    await expect(apiFetch('/api/v1/me')).rejects.toThrow(SyntaxError)
+    // Fix 3: this must still throw (the 204-only null carve-out is
+    // unchanged) but now as an ApiError carrying .status, not a bare
+    // SyntaxError — see the next test for the shape assertion.
+    await expect(apiFetch('/api/v1/me')).rejects.toThrow(ApiError)
+  })
+
+  it('wraps a 200 response whose body fails to parse in an ApiError with .status set', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => { throw new SyntaxError('Unexpected end of JSON input') },
+    })))
+
+    const error = await apiFetch('/api/v1/me').catch((e) => e)
+
+    // Before Fix 3 this was a bare SyntaxError with no .status, which is a
+    // different shape from every other apiFetch failure (ApiError). Any
+    // `catch (e) { setError(e.status ? ... : ...) }`-style caller needs one
+    // consistent shape regardless of whether the failure was an HTTP error
+    // or an unparseable-but-2xx body.
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error).not.toBeInstanceOf(SyntaxError)
+    expect(error.status).toBe(200)
+    expect(error.message).toMatch(/could not be parsed as JSON/i)
+  })
+
+  it('wraps a 201 response whose body fails to parse using that response\'s own status', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 201,
+      json: async () => { throw new SyntaxError('Unexpected token') },
+    })))
+
+    const error = await apiFetch('/api/v1/tasker/pings', { method: 'POST', body: {} }).catch((e) => e)
+
+    expect(error).toBeInstanceOf(ApiError)
+    expect(error.status).toBe(201)
+  })
+})
+
+describe('apiFetch concurrent refresh deduplication', () => {
+  it('shares a single in-flight refresh across concurrent 401s and still retries every caller', async () => {
+    // Three distinct resource paths each 401 on their FIRST request, then
+    // succeed once retried after a refresh. Without Fix 2, each of the three
+    // concurrent 401s would independently POST /api/v1/auth/refresh — three
+    // refresh calls instead of one.
+    const paths = ['/api/v1/a', '/api/v1/b', '/api/v1/c']
+    const firstAttemptDone = Object.fromEntries(paths.map((p) => [p, false]))
+    let refreshCalls = 0
+
+    const fetchMock = vi.fn(async (path) => {
+      if (path === '/api/v1/auth/refresh') {
+        refreshCalls += 1
+        return { ok: true, status: 200, json: async () => ({ data: {} }) }
+      }
+      if (!firstAttemptDone[path]) {
+        firstAttemptDone[path] = true
+        return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ data: { path } }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const results = await Promise.all(paths.map((p) => apiFetch(p)))
+
+    expect(results).toEqual(paths.map((p) => ({ data: { path: p } })))
+    expect(refreshCalls).toBe(1)
+    expect(fetchMock.mock.calls.filter(([p]) => p === '/api/v1/auth/refresh')).toHaveLength(1)
+    // Every original request was retried after the single shared refresh.
+    paths.forEach((p) => {
+      expect(fetchMock.mock.calls.filter(([called]) => called === p)).toHaveLength(2)
+    })
+  })
+
+  it('starts a fresh refresh for a later, unrelated 401 after the first one settled', async () => {
+    let refreshCalls = 0
+    let phase = 1
+    const fetchMock = vi.fn(async (path) => {
+      if (path === '/api/v1/auth/refresh') {
+        refreshCalls += 1
+        return { ok: true, status: 200, json: async () => ({ data: {} }) }
+      }
+      if (phase === 1) {
+        phase = 2
+        return { ok: false, status: 401, json: async () => ({ error: 'Unauthorized' }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ data: {} }) }
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    await apiFetch('/api/v1/x')
+    // A second, later 401 (simulating a subsequent token expiry) must start
+    // its own refresh rather than reusing the cleared, already-settled one.
+    phase = 1
+    await apiFetch('/api/v1/x')
+
+    expect(refreshCalls).toBe(2)
   })
 })

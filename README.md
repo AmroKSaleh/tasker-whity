@@ -111,6 +111,13 @@ backend in-network. Because cookies are scoped per host and ignore the port, one
 login is shared across the SPA (`:5174`), the API (`:8010`) and the admin
 (`:3010`).
 
+**Account creation and password resets:** whity-core has no self-service
+signup, magic-link, or password-reset endpoint, and Tasker's SPA deliberately
+does not build its own. For now, both are handled through the admin UI at
+<http://localhost:3010>: an admin creates accounts and can change a user's
+password there. Self-service versions of both are a future slice, not part
+of this port.
+
 Seeded dev accounts come from `host/.env` (`INITIAL_ADMIN_PASSWORD`).
 
 Before `npm run dev` / `npm run app:build`: copy `app/.env.example` to

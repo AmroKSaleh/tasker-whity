@@ -538,21 +538,14 @@ function ComingSoon({ label }) {
 // ── Main settings page ────────────────────────────────────────
 export default function SettingsPage() {
   const navigate = useNavigate()
-  const { signOut } = useSession()
+  const { user, signOut } = useSession()
   const [settings, setSettings] = useState(getAISettings)
   const [showKey, setShowKey] = useState(false)
   const [testStatus, setTestStatus] = useState(null)
   const [saved, setSaved] = useState(false)
-  const [userEmail, setUserEmail] = useState('')
   const [activeTab, setActiveTab] = useState('claude-code')
   const [taskerKey, setTaskerKey] = useState(null)
   const { preference: themePref, setPreference: setThemePref, resolved: themeResolved } = useTheme()
-
-  useEffect(() => {
-    supabase.auth.getUser().then(({ data: { user } }) => {
-      if (user) setUserEmail(user.email ?? '')
-    })
-  }, [])
 
   async function handleSignOut() {
     await signOut()
@@ -817,7 +810,7 @@ export default function SettingsPage() {
                 Account
               </label>
               <div className="flex items-center justify-between gap-3 px-4 py-3 rounded-xl border border-line bg-surf-2">
-                <span className="text-[13px] text-ink truncate">{userEmail}</span>
+                <span className="text-[13px] text-ink truncate">{user?.email ?? ''}</span>
                 <button
                   onClick={handleSignOut}
                   className="shrink-0 px-3 py-1.5 rounded-lg border border-line text-[12px] font-medium text-mute hover:text-red-500 hover:border-red-300 transition-colors"
