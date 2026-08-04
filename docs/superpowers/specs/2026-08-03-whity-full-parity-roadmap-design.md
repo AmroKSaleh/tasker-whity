@@ -98,18 +98,19 @@ Built on Plan A's proven seams, before any Tasker domain exists. Nothing is dele
 
 | Slice | Contents |
 |---|---|
-| **P1 Identity** | SSO, 2FA, sessions, registration, email verification. Largely configuration and UI wiring. Deletes the half-built OAuth pages |
-| **P2 Cross-cutting** | `entity_tags`, `audit_log`, `jobs`, theme/branding, notifications, storage |
-| **P3 Agent platform** | AI principals, MCP tokens, MCP tools admin, rate limits. Conventions and infrastructure — domain tools derive per slice |
-| **P4 AI platform** | Provider key storage and the server-side proxy. Retires Plan A's `tasker_user_ai_settings` debt before anything depends on it |
+| **P1 Identity** | SSO, 2FA, sessions, registration, email verification. Largely configuration and UI wiring. Deletes the half-built OAuth pages. **Complete** |
 
-**Deliberate exception:** P4's consumers are board features (project generation, task chat, focus reasons). Phase 1 builds only the platform half — key storage, proxy, principals. Feature wiring lands with D2. Building the whole of P4 first would mean a proxy with nothing to call it.
+**§5 originally listed P2 (Cross-cutting), P3 (Agent platform), and P4 (AI platform) here, all before D1. Revised after P1 shipped, once each was actually checked against what D1's first commit needs — not against the original grouping:**
+
+- **P2 folded into D1.** Investigation while scoping P2 found it was five unrelated items of very different weight: `entity_tags` and `audit_log` are genuinely consumed by D1 from its first commit (task/project tagging, mutation logging) and need almost no plugin-side work — `entity_tags.entity_type` is an opaque, unvalidated string with no core changes required, and `audit_log` has a single sanctioned writer (`Whity\Core\Audit\AuditLogger::record()`) a handler calls directly, the same way Plan A's handlers already resolve `Database` from the container. `jobs`, theme/branding, and notifications/storage are not consumed by D1 at all, and `jobs` currently has no plugin-registration seam (no `PluginJobsInterface` in the SDK, unlike roles/MCP/frontend-features) — building around it now would be building on a capability that isn't plugin-extensible yet. Rather than a standalone P2 cycle for two integration calls, D1's own opening tasks prove `entity_tags` and `audit_log` against the existing `tasker_pings` entity from Plan A, establishing the convention right before the real board tables use it. `jobs`, theme/branding, notifications, and storage move to whichever later slice actually consumes them (`jobs` and storage plausibly at D9; notifications whenever due-date reminders are built).
+- **P3 (AI principals, MCP tokens, rate limits) is not a D1 dependency.** `AiPrincipal` does not appear anywhere in the MCP transport/dispatcher; Plan A already proved MCP tool derivation works standalone with a plainly-minted bearer token (`POST /api/mcp/tokens`). P3's value — naming and tracking which agent is calling, per-agent rate limits — is an administration layer on top of an already-working surface, not a prerequisite for it. Moved to whenever agent-identity or rate-limiting is actually the active concern; not scheduled ahead of D1.
+- **P4 (AI platform) stays where this document already put it** — consumed by D2 (board frontend: project generation, task chat, focus reasons), not D1. No change; restated here so its absence from "before D1" isn't mistaken for another dropped slice.
 
 ### Phase 2 — Tasker domains on finished foundations
 
 | Slice | Contents |
 |---|---|
-| **D1 Board backend** | Seven tables with dual keys; OU descendant scope resolver; routes. Task tags are `entity_tags` from the first commit; mutations write `audit_log`; `tags text[]` never exists. Establishes the patterns for scale: per-resource route providers, one components registry, a `withTenant()` helper, a handler logging seam |
+| **D1 Board backend** | **Opening tasks: prove `entity_tags` tagging and `AuditLogger::record()` against the existing `tasker_pings` entity** — the folded-in P2 content, done first and cheaply, before real board tables exist to get it wrong on. Then: seven tables with dual keys; OU descendant scope resolver; routes. Task tags are `entity_tags` from the first commit; mutations write `audit_log`; `tags text[]` never exists. Establishes the patterns for scale: per-resource route providers, one components registry, a `withTenant()` helper, a handler logging seam |
 | **D2 Board frontend** | De-Supabase the wired pages behind `app/src/api/`. AI features call P4's proxy. First change to `client.js`: narrow the 204 catch that currently swallows any malformed-JSON body as `null` |
 | **D3 Board transfer** | `import_project` accepting the old `tasker_export` format, so real projects can move |
 | **D4 Local mode (board)** | `.tasker/` files, leases, tombstones, structure manifest, frozen slugs — for board entities only |
