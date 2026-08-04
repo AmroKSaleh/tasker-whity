@@ -95,6 +95,47 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'components' => self::pingComponents(),
                 ],
             ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/pings/{id:\d+}/tags',
+                'handler' => [$this, 'tagPing'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_ping:manage',
+                'schema' => [
+                    'operationId' => 'tag_ping',
+                    'summary' => 'Attach an existing tag to a ping',
+                    'tags' => ['tasker'],
+                    'request' => 'TaskerTagAttachRequest',
+                    'responses' => [
+                        201 => 'TaskerEntityTagResponse',
+                        400 => ['description' => 'tag_id missing or not a positive integer'],
+                        403 => ['description' => 'Missing tasker_ping:manage or unresolved tenant context'],
+                        404 => ['description' => 'Ping not found in the caller\'s tenant'],
+                    ],
+                    'components' => [
+                        'TaskerTagAttachRequest' => [
+                            'type' => 'object',
+                            'required' => ['tag_id'],
+                            'properties' => ['tag_id' => ['type' => 'integer', 'minimum' => 1]],
+                        ],
+                        'TaskerEntityTagResponse' => [
+                            'type' => 'object',
+                            'required' => ['data'],
+                            'properties' => [
+                                'data' => [
+                                    'type' => 'object',
+                                    'required' => ['entity_type', 'entity_id', 'tag_id'],
+                                    'properties' => [
+                                        'entity_type' => ['type' => 'string'],
+                                        'entity_id' => ['type' => 'integer'],
+                                        'tag_id' => ['type' => 'integer'],
+                                    ],
+                                ],
+                            ],
+                        ],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -201,6 +242,23 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new PingApiHandler($this->resolvePdo()))->create($tenantId, $request->getBody());
+    }
+
+    /**
+     * POST /api/tasker/pings/{id}/tags
+     *
+     * @param array<string, string> $params
+     */
+    public function tagPing(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pingId = (int) ($params['id'] ?? 0);
+
+        return (new PingApiHandler($this->resolvePdo()))->tag($tenantId, $pingId, $request->getBody());
     }
 
     /**

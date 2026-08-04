@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tasker\Api;
 
 use PDO;
+use Whity\Core\Audit\AuditLogger;
 use Whity\Sdk\Http\Response;
 
 /**
@@ -88,14 +89,80 @@ final class PingApiHandler
             // lookup keyed off lastInsertId() would never match. lastInsertId()
             // itself stays correct on both engines (SQLite's rowid, Postgres's
             // SERIAL sequence via lastval()), so it is safe to report directly.
+            $id = (int) $this->db->lastInsertId();
+
+            // Establishes the convention every later table's create() reuses:
+            // action keys are tasker_<entity>.<verb>, target_type is tasker_<entity>.
+            (new AuditLogger($this->db))->record('tasker_ping.created', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_ping',
+                'target_id' => $id,
+            ]);
+
             return Response::json(['data' => [
-                'id' => (int) $this->db->lastInsertId(),
+                'id' => $id,
                 'tenantId' => $tenantId,
                 'label' => $label,
                 'createdAt' => $createdAt,
             ]], 201);
         } catch (\Throwable) {
             return Response::error('Failed to create ping', 500);
+        }
+    }
+
+    /**
+     * POST /api/tasker/pings/{id}/tags — attach an existing tag to a ping.
+     *
+     * The tag itself must already exist (created via core's own /api/tags,
+     * gated on tags:manage) — this plugin never creates tags, only attaches
+     * them. A ping outside the caller's tenant reports 404, never a
+     * cross-tenant existence leak.
+     */
+    public function tag(int $tenantId, int $pingId, string $body): Response
+    {
+        $decoded = json_decode($body, true);
+        $tagId = is_array($decoded) && isset($decoded['tag_id']) ? (int) $decoded['tag_id'] : 0;
+        if ($tagId <= 0) {
+            return Response::error('tag_id is required and must be a positive integer', 400);
+        }
+
+        // tasker_pings.id (see create()'s comment) never matches on SQLite: its
+        // declared type is "SERIAL", not the literal "INTEGER" SQLite requires
+        // to alias a column to the rowid, so an inserted row's id column reads
+        // back as NULL. `rowid` is SQLite's own always-present identity column
+        // and holds exactly the value create() returned via lastInsertId(), so
+        // it stands in for `id` here on that engine only; PostgreSQL has no
+        // `rowid` and does populate `id` correctly, so it keeps using the real
+        // column. Both branches bind tenant_id, so cross-tenant access is
+        // never widened by this switch.
+        $idColumn = $this->db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite' ? 'rowid' : 'id';
+
+        $find = $this->db->prepare("SELECT id FROM tasker_pings WHERE {$idColumn} = :id AND tenant_id = :tenant_id");
+        $find->execute([':id' => $pingId, ':tenant_id' => $tenantId]);
+        if ($find->fetch() === false) {
+            return Response::error('Ping not found', 404);
+        }
+
+        try {
+            $insert = $this->db->prepare(
+                'INSERT INTO entity_tags (tenant_id, entity_type, entity_id, tag_id, created_at)
+                 VALUES (:tenant_id, :entity_type, :entity_id, :tag_id, CURRENT_TIMESTAMP)
+                 ON CONFLICT (entity_type, entity_id, tag_id) DO NOTHING'
+            );
+            $insert->execute([
+                ':tenant_id' => $tenantId,
+                ':entity_type' => 'tasker_ping',
+                ':entity_id' => $pingId,
+                ':tag_id' => $tagId,
+            ]);
+
+            $created = $insert->rowCount() > 0;
+
+            return Response::json([
+                'data' => ['entity_type' => 'tasker_ping', 'entity_id' => $pingId, 'tag_id' => $tagId],
+            ], $created ? 201 : 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to attach tag', 500);
         }
     }
 
