@@ -15,6 +15,8 @@ import GoogleTasksPage from './pages/GoogleTasksPage'
 import OAuthAuthorizePage from './pages/OAuthAuthorizePage'
 import InvitePage from './pages/InvitePage'
 import RecycleBinPage from './pages/RecycleBinPage'
+import NewTaskPage from './pages/NewTaskPage'
+import NotFoundPage from './pages/NotFoundPage'
 
 export default function App() {
   return (
@@ -51,6 +53,10 @@ export default function App() {
         <Route path="/connectors/gmail" element={<AuthGuard><GmailPanelPage /></AuthGuard>} />
         <Route path="/recycle-bin" element={<AuthGuard><RecycleBinPage /></AuthGuard>} />
         <Route path="/connectors/google-tasks" element={<AuthGuard><GoogleTasksPage /></AuthGuard>} />
+        {/* Unguarded on purpose: NewTaskPage runs its own auth check so a logged-out deep link
+            keeps its ?title=… prefill through /login?next=…, which AuthGuard would discard. */}
+        <Route path="/new" element={<NewTaskPage />} />
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </BrowserRouter>
   )
