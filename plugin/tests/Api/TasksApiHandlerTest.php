@@ -205,6 +205,55 @@ final class TasksApiHandlerTest extends TestCase
         self::assertSame(422, $response->getStatusCode());
     }
 
+    /**
+     * Fixture for `tasker_groups`, minus the FK/UNIQUE clauses the SQLite
+     * double doesn't need — only the columns move()'s
+     * `tasker_groups g JOIN tasker_sections s ON s.id = g.section_id` query
+     * selects/joins on are required.
+     */
+    private function createGroupsTable(): void
+    {
+        $this->pdo->exec('CREATE TABLE tasker_groups (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, section_id INTEGER NOT NULL)');
+    }
+
+    public function testMoveAcceptsAGroupIdFromTheSameProject(): void
+    {
+        $this->createGroupsTable();
+        // Group 10 lives in section 1, which belongs to the task's own
+        // project (100) — see setUp()'s fixture data.
+        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (10, 7, 1)');
+        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Groupable']))->getBody(), true);
+        $taskId = (int) $created['data']['id'];
+
+        $response = $this->handler->move(7, $taskId, json_encode(['group_id' => 10]));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame(10, $payload['data']['groupId']);
+    }
+
+    /**
+     * Mirrors testMoveRejectsASectionFromADifferentProject(), but for
+     * group_id instead of section_id — move()'s group_id branch (the
+     * `tasker_groups g JOIN tasker_sections s` query) was previously
+     * completely untested, positive or negative.
+     */
+    public function testMoveRejectsAGroupIdFromADifferentProject(): void
+    {
+        $this->createGroupsTable();
+        $this->pdo->exec("INSERT INTO tasker_projects (id, tenant_id) VALUES (200, 7)");
+        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (4, 7, 200)");
+        // Group 20 lives in section 4, which belongs to project 200 — a
+        // DIFFERENT project than the task's own (100).
+        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (20, 7, 4)');
+        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Movable']))->getBody(), true);
+        $taskId = (int) $created['data']['id'];
+
+        $response = $this->handler->move(7, $taskId, json_encode(['group_id' => 20]));
+
+        self::assertSame(422, $response->getStatusCode());
+    }
+
     public function testDeleteRemovesTheTask(): void
     {
         $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Doomed']))->getBody(), true);
@@ -249,6 +298,38 @@ final class TasksApiHandlerTest extends TestCase
 
         $unpinned = json_decode($this->handler->unpin(7, $taskId)->getBody(), true);
         self::assertFalse($unpinned['data']['pinned']);
+    }
+
+    /**
+     * Regression test for a Critical review finding: `toPublicTask()` used
+     * to read `pinned` via a naive `(bool) $row['pinned']` cast. Real
+     * pdo_pgsql can return a boolean column as the STRING "f" for false —
+     * and PHP's `(bool) 'f'` is `true`, since any non-empty string is
+     * truthy — which would report EVERY unpinned task as pinned over the
+     * real API. SQLite's own in-memory double genuinely stores 0/1 (int),
+     * so it never reproduces this on its own; this test forces the exact
+     * Postgres-shaped value onto the column via a raw UPDATE (SQLite has no
+     * real column-type enforcement, so it happily stores the literal
+     * string "f"), then reads it back through the same `listForSection()` →
+     * `toPublicTask()` path production traffic uses, proving the fix
+     * ({@see \Tasker\Api\TasksApiHandler::dbTruthy()}) — not SQLite's
+     * happen-to-be-int storage — is what makes this correct.
+     */
+    public function testPinnedCoercesAPostgresStyleFalseStringToBooleanFalse(): void
+    {
+        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'String-bool row']))->getBody(), true);
+        $taskId = (int) $created['data']['id'];
+
+        // rowid is safe to hardcode here: this test's own PDO is always the
+        // in-memory SQLite double (see setUp()), never Postgres.
+        $this->pdo->exec("UPDATE tasker_tasks SET pinned = 'f' WHERE rowid = {$taskId}");
+
+        $payload = json_decode($this->handler->listForSection(7, 1)->getBody(), true);
+
+        self::assertFalse(
+            $payload['data'][0]['pinned'],
+            'a naive (bool) cast on the string "f" (pdo_pgsql\'s real false representation) evaluates to true'
+        );
     }
 
     public function testTagAttachesAnExistingTagToATask(): void

@@ -414,11 +414,21 @@ final class TasksApiHandler
                  SET pinned = :pinned, pinned_at = {$pinnedAtClause}, updated_at = CURRENT_TIMESTAMP
                  WHERE {$idCol} = :id AND tenant_id = :tenant_id"
             );
-            $stmt->execute([
-                ':pinned' => $pinned,
-                ':id' => $taskId,
-                ':tenant_id' => $tenantId,
-            ]);
+            // bindValue(..., PDO::PARAM_BOOL) deliberately, NOT execute([...]):
+            // PDOStatement::execute(array) binds every value as PDO::PARAM_STR
+            // regardless of PHP type (the same quirk OuScopeResolver::descendantIds()
+            // already documents), and PHP's (string) false is '' — which
+            // PostgreSQL's boolean parser rejects outright
+            // (SQLSTATE[22P02]: invalid input syntax for type boolean: '').
+            // Confirmed empirically against real Postgres: unpin() (pinned =
+            // false) threw exactly that error and surfaced as a bare 500
+            // before this fix, while pin() (pinned = true) happened to work
+            // only by accident, since (string) true is the numeric string
+            // "1", which Postgres's boolean parser does accept.
+            $stmt->bindValue(':pinned', $pinned, PDO::PARAM_BOOL);
+            $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->execute();
 
             if ($stmt->rowCount() === 0) {
                 return Response::error('Task not found', 404);
@@ -620,7 +630,7 @@ final class TasksApiHandler
             'status' => (string) $row['status'],
             'priority' => $row['priority'],
             'dueDate' => $row['due_date'],
-            'pinned' => (bool) $row['pinned'],
+            'pinned' => self::dbTruthy($row['pinned']),
             'sortOrder' => (int) $row['sort_order'],
             'completedAt' => $row['completed_at'],
             'shortId' => $row['short_id'] !== null ? (int) $row['short_id'] : null,
@@ -628,5 +638,38 @@ final class TasksApiHandler
             'createdAt' => (string) $row['created_at'],
             'updatedAt' => (string) $row['updated_at'],
         ];
+    }
+
+    /**
+     * Coerce a DB boolean column to a real bool across drivers.
+     *
+     * CRITICAL: pdo_pgsql can return a boolean column as the STRING "f" for
+     * false, and PHP's (bool) cast treats the non-empty string "f" as TRUE
+     * — a naive `(bool) $row['pinned']` would therefore report every
+     * unpinned task as pinned over the real API. SQLite's in-memory double
+     * (this plugin's own unit tests) yields 0/1 (int) instead; either engine
+     * may also hand back a native PHP bool directly (e.g. a plain, unbound
+     * SELECT literal). This mirrors the identical, four-times-repeated fix
+     * already established elsewhere in this codebase for the exact same
+     * driver quirk — see {@see \Whity\Core\Identity\IdentityProviderRepository::toBool()},
+     * {@see \Whity\Core\Identity\ProfileEmailRepository::toBool()},
+     * {@see \Whity\Core\Relations\RelationRepository::toBool()}, and
+     * `TwoFactorHandler::dbTruthy()`/`AuthHandler::dbTruthy()`/
+     * `TwoFactorPoliciesApiHandler::dbTruthy()` (all private-static, so
+     * replicated here rather than reused directly).
+     *
+     * @param mixed $value Raw column value from a boolean field.
+     */
+    private static function dbTruthy(mixed $value): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value)) {
+            return $value !== 0;
+        }
+        $normalised = strtolower(trim((string) $value));
+
+        return !in_array($normalised, ['', '0', 'f', 'false', 'no'], true);
     }
 }

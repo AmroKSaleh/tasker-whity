@@ -146,11 +146,19 @@ final class TenantIsolationOuTest extends TestCase
      * pattern {@see \Tasker\Api\ProjectsApiHandler::list()} already uses for
      * `:unrestricted`.
      */
-    private function makeTaskDirect(int $tenantId, int $projectId, int $sectionId, string $text, ?string $priority = null, bool $pinned = false): int
-    {
+    private function makeTaskDirect(
+        int $tenantId,
+        int $projectId,
+        int $sectionId,
+        string $text,
+        ?string $priority = null,
+        bool $pinned = false,
+        ?string $dueDate = null,
+        int $sortOrder = 0
+    ): int {
         $stmt = $this->pdo->prepare(
-            "INSERT INTO tasker_tasks (public_id, tenant_id, project_id, section_id, text, priority, pinned, status, created_by, created_at, updated_at)
-             VALUES (gen_random_uuid(), :tenant_id, :project_id, :section_id, :text, :priority, :pinned, 'pending', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            "INSERT INTO tasker_tasks (public_id, tenant_id, project_id, section_id, text, priority, pinned, due_date, sort_order, status, created_by, created_at, updated_at)
+             VALUES (gen_random_uuid(), :tenant_id, :project_id, :section_id, :text, :priority, :pinned, :due_date, :sort_order, 'pending', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
              RETURNING id"
         );
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
@@ -159,6 +167,8 @@ final class TenantIsolationOuTest extends TestCase
         $stmt->bindValue(':text', $text, PDO::PARAM_STR);
         $stmt->bindValue(':priority', $priority, $priority === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
         $stmt->bindValue(':pinned', $pinned, PDO::PARAM_BOOL);
+        $stmt->bindValue(':due_date', $dueDate, $dueDate === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
+        $stmt->bindValue(':sort_order', $sortOrder, PDO::PARAM_INT);
         $stmt->execute();
 
         return (int) $stmt->fetchColumn();
@@ -420,5 +430,66 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->readyWork(7, 2, $projectId);
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * readyWork()'s ORDER BY has four keys: pinned DESC, priority CASE,
+     * due_date ASC NULLS LAST, sort_order ASC. The two tests above only
+     * exercise the first two; this one holds pinned/priority EQUAL across
+     * all three tasks and proves the remaining two keys actually apply:
+     * an earlier due_date ranks first, a null due_date ranks last (NULLS
+     * LAST, not the default ascending-treats-null-as-smallest), and among
+     * fully-tied rows sort_order breaks the tie.
+     */
+    public function testReadyWorkOrdersByDueDateThenSortOrderWhenPinnedAndPriorityAreEqual(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Due date tiebreak project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'No due date', null, false, null, 0);
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Due later, sort 5', null, false, '2027-01-01', 5);
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Due later, sort 1', null, false, '2027-01-01', 1);
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Due soonest', null, false, '2026-01-01', 0);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $payload = json_decode($handler->readyWork(7, null, $projectId)->getBody(), true);
+
+        self::assertSame('Due soonest', $payload['data'][0]['text'], 'the earliest due_date ranks first');
+        self::assertSame('Due later, sort 1', $payload['data'][1]['text'], 'among equal due_dates, the lower sort_order ranks first');
+        self::assertSame('Due later, sort 5', $payload['data'][2]['text']);
+        self::assertSame('No due date', $payload['data'][3]['text'], 'a null due_date ranks LAST, not first');
+    }
+
+    /**
+     * Regression test for a Critical review finding: `toPublicTask()` used
+     * to read `pinned` via a naive `(bool) $row['pinned']` cast, which would
+     * misreport an unpinned task as pinned if pdo_pgsql ever returns the
+     * column as the string "f" (a naive `(bool) 'f'` is `true` in PHP).
+     * Exercising `pin()` then `unpin()` against REAL PostgreSQL — not the
+     * SQLite double, which can't reproduce this — also happens to be the
+     * only way to prove `unpin()` (pinned = false) doesn't itself throw:
+     * `setPinned()` used to bind `:pinned` through a plain array-`execute()`
+     * call, which binds every value as PDO::PARAM_STR, and PHP's
+     * `(string) false` is `''` — which PostgreSQL's boolean parser rejects
+     * outright, so `unpin()` 500'd on every call before that fix too. Both
+     * bugs are covered by this one round trip.
+     */
+    public function testUnpinReportsPinnedAsBooleanFalseOverRealPostgres(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Pin coercion project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Pin toggle');
+
+        $handler = new TasksApiHandler($this->pdo);
+
+        $pinned = $handler->pin(7, $taskId);
+        self::assertSame(200, $pinned->getStatusCode());
+        $pinnedPayload = json_decode($pinned->getBody(), true);
+        self::assertTrue($pinnedPayload['data']['pinned']);
+
+        $unpinned = $handler->unpin(7, $taskId);
+        self::assertSame(200, $unpinned->getStatusCode(), 'unpin() must not 500 when binding pinned = false against Postgres');
+        $unpinnedPayload = json_decode($unpinned->getBody(), true);
+        self::assertFalse($unpinnedPayload['data']['pinned'], 'a real boolean false, not a truthy string representation of it');
     }
 }
