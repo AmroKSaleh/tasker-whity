@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace Tasker;
 
+use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\PingApiHandler;
 use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
+use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
@@ -274,6 +276,69 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/sections/{sectionId:\d+}/groups',
+                'handler' => [$this, 'listGroups'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'list_groups',
+                    'summary' => 'List a section\'s groups',
+                    'tags' => ['tasker'],
+                    'responses' => [200 => ['description' => 'The group list']],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/sections/{sectionId:\d+}/groups',
+                'handler' => [$this, 'createGroup'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'create_group',
+                    'summary' => 'Create a group within a section',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        201 => ['description' => 'The created group'],
+                        400 => ['description' => 'name missing, empty, or too long'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/groups/{id:\d+}',
+                'handler' => [$this, 'updateGroup'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'update_group',
+                    'summary' => 'Update a group\'s name or sort_order',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The updated group'],
+                        400 => ['description' => 'name empty or too long'],
+                        404 => ['description' => 'Group not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/groups/{id:\d+}',
+                'handler' => [$this, 'deleteGroup'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'delete_group',
+                    'summary' => 'Delete a group (its tasks are un-grouped, not deleted)',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        204 => ['description' => 'Deleted'],
+                        404 => ['description' => 'Group not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -354,6 +419,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             GrantTaskerPingPermissions::class,
             CreateTaskerProjectsTable::class,
             CreateTaskerSectionsTable::class,
+            CreateTaskerGroupsTable::class,
             GrantTaskerProjectPermissions::class,
         ];
     }
@@ -537,6 +603,68 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new SectionsApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * GET /api/tasker/sections/{sectionId}/groups
+     *
+     * @param array<string, string> $params
+     */
+    public function listGroups(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new GroupsApiHandler($this->resolvePdo()))->list($tenantId, (int) ($params['sectionId'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/sections/{sectionId}/groups
+     *
+     * @param array<string, string> $params
+     */
+    public function createGroup(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new GroupsApiHandler($this->resolvePdo()))
+            ->create($tenantId, (int) ($params['sectionId'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * PATCH /api/tasker/groups/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function updateGroup(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new GroupsApiHandler($this->resolvePdo()))
+            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * DELETE /api/tasker/groups/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function deleteGroup(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new GroupsApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
     }
 
     /**

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tasker\Tests;
 
+use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
@@ -24,6 +25,7 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
             'tasker_pings' => 'Connectivity probe rows are per-tenant.',
             'tasker_projects' => 'Board projects are per-tenant.',
             'tasker_sections' => 'Board sections are per-tenant.',
+            'tasker_groups' => 'Board groups are per-tenant.',
         ]);
     }
 
@@ -92,6 +94,7 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
             new CreateTaskerPingTable(),
             new CreateTaskerProjectsTable(),
             new CreateTaskerSectionsTable(),
+            new CreateTaskerGroupsTable(),
         ];
     }
 }
