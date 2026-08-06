@@ -29,6 +29,10 @@ final class GroupsApiHandler
 
     public function list(int $tenantId, int $sectionId): Response
     {
+        if (!$this->sectionExists($tenantId, $sectionId)) {
+            return Response::error('Section not found', 404);
+        }
+
         try {
             $idCol = $this->idColumn();
             $stmt = $this->db->prepare(
@@ -56,9 +60,7 @@ final class GroupsApiHandler
             return Response::error('name must be a non-empty string of at most ' . self::MAX_NAME_LENGTH . ' characters', 400);
         }
 
-        $sectionCheck = $this->db->prepare('SELECT id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id');
-        $sectionCheck->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
-        if ($sectionCheck->fetch() === false) {
+        if (!$this->sectionExists($tenantId, $sectionId)) {
             return Response::error('Section not found', 404);
         }
 
@@ -163,6 +165,27 @@ final class GroupsApiHandler
         } catch (\Throwable) {
             return Response::error('Failed to delete group', 500);
         }
+    }
+
+    /**
+     * Whether $sectionId exists and belongs to the caller's tenant.
+     *
+     * Mirrors {@see \Tasker\Api\SectionsApiHandler::projectExists()}: list()
+     * and create() both need to distinguish "the parent has zero children"
+     * from "the parent itself isn't visible to this caller" before running
+     * their own tenant_id + section_id-scoped query, since a plain
+     * `WHERE tenant_id = :t AND section_id = :s` query on tasker_groups
+     * alone can't tell those two cases apart — a nonexistent or
+     * cross-tenant sectionId simply matches zero group rows either way,
+     * which without this check would return 200 with an empty list rather
+     * than 404.
+     */
+    private function sectionExists(int $tenantId, int $sectionId): bool
+    {
+        $stmt = $this->db->prepare('SELECT id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+
+        return $stmt->fetch() !== false;
     }
 
     /**

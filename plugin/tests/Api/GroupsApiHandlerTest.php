@@ -57,6 +57,21 @@ final class GroupsApiHandlerTest extends TestCase
         self::assertSame('A', $payload['data'][0]['name']);
     }
 
+    public function testListRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        // Section 2 belongs to tenant 9, not the caller's tenant 7.
+        $response = $this->handler->list(7, 2);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testListRejects404ForANonexistentSection(): void
+    {
+        $response = $this->handler->list(7, 999);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
     public function testUpdateChangesNameAndSortOrder(): void
     {
         $created = json_decode($this->handler->create(7, 1, json_encode(['name' => 'Original']))->getBody(), true);
