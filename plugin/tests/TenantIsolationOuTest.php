@@ -6,9 +6,11 @@ namespace Tasker\Tests;
 
 use PDO;
 use PHPUnit\Framework\TestCase;
+use Tasker\Api\BoardApiHandler;
 use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\CreateTaskerGroupsTable;
+use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
@@ -19,6 +21,25 @@ use Tasker\Migrations\CreateTaskerTasksTable;
  * PostgreSQL's `= ANY(array)`, which SQLite does not support. Run against the
  * host's own tasker_test database (created fresh per run) rather than the
  * conformance kit's in-memory SQLite double.
+ *
+ * BoardApiHandler::get()'s OU-scope coverage lives here too, for the exact
+ * same reason as ProjectsApiHandler/TasksApiHandler::isProjectVisible(): its
+ * findProject() calls OuScopeResolver::whereFragment('ou_id') unconditionally
+ * (one static SQL template, never a runtime-branched one — see
+ * findProject()'s own docblock), so EVERY call to get() — not just the
+ * OU-restricted cases — hits `= ANY(:scope)` in the SQL text and cannot run
+ * against the SQLite double at all. Confirmed empirically: with that
+ * unconditional call in place, both of BoardApiHandlerTest's SQLite-backed
+ * cases (including the plain "unrestricted caller" composition case) throw
+ * `PDOException: SQLSTATE[HY000]: General error: 1 no such function: ANY`
+ * from `PDO::prepare()` itself, before any parameter is ever bound — SQLite
+ * resolves function names at prepare time, so `:unrestricted = TRUE` never
+ * gets a chance to short-circuit it away. `plugin/tests/Api/BoardApiHandlerTest.php`
+ * (SQLite) was therefore removed entirely and ALL of its coverage — board
+ * composition (sections/groups/tasks/milestones assembly, ungroupedTasks
+ * shape) as well as OU-restricted/cross-tenant visibility — moved here,
+ * mirroring the fact that ProjectsApiHandler itself has no SQLite-backed
+ * unit test file at all.
  */
 final class TenantIsolationOuTest extends TestCase
 {
@@ -70,10 +91,18 @@ final class TenantIsolationOuTest extends TestCase
 
         (new CreateTaskerProjectsTable())->up($this->pdo);
         (new CreateTaskerSectionsTable())->up($this->pdo);
+        // Drop order matters: tasker_milestones FK-references tasker_tasks,
+        // so it must be dropped before tasker_tasks — otherwise `DROP TABLE
+        // tasker_tasks CASCADE` only cascade-drops the FK CONSTRAINT on
+        // tasker_milestones (Postgres semantics for a referenced table being
+        // dropped), leaving the table itself, and any stale rows from a
+        // PRIOR test run, in place for the next test.
+        $this->pdo->exec('DROP TABLE IF EXISTS tasker_milestones CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_tasks CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_groups CASCADE');
         (new CreateTaskerGroupsTable())->up($this->pdo);
         (new CreateTaskerTasksTable())->up($this->pdo);
+        (new CreateTaskerMilestonesTable())->up($this->pdo);
     }
 
     /**
@@ -145,6 +174,11 @@ final class TenantIsolationOuTest extends TestCase
      * `bindValue(..., PDO::PARAM_BOOL)` call, matching the same explicit-bool
      * pattern {@see \Tasker\Api\ProjectsApiHandler::list()} already uses for
      * `:unrestricted`.
+     *
+     * `$groupId` was added (trailing, nullable, defaulted) for the
+     * BoardApiHandler tests below, which need a task placed inside a group
+     * rather than left ungrouped — every existing call site keeps working
+     * unchanged since it's optional and appended last.
      */
     private function makeTaskDirect(
         int $tenantId,
@@ -154,21 +188,58 @@ final class TenantIsolationOuTest extends TestCase
         ?string $priority = null,
         bool $pinned = false,
         ?string $dueDate = null,
-        int $sortOrder = 0
+        int $sortOrder = 0,
+        ?int $groupId = null
     ): int {
         $stmt = $this->pdo->prepare(
-            "INSERT INTO tasker_tasks (public_id, tenant_id, project_id, section_id, text, priority, pinned, due_date, sort_order, status, created_by, created_at, updated_at)
-             VALUES (gen_random_uuid(), :tenant_id, :project_id, :section_id, :text, :priority, :pinned, :due_date, :sort_order, 'pending', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            "INSERT INTO tasker_tasks (public_id, tenant_id, project_id, section_id, group_id, text, priority, pinned, due_date, sort_order, status, created_by, created_at, updated_at)
+             VALUES (gen_random_uuid(), :tenant_id, :project_id, :section_id, :group_id, :text, :priority, :pinned, :due_date, :sort_order, 'pending', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
              RETURNING id"
         );
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
         $stmt->bindValue(':project_id', $projectId, PDO::PARAM_INT);
         $stmt->bindValue(':section_id', $sectionId, PDO::PARAM_INT);
+        $stmt->bindValue(':group_id', $groupId, $groupId === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
         $stmt->bindValue(':text', $text, PDO::PARAM_STR);
         $stmt->bindValue(':priority', $priority, $priority === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
         $stmt->bindValue(':pinned', $pinned, PDO::PARAM_BOOL);
         $stmt->bindValue(':due_date', $dueDate, $dueDate === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
         $stmt->bindValue(':sort_order', $sortOrder, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    private function makeGroupDirect(int $tenantId, int $sectionId, string $name = 'Frontend'): int
+    {
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tasker_groups (public_id, tenant_id, section_id, name, slug, created_at)
+             VALUES (gen_random_uuid(), :tenant_id, :section_id, :name, :slug, CURRENT_TIMESTAMP) RETURNING id"
+        );
+        $stmt->execute([
+            ':tenant_id' => $tenantId,
+            ':section_id' => $sectionId,
+            ':name' => $name,
+            ':slug' => strtolower($name),
+        ]);
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    private function makeMilestoneDirect(int $tenantId, int $taskId, string $summary, bool $checked = false): int
+    {
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tasker_milestones (public_id, tenant_id, task_id, summary, checked, created_at)
+             VALUES (gen_random_uuid(), :tenant_id, :task_id, :summary, :checked, CURRENT_TIMESTAMP) RETURNING id"
+        );
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':task_id', $taskId, PDO::PARAM_INT);
+        $stmt->bindValue(':summary', $summary, PDO::PARAM_STR);
+        // bindValue(..., PDO::PARAM_BOOL), not a plain execute() array — the
+        // same reason `:pinned` above needs it: PDOStatement::execute(array)
+        // binds every value as PDO::PARAM_STR, and PHP's (string) false is
+        // '', which PostgreSQL's boolean parser rejects.
+        $stmt->bindValue(':checked', $checked, PDO::PARAM_BOOL);
         $stmt->execute();
 
         return (int) $stmt->fetchColumn();
@@ -491,5 +562,76 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(200, $unpinned->getStatusCode(), 'unpin() must not 500 when binding pinned = false against Postgres');
         $unpinnedPayload = json_decode($unpinned->getBody(), true);
         self::assertFalse($unpinnedPayload['data']['pinned'], 'a real boolean false, not a truthy string representation of it');
+    }
+
+    /**
+     * BoardApiHandler::get()'s composition — sections, groups, each group's
+     * tasks, each task's milestones, and ungroupedTasks for tasks with no
+     * group_id — proven here rather than a SQLite unit test; see this
+     * class's own docblock for why findProject()'s unconditional
+     * OuScopeResolver::whereFragment() call rules that out entirely, not
+     * just for the OU-restricted cases below.
+     */
+    public function testGetComposesSectionsGroupsTasksAndMilestones(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Board project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId = $this->makeGroupDirect(7, $sectionId);
+        $groupedTaskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Ship it', null, false, null, 0, $groupId);
+        $this->makeMilestoneDirect(7, $groupedTaskId, 'Write code');
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Loose task');
+
+        $handler = new BoardApiHandler($this->pdo);
+        $payload = json_decode($handler->get(7, null, $projectId)->getBody(), true);
+
+        self::assertSame($projectId, $payload['data']['project']['id']);
+        self::assertCount(1, $payload['data']['sections']);
+        self::assertSame('Backlog', $payload['data']['sections'][0]['name']);
+        self::assertCount(1, $payload['data']['sections'][0]['groups']);
+        self::assertCount(1, $payload['data']['sections'][0]['groups'][0]['tasks']);
+        self::assertSame('Ship it', $payload['data']['sections'][0]['groups'][0]['tasks'][0]['text']);
+        self::assertCount(1, $payload['data']['sections'][0]['groups'][0]['tasks'][0]['milestones']);
+        self::assertSame('Write code', $payload['data']['sections'][0]['groups'][0]['tasks'][0]['milestones'][0]['summary']);
+        self::assertCount(1, $payload['data']['sections'][0]['ungroupedTasks'], 'the un-grouped task must surface under ungroupedTasks, not be dropped');
+        self::assertSame('Loose task', $payload['data']['sections'][0]['ungroupedTasks'][0]['text']);
+    }
+
+    public function testGet404sForAProjectOutsideTheCallersTenant(): void
+    {
+        $otherTenantProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+
+        $handler = new BoardApiHandler($this->pdo);
+        $response = $handler->get(7, null, $otherTenantProjectId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testGetShowsAParentOuCallerAChildOusProjectBoard(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $childProjectId = $this->makeProjectDirect(7, 2, 'Child OU project');
+        $sectionId = $this->makeSectionDirect(7, $childProjectId);
+        $this->makeTaskDirect(7, $childProjectId, $sectionId, 'Visible to the parent');
+
+        $handler = new BoardApiHandler($this->pdo);
+        $payload = json_decode($handler->get(7, 1, $childProjectId)->getBody(), true);
+
+        self::assertSame($childProjectId, $payload['data']['project']['id']);
+        self::assertSame('Visible to the parent', $payload['data']['sections'][0]['ungroupedTasks'][0]['text']);
+    }
+
+    public function testGet404sForASiblingOuCallersBoard(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+
+        $handler = new BoardApiHandler($this->pdo);
+        // Caller scoped to OU 2; the project lives in sibling OU 3.
+        $response = $handler->get(7, 2, $siblingProjectId);
+
+        self::assertSame(404, $response->getStatusCode());
     }
 }

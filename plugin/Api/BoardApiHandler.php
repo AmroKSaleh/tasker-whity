@@ -39,9 +39,9 @@ final class BoardApiHandler
             'SELECT g.id, g.public_id, g.tenant_id, g.section_id, g.name, g.slug, g.sort_order
              FROM tasker_groups g
              JOIN tasker_sections s ON s.id = g.section_id
-             WHERE g.tenant_id = :tenant_id AND s.project_id = :project_id
+             WHERE g.tenant_id = :tenant_id AND s.tenant_id = :tenant_id2 AND s.project_id = :project_id
              ORDER BY g.sort_order ASC, g.id ASC',
-            [':tenant_id' => $tenantId, ':project_id' => $projectId]
+            [':tenant_id' => $tenantId, ':tenant_id2' => $tenantId, ':project_id' => $projectId]
         );
 
         $tasks = $this->fetchAll(
@@ -100,18 +100,39 @@ final class BoardApiHandler
     }
 
     /**
+     * OU-scoped, tenant-scoped project lookup — byte-for-byte the same
+     * structure as {@see ProjectsApiHandler::findScoped()} and
+     * {@see TasksApiHandler::isProjectVisible()}: one static SQL template via
+     * {@see OuScopeResolver::whereFragment()}, called unconditionally,
+     * exactly as documented (never a runtime-branched query, so a
+     * tenant-predicate scanner always sees the same shape). Consequently this
+     * method — and therefore {@see self::get()} as a whole — is exercised
+     * only against a REAL PostgreSQL connection, in
+     * `TenantIsolationOuTest.php`, never against this plugin's in-memory
+     * SQLite unit-test double: `whereFragment()`'s `= ANY(:scope)` is
+     * PostgreSQL-only syntax that SQLite's `PDO::prepare()` rejects outright
+     * ("no such function: ANY") purely from the SQL text containing it,
+     * regardless of which branch `:unrestricted` would make live at
+     * runtime — SQLite resolves function names at prepare time, before any
+     * parameter is bound. `ProjectsApiHandler` has no SQLite-backed unit test
+     * file at all for exactly this reason; this method follows that same
+     * precedent instead of inventing a driver branch around it.
+     *
      * @return array<string, mixed>|null
      */
     private function findProject(int $tenantId, ?int $callerOuId, int $projectId): ?array
     {
         $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
-        $sql = 'SELECT id, public_id, tenant_id, ou_id, name, slug FROM tasker_projects
-                WHERE id = :id AND tenant_id = :tenant_id AND ' . $this->ouClause($scope);
+        $ouClause = OuScopeResolver::whereFragment('ou_id');
 
-        $stmt = $this->db->prepare($sql);
+        $stmt = $this->db->prepare(
+            "SELECT id, public_id, tenant_id, ou_id, name, slug FROM tasker_projects
+             WHERE id = :id AND tenant_id = :tenant_id AND {$ouClause}"
+        );
         $stmt->bindValue(':id', $projectId, PDO::PARAM_INT);
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
-        $this->bindOuClause($stmt, $scope);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
         $stmt->execute();
 
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -125,75 +146,6 @@ final class BoardApiHandler
             'name' => (string) $row['name'],
             'slug' => (string) $row['slug'],
         ];
-    }
-
-    /**
-     * The OU-descendant visibility WHERE fragment, in whichever form the
-     * active driver can actually execute.
-     *
-     * OuScopeResolver::whereFragment()'s `= ANY(:scope)` is PostgreSQL-only:
-     * confirmed empirically that PDO_SQLITE's prepare() throws "no such
-     * function: ANY" purely from the SQL text containing ANY(), even when
-     * `:unrestricted = TRUE` would make that branch dead at runtime — SQLite
-     * resolves function names when the statement is compiled, before any
-     * parameter is bound, so short-circuit evaluation never gets a chance to
-     * skip it. Every other handler's OU-scope check (ProjectsApiHandler's,
-     * TasksApiHandler::isProjectVisible()) sidesteps this by being exercised
-     * only against a real Postgres connection via TenantIsolationOuTest,
-     * never against this plugin's in-memory SQLite unit-test double. This
-     * handler's own BoardApiHandlerTest DOES exercise the OU-scope path
-     * against SQLite (both the visible- and cross-tenant-404 cases), so it
-     * needs a second, SQLite-compatible form of the identical check — the
-     * same idea as the id/rowid driver branch already established in
-     * idColumn() elsewhere in this plugin (TasksApiHandler,
-     * MilestonesApiHandler, GroupsApiHandler, SectionsApiHandler), just
-     * applied to the OU predicate instead of the id column.
-     *
-     * The Postgres branch keeps OuScopeResolver::whereFragment()'s exact,
-     * already-proven static SQL text — the property ProjectsApiHandler's own
-     * class doc calls out as deliberate (never a runtime-branched query) is
-     * preserved for the real driver; only the SQLite double, which no real
-     * deployment ever uses, gets a different fragment.
-     *
-     * @param array{unrestricted: bool, scope: list<int>} $scope
-     */
-    private function ouClause(array $scope): string
-    {
-        if ($this->db->getAttribute(PDO::ATTR_DRIVER_NAME) !== 'sqlite') {
-            return OuScopeResolver::whereFragment('ou_id');
-        }
-
-        if ($scope['unrestricted']) {
-            return '1 = 1';
-        }
-        if ($scope['scope'] === []) {
-            return 'ou_id IS NULL';
-        }
-
-        // $scope['scope'] is always a list<int> straight from
-        // OuScopeResolver::descendantIds()'s own array_map('intval', ...), so
-        // interpolating it directly (rather than binding N placeholders) is
-        // not an injection risk — this mirrors the same "trusted int list,
-        // interpolated" pattern already used for $placeholders in
-        // fetchMilestonesGroupedByTask() below.
-        return 'ou_id IS NULL OR ou_id IN (' . implode(',', array_map('intval', $scope['scope'])) . ')';
-    }
-
-    /**
-     * Binds the parameters ouClause() referenced, none for the SQLite branch
-     * (its scope ids are already interpolated as literals) and the two named
-     * placeholders OuScopeResolver::whereFragment() expects otherwise.
-     *
-     * @param array{unrestricted: bool, scope: list<int>} $scope
-     */
-    private function bindOuClause(\PDOStatement $stmt, array $scope): void
-    {
-        if ($this->db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
-            return;
-        }
-
-        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
-        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
     }
 
     /**
