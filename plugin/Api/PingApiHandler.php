@@ -6,6 +6,8 @@ namespace Tasker\Api;
 
 use PDO;
 use Whity\Core\Audit\AuditLogger;
+use Whity\Core\Taxonomy\EntityTagRepository;
+use Whity\Core\Taxonomy\TagRepository;
 use Whity\Sdk\Http\Response;
 
 /**
@@ -115,8 +117,11 @@ final class PingApiHandler
      *
      * The tag itself must already exist (created via core's own /api/tags,
      * gated on tags:manage) — this plugin never creates tags, only attaches
-     * them. A ping outside the caller's tenant reports 404, never a
-     * cross-tenant existence leak.
+     * them, and the tag must belong to the caller's tenant (a foreign/absent
+     * tag_id is a 422 validation failure, never a confirmation of its
+     * existence in another tenant — mirrors core's own
+     * {@see \Whity\Api\EntityTagsApiHandler::attach()}). A ping outside the
+     * caller's tenant reports 404, never a cross-tenant existence leak.
      */
     public function tag(int $tenantId, int $pingId, string $body): Response
     {
@@ -143,20 +148,20 @@ final class PingApiHandler
             return Response::error('Ping not found', 404);
         }
 
-        try {
-            $insert = $this->db->prepare(
-                'INSERT INTO entity_tags (tenant_id, entity_type, entity_id, tag_id, created_at)
-                 VALUES (:tenant_id, :entity_type, :entity_id, :tag_id, CURRENT_TIMESTAMP)
-                 ON CONFLICT (entity_type, entity_id, tag_id) DO NOTHING'
-            );
-            $insert->execute([
-                ':tenant_id' => $tenantId,
-                ':entity_type' => 'tasker_ping',
-                ':entity_id' => $pingId,
-                ':tag_id' => $tagId,
-            ]);
+        // The tag must belong to the caller's tenant. TagRepository::find()
+        // already binds tenant_id, so a foreign-tenant tag_id is
+        // indistinguishable from a non-existent one — a validation failure
+        // (422), never a cross-tenant leak.
+        if ((new TagRepository($this->db))->find($tenantId, $tagId) === null) {
+            return Response::error('tag not found', 422, ['tag_id' => $tagId]);
+        }
 
-            $created = $insert->rowCount() > 0;
+        try {
+            // Delegates the actual INSERT to core's own EntityTagRepository —
+            // the canonical, single writer for entity_tags (see its class
+            // doc) — rather than re-issuing the raw SQL here.
+            $created = (new EntityTagRepository($this->db))
+                ->attach($tenantId, 'tasker_ping', $pingId, $tagId);
 
             return Response::json([
                 'data' => ['entity_type' => 'tasker_ping', 'entity_id' => $pingId, 'tag_id' => $tagId],

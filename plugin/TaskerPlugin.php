@@ -107,10 +107,12 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'tags' => ['tasker'],
                     'request' => 'TaskerTagAttachRequest',
                     'responses' => [
+                        200 => ['description' => 'Tag already attached (idempotent)'],
                         201 => 'TaskerEntityTagResponse',
                         400 => ['description' => 'tag_id missing or not a positive integer'],
                         403 => ['description' => 'Missing tasker_ping:manage or unresolved tenant context'],
                         404 => ['description' => 'Ping not found in the caller\'s tenant'],
+                        422 => ['description' => 'tag_id does not belong to the caller\'s tenant'],
                     ],
                     'components' => [
                         'TaskerTagAttachRequest' => [

@@ -8,6 +8,7 @@ use PDO;
 use PHPUnit\Framework\TestCase;
 use Tasker\Api\PingApiHandler;
 use Tasker\Migrations\CreateTaskerPingTable;
+use Tasker\Tests\Support\SqlitePolyfills;
 
 final class PingApiHandlerTest extends TestCase
 {
@@ -19,21 +20,50 @@ final class PingApiHandlerTest extends TestCase
         $this->pdo = new PDO('sqlite::memory:');
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
-        // AuditLogger::record() (whity-core) writes its created_at via the
-        // engine SQL function NOW(), which PostgreSQL provides natively but
-        // SQLite does not. Registering a NOW() UDF here is a test-only
-        // accommodation for the in-memory SQLite double — the same kind of
-        // substitution testCreateWritesAnAuditLogEntry() below makes for the
-        // audit_log.metadata column (TEXT instead of the real host's JSONB).
-        // It changes no production code, and every real deployment runs on
-        // PostgreSQL, where NOW() already works natively.
-        $this->pdo->sqliteCreateFunction('NOW', static function (): string {
-            return (new \DateTimeImmutable('now', new \DateTimeZone('UTC')))->format('Y-m-d H:i:s');
-        }, 0);
+        // Pinned whity-core classes this handler constructs directly
+        // (AuditLogger, EntityTagRepository) hardcode NOW() in their own SQL;
+        // see SqlitePolyfills for why this in-memory SQLite double needs the
+        // shim and real PostgreSQL deployments never do.
+        SqlitePolyfills::registerNowFunction($this->pdo);
 
         (new CreateTaskerPingTable())->up($this->pdo);
 
         $this->handler = new PingApiHandler($this->pdo);
+    }
+
+    /**
+     * Fixture for whity-core's `tags` table (see
+     * host/.core/database/migrations/063_create_taxonomy_tables.php), minus
+     * the FK REFERENCES clauses the in-memory SQLite double doesn't need.
+     * Only the columns TagRepository::find() selects are required.
+     */
+    private function createTagsTable(): void
+    {
+        $this->pdo->exec('
+            CREATE TABLE tags (
+                id INTEGER NOT NULL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                group_id INTEGER NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP)
+            )
+        ');
+    }
+
+    /**
+     * Insert one `tags` row owned by $tenantId with the given $id, so
+     * PingApiHandler::tag()'s TagRepository::find($tenantId, $id) lookup
+     * succeeds. $id is supplied explicitly (never relying on autoincrement),
+     * so this fixture is unaffected by the SQLite/SERIAL identity quirk
+     * documented on PingApiHandler::create() and ::tag().
+     */
+    private function insertTag(int $id, int $tenantId): void
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO tags (id, tenant_id, group_id, name) VALUES (:id, :tenant_id, 1, :name)'
+        );
+        $stmt->execute([':id' => $id, ':tenant_id' => $tenantId, ':name' => 'tag-' . $id]);
     }
 
     public function testCreateStampsTheCallersTenant(): void
@@ -111,6 +141,8 @@ final class PingApiHandlerTest extends TestCase
                 PRIMARY KEY (entity_type, entity_id, tag_id)
             )
         ');
+        $this->createTagsTable();
+        $this->insertTag(42, 7);
 
         $created = json_decode($this->handler->create(7, json_encode(['label' => 'taggable']))->getBody(), true);
         $pingId = $created['data']['id'];
@@ -138,6 +170,8 @@ final class PingApiHandlerTest extends TestCase
                 PRIMARY KEY (entity_type, entity_id, tag_id)
             )
         ');
+        $this->createTagsTable();
+        $this->insertTag(42, 7);
 
         $created = json_decode($this->handler->create(7, json_encode(['label' => 'taggable']))->getBody(), true);
         $pingId = $created['data']['id'];
@@ -171,5 +205,22 @@ final class PingApiHandlerTest extends TestCase
         $response = $this->handler->tag(7, $pingId, json_encode(['tag_id' => 42]));
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testTagRejectsATagBelongingToADifferentTenant(): void
+    {
+        // No entity_tags table is created: the tag-ownership check must
+        // reject before any attempt to write the association. If it didn't,
+        // the INSERT would throw on the missing table and surface as a 500,
+        // not silently pass this test.
+        $this->createTagsTable();
+        $this->insertTag(42, 9);
+
+        $created = json_decode($this->handler->create(7, json_encode(['label' => 'taggable']))->getBody(), true);
+        $pingId = $created['data']['id'];
+
+        $response = $this->handler->tag(7, $pingId, json_encode(['tag_id' => 42]));
+
+        self::assertSame(422, $response->getStatusCode());
     }
 }
