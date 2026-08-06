@@ -5,8 +5,13 @@ declare(strict_types=1);
 namespace Tasker;
 
 use Tasker\Api\PingApiHandler;
+use Tasker\Api\ProjectsApiHandler;
+use Tasker\Api\SectionsApiHandler;
 use Tasker\Migrations\CreateTaskerPingTable;
+use Tasker\Migrations\CreateTaskerProjectsTable;
+use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\GrantTaskerPingPermissions;
+use Tasker\Migrations\GrantTaskerProjectPermissions;
 use Whity\Sdk\Http\Request;
 use Whity\Sdk\Http\Response;
 use Whity\Sdk\PluginInterface;
@@ -138,6 +143,137 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/projects',
+                'handler' => [$this, 'listProjects'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:view',
+                'schema' => [
+                    'operationId' => 'list_projects',
+                    'summary' => 'List the caller\'s OU-scoped projects',
+                    'tags' => ['tasker'],
+                    'responses' => [200 => ['description' => 'The project list']],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/projects',
+                'handler' => [$this, 'createProject'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:manage',
+                'schema' => [
+                    'operationId' => 'create_project',
+                    'summary' => 'Create a project (with its default Backlog section)',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        201 => ['description' => 'The created project'],
+                        400 => ['description' => 'name missing, empty, or too long'],
+                        422 => ['description' => 'ou_id is outside the caller\'s scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/projects/{id:\d+}',
+                'handler' => [$this, 'updateProject'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:manage',
+                'schema' => [
+                    'operationId' => 'update_project',
+                    'summary' => 'Update a project\'s name, ou_id, prefix, or sort_order',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The updated project'],
+                        400 => ['description' => 'name empty/too long, or prefix not 2-5 uppercase letters'],
+                        404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
+                        422 => ['description' => 'ou_id is outside the caller\'s scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/projects/{id:\d+}',
+                'handler' => [$this, 'deleteProject'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:manage',
+                'schema' => [
+                    'operationId' => 'delete_project',
+                    'summary' => 'Delete a project and everything under it',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        204 => ['description' => 'Deleted'],
+                        404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/projects/{projectId:\d+}/sections',
+                'handler' => [$this, 'listSections'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'list_sections',
+                    'summary' => 'List a project\'s sections',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The section list'],
+                        404 => ['description' => 'Project not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/projects/{projectId:\d+}/sections',
+                'handler' => [$this, 'createSection'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'create_section',
+                    'summary' => 'Create a section within a project',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        201 => ['description' => 'The created section'],
+                        400 => ['description' => 'name missing, empty, or too long'],
+                        404 => ['description' => 'Project not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/sections/{id:\d+}',
+                'handler' => [$this, 'updateSection'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'update_section',
+                    'summary' => 'Update a section\'s name, description, sort_order, or view_prefs',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The updated section'],
+                        400 => ['description' => 'name empty or too long'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/sections/{id:\d+}',
+                'handler' => [$this, 'deleteSection'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'delete_section',
+                    'summary' => 'Delete a section (and its groups/tasks)',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        204 => ['description' => 'Deleted'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                        409 => ['description' => 'Cannot delete a project\'s last remaining section'],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -194,6 +330,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         return [
             'tasker_ping:view',
             'tasker_ping:manage',
+            'tasker_project:view',
+            'tasker_project:manage',
+            'tasker_structure:manage',
         ];
     }
 
@@ -213,6 +352,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         return [
             CreateTaskerPingTable::class,
             GrantTaskerPingPermissions::class,
+            CreateTaskerProjectsTable::class,
+            CreateTaskerSectionsTable::class,
+            GrantTaskerProjectPermissions::class,
         ];
     }
 
@@ -261,6 +403,202 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $pingId = (int) ($params['id'] ?? 0);
 
         return (new PingApiHandler($this->resolvePdo()))->tag($tenantId, $pingId, $request->getBody());
+    }
+
+    /**
+     * GET /api/tasker/projects
+     *
+     * @param array<string, string> $params
+     */
+    public function listProjects(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+
+        return (new ProjectsApiHandler($pdo))->list($tenantId, $this->callerOuId($pdo, $request, $tenantId));
+    }
+
+    /**
+     * POST /api/tasker/projects
+     *
+     * @param array<string, string> $params
+     */
+    public function createProject(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $createdBy = $this->callerProfileId($request) ?? 0;
+
+        return (new ProjectsApiHandler($pdo))
+            ->create($tenantId, $this->callerOuId($pdo, $request, $tenantId), $createdBy, $request->getBody());
+    }
+
+    /**
+     * PATCH /api/tasker/projects/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function updateProject(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+
+        return (new ProjectsApiHandler($pdo))
+            ->update($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * DELETE /api/tasker/projects/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function deleteProject(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+
+        return (new ProjectsApiHandler($pdo))
+            ->delete($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * GET /api/tasker/projects/{projectId}/sections
+     *
+     * @param array<string, string> $params
+     */
+    public function listSections(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new SectionsApiHandler($this->resolvePdo()))->list($tenantId, (int) ($params['projectId'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/projects/{projectId}/sections
+     *
+     * @param array<string, string> $params
+     */
+    public function createSection(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new SectionsApiHandler($this->resolvePdo()))
+            ->create($tenantId, (int) ($params['projectId'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * PATCH /api/tasker/sections/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function updateSection(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new SectionsApiHandler($this->resolvePdo()))
+            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * DELETE /api/tasker/sections/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function deleteSection(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new SectionsApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * The caller's own profile (user) id, from the JWT payload RbacMiddleware
+     * attaches to the request as {@see Request::$user} once a route's
+     * requiredRole/requiredPermission check passes. Null only when $user is
+     * absent/malformed, which should not happen on any route reachable here
+     * (every tasker_project/tasker_structure route requires a permission),
+     * but is handled defensively rather than assumed.
+     *
+     * `profile_id` is the canonical identity claim (ADR 0005 §1) — the same
+     * field RbacMiddleware itself validates as an int before attaching
+     * $user — mirroring the established pattern used across the host's own
+     * handlers (e.g. DocumentTemplatesApiHandler, AiPrincipalsApiHandler).
+     *
+     * NOTE ON A BRIEF DEVIATION: the plan this task implements sketched this
+     * as `TenantContext::getUserId()`. `Whity\Core\Tenant\TenantContext`
+     * (verified directly against its source, per this task's own
+     * instructions) exposes only getTenantId()/getId()/hasTenant() —
+     * it has no user/profile accessor at all, tenant id is the only thing it
+     * ever holds. The actor's profile id lives on the Request instead.
+     */
+    private function callerProfileId(Request $request): ?int
+    {
+        $actor = $request->user;
+
+        return is_object($actor) && isset($actor->profile_id) && is_int($actor->profile_id)
+            ? $actor->profile_id
+            : null;
+    }
+
+    /**
+     * The caller's own OU for the active tenant (nullable — null means
+     * tenant-root/unrestricted).
+     *
+     * NOTE ON A BRIEF DEVIATION: the plan sketched this as
+     * `TenantContext::getOuId()`, which does not exist (see
+     * {@see self::callerProfileId()}'s note — TenantContext holds only the
+     * tenant id). No JWT claim carries OU either (verified against every
+     * `jwtParser->create()` call site in AuthHandler: profile_id,
+     * active_tenant_id, email, role, token_epoch — no ou_id/active_ou_id).
+     * The caller's OU is a property of their `memberships` row for this
+     * tenant, so it takes one extra lookup via the host's own
+     * MembershipRepository (the same repository AuthHandler itself uses to
+     * resolve a membership's OU at login) rather than a static accessor.
+     *
+     * A caller with no membership row for this tenant (should not happen —
+     * RBAC already required a role/permission scoped to this tenant to reach
+     * here) is treated as unrestricted rather than failing closed, matching
+     * OuScopeResolver's own documented stance that a null OU means
+     * tenant-root visibility, not "see nothing".
+     */
+    private function callerOuId(\PDO $pdo, Request $request, int $tenantId): ?int
+    {
+        $profileId = $this->callerProfileId($request);
+        if ($profileId === null) {
+            return null;
+        }
+
+        $membership = (new \Whity\Core\Identity\MembershipRepository($pdo))->findByProfile($profileId, $tenantId);
+
+        return $membership['ou_id'] ?? null;
     }
 
     /**

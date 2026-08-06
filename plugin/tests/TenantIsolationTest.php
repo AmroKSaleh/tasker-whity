@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace Tasker\Tests;
 
 use Tasker\Migrations\CreateTaskerPingTable;
+use Tasker\Migrations\CreateTaskerProjectsTable;
+use Tasker\Migrations\CreateTaskerSectionsTable;
 use Whity\Sdk\Tenant\TenantTableRegistry;
 use Whity\Sdk\Testing\TenantIsolationConformanceTestCase;
 
@@ -20,6 +22,8 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
     {
         return TenantTableRegistry::for([
             'tasker_pings' => 'Connectivity probe rows are per-tenant.',
+            'tasker_projects' => 'Board projects are per-tenant.',
+            'tasker_sections' => 'Board sections are per-tenant.',
         ]);
     }
 
@@ -84,6 +88,10 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
      */
     protected function schemaMigrations(): array
     {
-        return [new CreateTaskerPingTable()];
+        return [
+            new CreateTaskerPingTable(),
+            new CreateTaskerProjectsTable(),
+            new CreateTaskerSectionsTable(),
+        ];
     }
 }

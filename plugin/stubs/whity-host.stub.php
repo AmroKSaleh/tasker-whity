@@ -31,3 +31,19 @@ namespace Whity\Core\Tenant {
         }
     }
 }
+
+namespace Whity\Core\Identity {
+    class MembershipRepository
+    {
+        public function __construct(\PDO $db)
+        {
+        }
+
+        /**
+         * @return array<string, mixed>|null
+         */
+        public function findByProfile(int $profileId, int $tenantId): ?array
+        {
+        }
+    }
+}
