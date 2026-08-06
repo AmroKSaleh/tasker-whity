@@ -9,6 +9,7 @@ use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
+use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
 use Whity\Sdk\Tenant\TenantTableRegistry;
 use Whity\Sdk\Testing\TenantIsolationConformanceTestCase;
@@ -30,6 +31,7 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
             'tasker_groups' => 'Board groups are per-tenant.',
             'tasker_tasks' => 'Board tasks are per-tenant.',
             'tasker_milestones' => 'Task milestones are per-tenant.',
+            'tasker_task_discussions' => 'Task AI discussions are per-tenant.',
         ]);
     }
 
@@ -101,6 +103,7 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
             new CreateTaskerGroupsTable(),
             new CreateTaskerTasksTable(),
             new CreateTaskerMilestonesTable(),
+            new CreateTaskerTaskDiscussionsTable(),
         ];
     }
 }

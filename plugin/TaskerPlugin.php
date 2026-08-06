@@ -9,12 +9,14 @@ use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\PingApiHandler;
 use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
+use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
+use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Migrations\GrantTaskerMilestonePermissions;
 use Tasker\Migrations\GrantTaskerPingPermissions;
@@ -601,6 +603,38 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/tasks/{id:\d+}/discussion',
+                'handler' => [$this, 'getDiscussion'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:view',
+                'schema' => [
+                    'operationId' => 'get_task_discussion',
+                    'summary' => 'Read a task\'s AI discussion and focus reason',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The discussion (empty shape if none yet)'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PUT',
+                'path' => '/api/tasker/tasks/{id:\d+}/discussion',
+                'handler' => [$this, 'putDiscussion'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'set_task_discussion',
+                    'summary' => 'Save a task\'s AI discussion and focus reason',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The saved discussion'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -692,6 +726,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             GrantTaskerTaskPermissions::class,
             CreateTaskerMilestonesTable::class,
             GrantTaskerMilestonePermissions::class,
+            CreateTaskerTaskDiscussionsTable::class,
         ];
     }
 
@@ -1186,6 +1221,37 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new MilestonesApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * GET /api/tasker/tasks/{id}/discussion
+     *
+     * @param array<string, string> $params
+     */
+    public function getDiscussion(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TaskDiscussionsApiHandler($this->resolvePdo()))->get($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * PUT /api/tasker/tasks/{id}/discussion
+     *
+     * @param array<string, string> $params
+     */
+    public function putDiscussion(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TaskDiscussionsApiHandler($this->resolvePdo()))
+            ->put($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
     }
 
     /**
