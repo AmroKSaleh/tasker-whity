@@ -64,4 +64,42 @@ final class TaskDiscussionsApiHandlerTest extends TestCase
         $row = $this->pdo->query('SELECT reason FROM tasker_task_discussions')->fetch(PDO::FETCH_ASSOC);
         self::assertSame('second', $row['reason']);
     }
+
+    public function testPutRejectsAMalformedOrNonObjectBodyAndDoesNotOverwriteExistingData(): void
+    {
+        $this->handler->put(7, 1, json_encode([
+            'messages' => [['role' => 'user', 'content' => 'keep me']],
+            'reason' => 'keep this reason',
+        ]));
+
+        $malformed = $this->handler->put(7, 1, 'not valid json at all');
+        self::assertSame(400, $malformed->getStatusCode());
+
+        $nonObject = $this->handler->put(7, 1, json_encode([1, 2, 3]));
+        self::assertSame(400, $nonObject->getStatusCode());
+
+        $count = (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_discussions')->fetchColumn();
+        self::assertSame(1, $count);
+
+        $row = $this->pdo->query('SELECT messages, reason FROM tasker_task_discussions')->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('keep this reason', $row['reason']);
+        self::assertSame([['role' => 'user', 'content' => 'keep me']], json_decode((string) $row['messages'], true));
+    }
+
+    public function testPutRejectsANonScalarReasonAndDoesNotOverwriteExistingData(): void
+    {
+        $this->handler->put(7, 1, json_encode(['messages' => [], 'reason' => 'original reason']));
+
+        $body = json_encode([
+            'messages' => [['role' => 'user', 'content' => 'should not be saved']],
+            'reason' => ['nested' => 'object'],
+        ]);
+        $response = $this->handler->put(7, 1, $body);
+
+        self::assertSame(400, $response->getStatusCode());
+
+        $row = $this->pdo->query('SELECT messages, reason FROM tasker_task_discussions')->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('original reason', $row['reason']);
+        self::assertSame([], json_decode((string) $row['messages'], true));
+    }
 }

@@ -48,14 +48,32 @@ final class TaskDiscussionsApiHandler
     /**
      * PUT /api/tasker/tasks/{id}/discussion — upsert. Creates the row on
      * first write, updates it on every subsequent write — never duplicates.
+     *
+     * Rejects a malformed/non-object body with 400 rather than silently
+     * treating it as "no messages, no reason" and overwriting an existing
+     * row's data with empty defaults. `json_decode($body, true)` maps BOTH a
+     * JSON object (`{"messages":[...]}`) and a JSON array (`[1,2,3]`) to a
+     * PHP array, so `is_array($decoded)` alone can't tell them apart —
+     * `array_is_list()` (empty-array excepted, since `{}` and `[]` are
+     * indistinguishable once decoded and an empty object is a legitimate,
+     * if unusual, payload) is what actually catches a JSON-array body like
+     * `[1,2,3]` that `is_array()` alone would let through as if it were `{}`.
      */
     public function put(int $tenantId, int $taskId, string $body): Response
     {
         $decoded = json_decode($body, true);
-        $messages = is_array($decoded) && isset($decoded['messages']) && is_array($decoded['messages'])
+        if (!is_array($decoded) || ($decoded !== [] && array_is_list($decoded))) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        if (isset($decoded['reason']) && !is_scalar($decoded['reason'])) {
+            return Response::error('reason must be a string', 400);
+        }
+
+        $messages = isset($decoded['messages']) && is_array($decoded['messages'])
             ? $decoded['messages']
             : [];
-        $reason = is_array($decoded) && isset($decoded['reason']) ? (string) $decoded['reason'] : null;
+        $reason = isset($decoded['reason']) ? (string) $decoded['reason'] : null;
 
         $task = $this->db->prepare('SELECT id FROM tasker_tasks WHERE id = :id AND tenant_id = :tenant_id');
         $task->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
