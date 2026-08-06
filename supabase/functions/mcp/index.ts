@@ -128,8 +128,22 @@ async function hashKey(raw: string): Promise<string> {
   return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
 }
 
-function fireAndForget(thenable: any) {
-  const wrapped = Promise.resolve(thenable).then(() => {}, () => {})
+// TDE-870: a background write that fails must SAY SO. This swallowed everything for a month
+// while get_task's context suppression was quietly denied by RLS on every single call.
+//
+// The trap worth naming: a supabase-js builder RESOLVES with { data, error } — it does not
+// REJECT on a database error. So the old `.then(() => {}, () => {})` could not have caught a
+// permission denial even in principle; the rejection handler was never reachable for the very
+// class of failure it looked like it was guarding. The resolved value has to be inspected.
+//
+// console.error lands in the Supabase function logs, which is enough to make a systemic failure
+// visible without adding a write that could itself fail silently. Pass a label so the log names
+// the caller rather than reading "something background broke".
+function fireAndForget(thenable: any, label = 'background write') {
+  const wrapped = Promise.resolve(thenable).then(
+    (res: any) => { if (res?.error) console.error(`[fireAndForget] ${label} failed:`, res.error.message ?? res.error) },
+    (err: any) => { console.error(`[fireAndForget] ${label} threw:`, err?.message ?? err) },
+  )
   const er = (globalThis as any).EdgeRuntime
   if (er?.waitUntil) er.waitUntil(wrapped)
 }
@@ -5158,12 +5172,21 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const PRIME_WINDOW_MS = 3 * 60 * 60 * 1000
       let sendFull = !!args.refresh_context
       if (!sendFull && full.project_id) {
-        const { data: primed } = await sb.from('mcp_context_primed')
+        // TDE-870: read the error, do not just destructure data. An RLS denial returns zero rows
+        // with no error, and a genuine failure returns an error with zero rows — both looked like
+        // "not primed yet", which is why this re-sent ~3k tokens on every call for a month
+        // without one line in any log. Failing OPEN (send the full block) stays correct: an agent
+        // with duplicate grounding wastes tokens, an agent with none works blind.
+        const { data: primed, error: primedErr } = await sb.from('mcp_context_primed')
           .select('primed_at').eq('user_id', userId).eq('project_id', full.project_id).maybeSingle()
+        if (primedErr) console.error('[get_task] context priming lookup failed, sending full context:', primedErr.message)
         sendFull = !(primed && (Date.now() - new Date(primed.primed_at).getTime()) < PRIME_WINDOW_MS)
       }
       if (sendFull && full.project_id) {
-        fireAndForget(sb.from('mcp_context_primed').upsert({ user_id: userId, project_id: full.project_id, primed_at: new Date().toISOString() }))
+        fireAndForget(
+          sb.from('mcp_context_primed').upsert({ user_id: userId, project_id: full.project_id, primed_at: new Date().toISOString() }),
+          'get_task context priming upsert',
+        )
       }
 
       if (sendFull) {
@@ -6541,7 +6564,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case '__init_tasker_session': {
       // TDE-371: a new session — forget which projects were context-primed, so the first get_task
       // in each project this session re-ships the full Foundation/IS/KB once more.
-      fireAndForget(sb.from('mcp_context_primed').delete().eq('user_id', userId))
+      // TDE-870: this reset was ALSO silently denied by the same missing RLS policy. Granting
+      // only read/write would have latched the suppression on permanently after the first prime.
+      fireAndForget(sb.from('mcp_context_primed').delete().eq('user_id', userId), '__init_tasker_session priming reset')
       const { data: settings } = await sb.from('user_settings').select('ai_instructions, active_environment_id').eq('user_id', userId).maybeSingle()
       const instructions = settings?.ai_instructions
       const { show_questionnaire } = args
