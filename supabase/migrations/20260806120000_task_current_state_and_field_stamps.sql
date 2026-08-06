@@ -44,6 +44,12 @@ comment on column tasks.detail_updated_at is
 -- This deliberately errs toward over-flagging on legacy rows: an unnecessary body read costs
 -- tokens, an unflagged stale title cost a wrong deliverable. The renderer's length + age
 -- thresholds keep that from flagging the whole board.
+-- A backfill is not an edit. Without this the touch trigger stamps now() onto updated_at for
+-- every row below and destroys the last-edited read surface (20260730120000) across the whole
+-- table — which is exactly what happened when this migration first ran against production;
+-- see 20260806143000 for the repair. Added here so a replay on a fresh database cannot repeat it.
+select set_config('tasker.suppress_touch', 'on', true);
+
 update tasks set
   text_updated_at   = created_at,
   detail_updated_at = case

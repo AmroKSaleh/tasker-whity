@@ -24,6 +24,11 @@
 -- The remedy for those is current_state, written deliberately on the tasks that matter — which
 -- is the primary mechanism anyway. The flag was always the backstop, not the fix.
 
+-- See the note in 20260806120000: a bare UPDATE here restamps updated_at on every row via the
+-- touch trigger and wipes the last-edited read surface. This migration did exactly that in
+-- production; 20260806143000 repairs it. Suppressed here so a replay cannot repeat it.
+select set_config('tasker.suppress_touch', 'on', true);
+
 update tasks set text_updated_at = detail_updated_at
 where text_updated_at = created_at
   and detail_updated_at > text_updated_at;
