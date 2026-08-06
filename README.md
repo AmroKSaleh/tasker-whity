@@ -218,7 +218,10 @@ whity-core derives MCP tools automatically from schema-bearing routes, but
    toggle from `/admin/settings` (General tab).
 
 Once both gates are open, `npm run mcp:tools` mints a short-lived MCP token
-and dumps Tasker's derived tools (`tools/list`, filtered to `*ping*`) as JSON.
+and dumps Tasker's derived tools (`tools/list`, filtered to the plugin's full
+34-tool D1 + Plan A surface — every `list_pings`/`create_ping`/`tag_ping` plus
+project/section/group/task/milestone/board/discussion tool by exact name) as
+JSON.
 `npm run mcp:check` compares that live output against the committed
 `docs/mcp-tool-surface.json` snapshot and fails loudly on drift — e.g. if a
 route's `operationId` is renamed without updating the snapshot — with a
@@ -246,6 +249,7 @@ images against the newly checked-out ref — no separate rebuild step needed.
 - `npm run plugin:stan` — PHPStan level 6
 - `npm run app:test` — Vitest over the API client
 - `npm run mcp:check` — derived MCP tool surface matches `docs/mcp-tool-surface.json` (needs a running host)
+- `npm run mcp:check` — now covers D1's full board tool surface (34 tools), not just Plan A's ping proof
 - <http://localhost:5174/dev/ping> — full round trip through the dev proxy
 - <http://localhost:8010/dev/ping> — same round trip through Caddy, production topology
 - <http://localhost:3010> — whity's admin UI; one login is shared with the SPA

@@ -89,8 +89,19 @@ try {
         throw "MCP tools/list failed: [$($response.error.code)] $($response.error.message)"
     }
 
+    $taskerToolNames = @(
+        'list_pings', 'create_ping', 'tag_ping',
+        'list_projects', 'create_project', 'update_project', 'delete_project',
+        'list_sections', 'create_section', 'update_section', 'delete_section',
+        'list_groups', 'create_group', 'update_group', 'delete_group',
+        'list_tasks', 'create_task', 'update_task', 'move_task', 'delete_task',
+        'complete_task', 'uncomplete_task', 'pin_task', 'unpin_task', 'tag_task', 'get_ready_work',
+        'list_milestones', 'add_milestone', 'complete_milestone', 'update_milestone', 'delete_milestone',
+        'get_board',
+        'get_task_discussion', 'set_task_discussion'
+    )
     $tools = $response.result.tools |
-        Where-Object { $_.name -like '*ping*' } |
+        Where-Object { $taskerToolNames -contains $_.name } |
         Sort-Object name |
         ForEach-Object {
             [ordered]@{

@@ -1,5 +1,65 @@
 ﻿[
     {
+        "name":  "add_milestone",
+        "description":  "Add a milestone to a task",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "taskId":  {
+                                                              "type":  "integer"
+                                                          }
+                                           },
+                            "required":  [
+                                             "taskId"
+                                         ]
+                        }
+    },
+    {
+        "name":  "complete_milestone",
+        "description":  "Toggle a milestone\u0027s checked state",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "complete_task",
+        "description":  "Mark a task complete",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "create_group",
+        "description":  "Create a group within a section",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "sectionId":  {
+                                                                 "type":  "integer"
+                                                             }
+                                           },
+                            "required":  [
+                                             "sectionId"
+                                         ]
+                        }
+    },
+    {
         "name":  "create_ping",
         "description":  "Create a connectivity ping in the caller\u0027s tenant",
         "inputSchema":  {
@@ -17,10 +77,419 @@
                         }
     },
     {
+        "name":  "create_project",
+        "description":  "Create a project (with its default Backlog section)",
+        "inputSchema":  {
+                            "type":  "object"
+                        }
+    },
+    {
+        "name":  "create_section",
+        "description":  "Create a section within a project",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "projectId":  {
+                                                                 "type":  "integer"
+                                                             }
+                                           },
+                            "required":  [
+                                             "projectId"
+                                         ]
+                        }
+    },
+    {
+        "name":  "create_task",
+        "description":  "Create a task in a section",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "sectionId":  {
+                                                                 "type":  "integer"
+                                                             }
+                                           },
+                            "required":  [
+                                             "sectionId"
+                                         ]
+                        }
+    },
+    {
+        "name":  "delete_group",
+        "description":  "Delete a group (its tasks are un-grouped, not deleted)",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "delete_milestone",
+        "description":  "Delete a milestone",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "delete_project",
+        "description":  "Delete a project and everything under it",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "delete_section",
+        "description":  "Delete a section (and its groups/tasks)",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "delete_task",
+        "description":  "Delete a task",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "get_board",
+        "description":  "Get a project\u0027s full board: sections, groups, tasks, milestones",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "get_ready_work",
+        "description":  "List a project\u0027s non-done tasks, ranked by what to work on next",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "get_task_discussion",
+        "description":  "Read a task\u0027s AI discussion and focus reason",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "list_groups",
+        "description":  "List a section\u0027s groups",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "sectionId":  {
+                                                                 "type":  "integer"
+                                                             }
+                                           },
+                            "required":  [
+                                             "sectionId"
+                                         ]
+                        }
+    },
+    {
+        "name":  "list_milestones",
+        "description":  "List a task\u0027s milestones",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "taskId":  {
+                                                              "type":  "integer"
+                                                          }
+                                           },
+                            "required":  [
+                                             "taskId"
+                                         ]
+                        }
+    },
+    {
         "name":  "list_pings",
         "description":  "List the tenant\u0027s connectivity pings",
         "inputSchema":  {
                             "type":  "object"
+                        }
+    },
+    {
+        "name":  "list_projects",
+        "description":  "List the caller\u0027s OU-scoped projects",
+        "inputSchema":  {
+                            "type":  "object"
+                        }
+    },
+    {
+        "name":  "list_sections",
+        "description":  "List a project\u0027s sections",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "projectId":  {
+                                                                 "type":  "integer"
+                                                             }
+                                           },
+                            "required":  [
+                                             "projectId"
+                                         ]
+                        }
+    },
+    {
+        "name":  "list_tasks",
+        "description":  "List a section\u0027s tasks",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "sectionId":  {
+                                                                 "type":  "integer"
+                                                             }
+                                           },
+                            "required":  [
+                                             "sectionId"
+                                         ]
+                        }
+    },
+    {
+        "name":  "move_task",
+        "description":  "Move a task to a different section/group, or reorder it",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "pin_task",
+        "description":  "Pin a task",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "set_task_discussion",
+        "description":  "Save a task\u0027s AI discussion and focus reason",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "tag_ping",
+        "description":  "Attach an existing tag to a ping",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      },
+                                               "tag_id":  {
+                                                              "type":  "integer",
+                                                              "minimum":  1
+                                                          }
+                                           },
+                            "required":  [
+                                             "id",
+                                             "tag_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "tag_task",
+        "description":  "Attach an existing tag to a task",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "uncomplete_task",
+        "description":  "Restore a completed task to pending",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "unpin_task",
+        "description":  "Unpin a task",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "update_group",
+        "description":  "Update a group\u0027s name or sort_order",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "update_milestone",
+        "description":  "Update a milestone\u0027s summary, detail, or sort_order",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "update_project",
+        "description":  "Update a project\u0027s name, ou_id, prefix, or sort_order",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "update_section",
+        "description":  "Update a section\u0027s name, description, sort_order, or view_prefs",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "update_task",
+        "description":  "Update a task\u0027s text, detail, priority, or due_date",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "id":  {
+                                                          "type":  "integer"
+                                                      }
+                                           },
+                            "required":  [
+                                             "id"
+                                         ]
                         }
     }
 ]
