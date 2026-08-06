@@ -4324,7 +4324,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'list_tasks': {
       const { project_id, section_id, status, confirmed, include_flow_steps } = args
-      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, section_id, project_id, created_at, updated_at, sort_order, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId).is('is_deleted', false)
+      let query = sb.from('tasks').select('id, short_id, text, priority, status, due_date, detail, current_state, current_state_at, text_updated_at, detail_updated_at, section_id, project_id, created_at, updated_at, sort_order, phase_id, project:projects(prefix), section:sections(name), phase:phases(name)').eq('user_id', userId).is('is_deleted', false)
       let resolvedProject: any = null
       if (project_id) {
         resolvedProject = await resolveProject(sb, userId, project_id)
@@ -4444,7 +4444,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         // line for no information (cf. the token-economy work in TDE-371).
         const phaseBadge = !phaseLabel && t.phase?.name ? t.phase.name : null
         const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.status !== 'pending' ? t.status : null, phaseBadge].filter(Boolean).join(', ')
+        // TDE-875: list_tasks is the OTHER way agents survey a board, so a title-only render
+        // here reopens the hole get_project just closed. Same renderer, same rule.
+        const stateLine = taskStateLine(t)
         return `${shortRef} — ${t.text}${badges ? ` [${badges}]` : ''} · ${sectionName}${added ? ` · added ${added}` : ''}${edited ? ` · edited ${edited}` : ''}`
+          + (stateLine ? `\n${stateLine}` : '')
       }).join('\n')
       const anyEdited = data.some((t: any) => t.updated_at && t.created_at
         && Math.abs(new Date(t.updated_at).getTime() - new Date(t.created_at).getTime()) >= 60000)
@@ -4455,6 +4459,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         args.flow_id ? `Filtered to flow: ${args.flow_id}.` : null,
         byRecency ? 'Sorted by most recently edited.' : null,
         anyEdited ? `Edit times are ${zoneLabel(tz)}.` : null,
+        data.some((t: any) => taskStateLine(t))
+          ? '▸ = the task\'s own current-state line, authoritative over the title. ⚠ = its body moved well after its title; open it before relying on the title.'
+          : null,
       ].filter(Boolean).join('\n')
       const footer = hasMore ? `\n\n… ${data.length}+ shown. cursor: "${nextCursor}" for the next page.` : ''
       return (header ? `${header}\n\n${body}` : body) + footer
