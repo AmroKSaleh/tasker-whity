@@ -5,15 +5,18 @@ declare(strict_types=1);
 namespace Tasker;
 
 use Tasker\Api\GroupsApiHandler;
+use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\PingApiHandler;
 use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\CreateTaskerGroupsTable;
+use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
+use Tasker\Migrations\GrantTaskerMilestonePermissions;
 use Tasker\Migrations\GrantTaskerPingPermissions;
 use Tasker\Migrations\GrantTaskerProjectPermissions;
 use Tasker\Migrations\GrantTaskerTaskPermissions;
@@ -519,6 +522,85 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/tasks/{taskId:\d+}/milestones',
+                'handler' => [$this, 'listMilestones'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_milestone:edit',
+                'schema' => [
+                    'operationId' => 'list_milestones',
+                    'summary' => 'List a task\'s milestones',
+                    'tags' => ['tasker'],
+                    'responses' => [200 => ['description' => 'The milestone list']],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/{taskId:\d+}/milestones',
+                'handler' => [$this, 'addMilestone'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_milestone:edit',
+                'schema' => [
+                    'operationId' => 'add_milestone',
+                    'summary' => 'Add a milestone to a task',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        201 => ['description' => 'The created milestone'],
+                        400 => ['description' => 'summary missing, empty, or too long'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/milestones/{id:\d+}/toggle',
+                'handler' => [$this, 'toggleMilestone'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_milestone:edit',
+                'schema' => [
+                    'operationId' => 'complete_milestone',
+                    'summary' => 'Toggle a milestone\'s checked state',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The updated milestone'],
+                        404 => ['description' => 'Milestone not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/milestones/{id:\d+}',
+                'handler' => [$this, 'updateMilestone'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_milestone:edit',
+                'schema' => [
+                    'operationId' => 'update_milestone',
+                    'summary' => 'Update a milestone\'s summary, detail, or sort_order',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The updated milestone'],
+                        400 => ['description' => 'summary empty or too long'],
+                        404 => ['description' => 'Milestone not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/milestones/{id:\d+}',
+                'handler' => [$this, 'deleteMilestone'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_milestone:edit',
+                'schema' => [
+                    'operationId' => 'delete_milestone',
+                    'summary' => 'Delete a milestone',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        204 => ['description' => 'Deleted'],
+                        404 => ['description' => 'Milestone not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -582,6 +664,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             'tasker_task:edit',
             'tasker_task:complete',
             'tasker_task:delete',
+            'tasker_milestone:edit',
         ];
     }
 
@@ -607,6 +690,8 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             GrantTaskerProjectPermissions::class,
             CreateTaskerTasksTable::class,
             GrantTaskerTaskPermissions::class,
+            CreateTaskerMilestonesTable::class,
+            GrantTaskerMilestonePermissions::class,
         ];
     }
 
@@ -1024,6 +1109,83 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
         return (new TasksApiHandler($pdo))
             ->readyWork($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * GET /api/tasker/tasks/{taskId}/milestones
+     *
+     * @param array<string, string> $params
+     */
+    public function listMilestones(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new MilestonesApiHandler($this->resolvePdo()))->listForTask($tenantId, (int) ($params['taskId'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/tasks/{taskId}/milestones
+     *
+     * @param array<string, string> $params
+     */
+    public function addMilestone(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new MilestonesApiHandler($this->resolvePdo()))
+            ->create($tenantId, (int) ($params['taskId'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * POST /api/tasker/milestones/{id}/toggle
+     *
+     * @param array<string, string> $params
+     */
+    public function toggleMilestone(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new MilestonesApiHandler($this->resolvePdo()))->toggle($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * PATCH /api/tasker/milestones/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function updateMilestone(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new MilestonesApiHandler($this->resolvePdo()))
+            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * DELETE /api/tasker/milestones/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function deleteMilestone(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new MilestonesApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
     }
 
     /**
