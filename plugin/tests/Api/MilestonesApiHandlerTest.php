@@ -53,6 +53,16 @@ final class MilestonesApiHandlerTest extends TestCase
         self::assertFalse($second['data']['checked']);
     }
 
+    public function testToggleRejects404ForAMilestoneOutsideTheCallersTenant(): void
+    {
+        $created = json_decode($this->handler->create(9, 2, json_encode(['summary' => 'Other tenant']))->getBody(), true);
+        $id = (int) $created['data']['id'];
+
+        $response = $this->handler->toggle(7, $id);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
     public function testListForTaskOrdersBySortOrder(): void
     {
         $this->handler->create(7, 1, json_encode(['summary' => 'Second', 'sort_order' => 2]));
