@@ -1,0 +1,632 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Tasker\Api;
+
+use PDO;
+use Tasker\Access\OuScopeResolver;
+use Whity\Core\Audit\AuditLogger;
+use Whity\Core\Taxonomy\EntityTagRepository;
+use Whity\Core\Taxonomy\TagRepository;
+use Whity\Sdk\Http\Response;
+
+/**
+ * Tenant-scoped CRUD, move, pin/unpin, complete/uncomplete, and entity-tag
+ * attachment for tasker_tasks, plus the OU-scoped readyWork() ranked query.
+ *
+ * update()/move()/delete()/complete()/uncomplete()/pin()/unpin()/tag() are
+ * tenant-scoped only — a caller only ever reaches an individual task's id
+ * after already holding it from an OU-scoped list (listForSection() or a
+ * future get_board), so re-checking OU scope on every single-task mutation
+ * would be redundant. readyWork() is the one exception: it is reached
+ * directly by project id, not through a task the caller already holds, so
+ * it re-derives and checks OU visibility itself, exactly like get_board.
+ */
+final class TasksApiHandler
+{
+    private const MAX_TEXT_LENGTH = 2000;
+
+    /**
+     * @var list<string>
+     */
+    private const VALID_PRIORITIES = ['rush', 'high', 'medium', 'low'];
+
+    private PDO $db;
+
+    public function __construct(PDO $db)
+    {
+        $this->db = $db;
+    }
+
+    public function listForSection(int $tenantId, int $sectionId): Response
+    {
+        try {
+            $idCol = $this->idColumn();
+            $stmt = $this->db->prepare(
+                "SELECT {$idCol} AS id, public_id, tenant_id, project_id, section_id, group_id, text, detail, status, priority,
+                        due_date, pinned, pinned_at, sort_order, completed_at, short_id, created_by, created_at, updated_at
+                 FROM tasker_tasks
+                 WHERE tenant_id = :tenant_id AND section_id = :section_id
+                 ORDER BY sort_order ASC, {$idCol} ASC"
+            );
+            $stmt->execute([':tenant_id' => $tenantId, ':section_id' => $sectionId]);
+
+            /** @var array<int, array<string, mixed>> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            return Response::json(['data' => array_map([$this, 'toPublicTask'], $rows)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to fetch tasks', 500);
+        }
+    }
+
+    public function create(int $tenantId, int $sectionId, int $createdBy, string $body): Response
+    {
+        $decoded = json_decode($body, true);
+        $text = is_array($decoded) ? trim((string) ($decoded['text'] ?? '')) : '';
+        if ($text === '' || mb_strlen($text) > self::MAX_TEXT_LENGTH) {
+            return Response::error('text must be a non-empty string of at most ' . self::MAX_TEXT_LENGTH . ' characters', 400);
+        }
+
+        $priority = null;
+        // Parenthesized deliberately: `&&` binds tighter than `??` in PHP, so
+        // the unparenthesized `is_array($decoded) && $decoded['priority'] ?? null`
+        // actually parses as `(is_array($decoded) && $decoded['priority']) ?? null`
+        // — the boolean `&&` result is never null, so the `?? null` is dead
+        // code, AND `$decoded['priority']` is accessed unguarded, raising a
+        // PHP "Undefined array key" warning whenever the request omits
+        // priority entirely (confirmed empirically: every test that creates a
+        // task without a priority field triggered this warning under
+        // PHPUnit's `--display-warnings`). This parenthesization is the fix.
+        if (is_array($decoded) && ($decoded['priority'] ?? null)) {
+            $priority = (string) $decoded['priority'];
+            if (!in_array($priority, self::VALID_PRIORITIES, true)) {
+                return Response::error('priority must be one of: ' . implode(', ', self::VALID_PRIORITIES), 400);
+            }
+        }
+
+        $section = $this->db->prepare('SELECT id, project_id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id');
+        $section->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+        $sectionRow = $section->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($sectionRow)) {
+            return Response::error('Section not found', 404);
+        }
+
+        try {
+            $insert = $this->db->prepare(
+                'INSERT INTO tasker_tasks
+                    (public_id, tenant_id, project_id, section_id, text, priority, status, created_by, created_at, updated_at)
+                 VALUES
+                    (:public_id, :tenant_id, :project_id, :section_id, :text, :priority, :status, :created_by, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
+            );
+            $insert->execute([
+                ':public_id' => self::generateUuidV4(),
+                ':tenant_id' => $tenantId,
+                ':project_id' => $sectionRow['project_id'],
+                ':section_id' => $sectionId,
+                ':text' => $text,
+                ':priority' => $priority,
+                ':status' => 'pending',
+                ':created_by' => $createdBy,
+            ]);
+
+            // lastInsertId() is the row's true identity on BOTH engines
+            // (SQLite's rowid; PostgreSQL's BIGSERIAL sequence via
+            // lastval()), but findScoped() must look it up through the SAME
+            // column this value actually came from — see idColumn()'s doc.
+            $id = (int) $this->db->lastInsertId();
+
+            $row = $this->findScoped($id, $tenantId);
+            if ($row === null) {
+                return Response::error('Failed to create task', 500);
+            }
+
+            (new AuditLogger($this->db))->record('tasker_task.created', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_task',
+                'target_id' => $id,
+            ]);
+
+            return Response::json(['data' => $this->toPublicTask($row)], 201);
+        } catch (\Throwable) {
+            return Response::error('Failed to create task', 500);
+        }
+    }
+
+    /**
+     * PATCH /api/tasker/tasks/{id} — content-only edit. section_id/group_id/
+     * sort_order are NOT editable here; that's move()'s job (structural
+     * placement vs. content are kept as two separate, smaller operations,
+     * matching the design spec's own naming: update_task vs. move_task).
+     */
+    public function update(int $tenantId, int $taskId, string $body): Response
+    {
+        $row = $this->findScoped($taskId, $tenantId);
+        if ($row === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded)) {
+            $decoded = [];
+        }
+
+        $fields = [];
+        $params = [':id' => $taskId, ':tenant_id' => $tenantId];
+
+        if (array_key_exists('text', $decoded)) {
+            $text = trim((string) $decoded['text']);
+            if ($text === '' || mb_strlen($text) > self::MAX_TEXT_LENGTH) {
+                return Response::error('text must be a non-empty string of at most ' . self::MAX_TEXT_LENGTH . ' characters', 400);
+            }
+            $fields[] = 'text = :text';
+            $params[':text'] = $text;
+        }
+        if (array_key_exists('detail', $decoded)) {
+            $fields[] = 'detail = :detail';
+            $params[':detail'] = $decoded['detail'] !== null ? (string) $decoded['detail'] : null;
+        }
+        if (array_key_exists('priority', $decoded)) {
+            $priority = $decoded['priority'] !== null ? (string) $decoded['priority'] : null;
+            if ($priority !== null && !in_array($priority, self::VALID_PRIORITIES, true)) {
+                return Response::error('priority must be one of: ' . implode(', ', self::VALID_PRIORITIES), 400);
+            }
+            $fields[] = 'priority = :priority';
+            $params[':priority'] = $priority;
+        }
+        if (array_key_exists('due_date', $decoded)) {
+            $fields[] = 'due_date = :due_date';
+            $params[':due_date'] = $decoded['due_date'] !== null ? (string) $decoded['due_date'] : null;
+        }
+
+        if ($fields === []) {
+            return Response::json(['data' => $this->toPublicTask($row)], 200);
+        }
+        $fields[] = 'updated_at = CURRENT_TIMESTAMP';
+
+        try {
+            $sql = 'UPDATE tasker_tasks SET ' . implode(', ', $fields) . " WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute($params);
+
+            $updated = $this->findScoped($taskId, $tenantId);
+            if ($updated === null) {
+                return Response::error('Task not found', 404);
+            }
+
+            (new AuditLogger($this->db))->record('tasker_task.updated', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_task',
+                'target_id' => $taskId,
+            ]);
+
+            return Response::json(['data' => $this->toPublicTask($updated)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to update task', 500);
+        }
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/move — structural placement only:
+     * section_id, group_id, sort_order. A task can move between sections and
+     * groups within the SAME project only; there is no cross-project move in
+     * this plan (moving a task's project_id would need to reconcile it
+     * against a different OU/project scope entirely, out of D1's scope).
+     */
+    public function move(int $tenantId, int $taskId, string $body): Response
+    {
+        $row = $this->findScoped($taskId, $tenantId);
+        if ($row === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $decoded = json_decode($body, true);
+        if (!is_array($decoded)) {
+            $decoded = [];
+        }
+
+        $projectId = (int) $row['project_id'];
+        $fields = [];
+        $params = [':id' => $taskId, ':tenant_id' => $tenantId];
+
+        if (array_key_exists('section_id', $decoded)) {
+            $sectionId = (int) $decoded['section_id'];
+            $section = $this->db->prepare(
+                'SELECT id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id AND project_id = :project_id'
+            );
+            $section->execute([':id' => $sectionId, ':tenant_id' => $tenantId, ':project_id' => $projectId]);
+            if ($section->fetch() === false) {
+                return Response::error('section_id must belong to the task\'s own project', 422);
+            }
+            $fields[] = 'section_id = :section_id';
+            $params[':section_id'] = $sectionId;
+        }
+        if (array_key_exists('group_id', $decoded)) {
+            $groupId = $decoded['group_id'] !== null ? (int) $decoded['group_id'] : null;
+            if ($groupId !== null) {
+                $group = $this->db->prepare(
+                    'SELECT g.id FROM tasker_groups g
+                     JOIN tasker_sections s ON s.id = g.section_id
+                     WHERE g.id = :id AND g.tenant_id = :tenant_id AND s.project_id = :project_id'
+                );
+                $group->execute([':id' => $groupId, ':tenant_id' => $tenantId, ':project_id' => $projectId]);
+                if ($group->fetch() === false) {
+                    return Response::error('group_id must belong to the task\'s own project', 422);
+                }
+            }
+            $fields[] = 'group_id = :group_id';
+            $params[':group_id'] = $groupId;
+        }
+        if (array_key_exists('sort_order', $decoded)) {
+            $fields[] = 'sort_order = :sort_order';
+            $params[':sort_order'] = (int) $decoded['sort_order'];
+        }
+
+        if ($fields === []) {
+            return Response::json(['data' => $this->toPublicTask($row)], 200);
+        }
+        $fields[] = 'updated_at = CURRENT_TIMESTAMP';
+
+        try {
+            $sql = 'UPDATE tasker_tasks SET ' . implode(', ', $fields) . " WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute($params);
+
+            $updated = $this->findScoped($taskId, $tenantId);
+            if ($updated === null) {
+                return Response::error('Task not found', 404);
+            }
+
+            (new AuditLogger($this->db))->record('tasker_task.moved', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_task',
+                'target_id' => $taskId,
+            ]);
+
+            return Response::json(['data' => $this->toPublicTask($updated)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to move task', 500);
+        }
+    }
+
+    /**
+     * DELETE /api/tasker/tasks/{id} — cascades to the task's own milestones
+     * and discussion (Tasks 6-7's FKs). entity_tags rows referencing this
+     * task become orphaned — accepted, see §6/the project delete() docblock.
+     */
+    public function delete(int $tenantId, int $taskId): Response
+    {
+        $row = $this->findScoped($taskId, $tenantId);
+        if ($row === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        try {
+            $stmt = $this->db->prepare("DELETE FROM tasker_tasks WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id");
+            $stmt->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
+
+            (new AuditLogger($this->db))->record('tasker_task.deleted', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_task',
+                'target_id' => $taskId,
+            ]);
+
+            return Response::json(null, 204);
+        } catch (\Throwable) {
+            return Response::error('Failed to delete task', 500);
+        }
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/complete
+     */
+    public function complete(int $tenantId, int $taskId): Response
+    {
+        try {
+            $idCol = $this->idColumn();
+            $stmt = $this->db->prepare(
+                "UPDATE tasker_tasks
+                 SET status = 'done', completed_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+                 WHERE {$idCol} = :id AND tenant_id = :tenant_id"
+            );
+            $stmt->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
+
+            if ($stmt->rowCount() === 0) {
+                return Response::error('Task not found', 404);
+            }
+
+            $row = $this->findScoped($taskId, $tenantId);
+            if ($row === null) {
+                return Response::error('Task not found', 404);
+            }
+
+            (new AuditLogger($this->db))->record('tasker_task.completed', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_task',
+                'target_id' => $taskId,
+            ]);
+
+            return Response::json(['data' => $this->toPublicTask($row)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to complete task', 500);
+        }
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/uncomplete — the opposite of complete().
+     * Restores status to 'pending' (there is no "previous status" tracked to
+     * restore instead — plain pending/in_progress/done only, per §5).
+     */
+    public function uncomplete(int $tenantId, int $taskId): Response
+    {
+        try {
+            $idCol = $this->idColumn();
+            $stmt = $this->db->prepare(
+                "UPDATE tasker_tasks
+                 SET status = 'pending', completed_at = NULL, updated_at = CURRENT_TIMESTAMP
+                 WHERE {$idCol} = :id AND tenant_id = :tenant_id"
+            );
+            $stmt->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
+
+            if ($stmt->rowCount() === 0) {
+                return Response::error('Task not found', 404);
+            }
+
+            $row = $this->findScoped($taskId, $tenantId);
+            if ($row === null) {
+                return Response::error('Task not found', 404);
+            }
+
+            (new AuditLogger($this->db))->record('tasker_task.uncompleted', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_task',
+                'target_id' => $taskId,
+            ]);
+
+            return Response::json(['data' => $this->toPublicTask($row)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to uncomplete task', 500);
+        }
+    }
+
+    public function pin(int $tenantId, int $taskId): Response
+    {
+        return $this->setPinned($tenantId, $taskId, true);
+    }
+
+    public function unpin(int $tenantId, int $taskId): Response
+    {
+        return $this->setPinned($tenantId, $taskId, false);
+    }
+
+    private function setPinned(int $tenantId, int $taskId, bool $pinned): Response
+    {
+        // $pinnedAtClause is a fixed internal literal, never user input — kept
+        // consistent with this plugin's CURRENT_TIMESTAMP convention rather
+        // than computing a PHP-side timestamp that could drift from the DB's.
+        $pinnedAtClause = $pinned ? 'CURRENT_TIMESTAMP' : 'NULL';
+
+        try {
+            $idCol = $this->idColumn();
+            $stmt = $this->db->prepare(
+                "UPDATE tasker_tasks
+                 SET pinned = :pinned, pinned_at = {$pinnedAtClause}, updated_at = CURRENT_TIMESTAMP
+                 WHERE {$idCol} = :id AND tenant_id = :tenant_id"
+            );
+            $stmt->execute([
+                ':pinned' => $pinned,
+                ':id' => $taskId,
+                ':tenant_id' => $tenantId,
+            ]);
+
+            if ($stmt->rowCount() === 0) {
+                return Response::error('Task not found', 404);
+            }
+
+            $row = $this->findScoped($taskId, $tenantId);
+            if ($row === null) {
+                return Response::error('Task not found', 404);
+            }
+
+            return Response::json(['data' => $this->toPublicTask($row)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to update task', 500);
+        }
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/tags — attach an existing tag to a task.
+     *
+     * Mirrors {@see \Tasker\Api\PingApiHandler::tag()} exactly: the tag must
+     * belong to the caller's tenant (checked via core's own
+     * {@see TagRepository::find()}, which already binds tenant_id — a
+     * foreign/absent tag_id is a 422 validation failure, never a cross-tenant
+     * existence leak) BEFORE the association is written, and the actual
+     * write is delegated to core's own {@see EntityTagRepository::attach()}
+     * — the canonical, single writer for entity_tags — rather than a
+     * hand-rolled INSERT here. A task outside the caller's tenant reports
+     * 404, never a cross-tenant existence leak.
+     */
+    public function tag(int $tenantId, int $taskId, string $body): Response
+    {
+        $decoded = json_decode($body, true);
+        $tagId = is_array($decoded) && isset($decoded['tag_id']) ? (int) $decoded['tag_id'] : 0;
+        if ($tagId <= 0) {
+            return Response::error('tag_id is required and must be a positive integer', 400);
+        }
+
+        $idCol = $this->idColumn();
+        $find = $this->db->prepare("SELECT {$idCol} FROM tasker_tasks WHERE {$idCol} = :id AND tenant_id = :tenant_id");
+        $find->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
+        if ($find->fetch() === false) {
+            return Response::error('Task not found', 404);
+        }
+
+        // The tag must belong to the caller's tenant. TagRepository::find()
+        // already binds tenant_id, so a foreign-tenant tag_id is
+        // indistinguishable from a non-existent one — a validation failure
+        // (422), never a cross-tenant leak.
+        if ((new TagRepository($this->db))->find($tenantId, $tagId) === null) {
+            return Response::error('tag not found', 422, ['tag_id' => $tagId]);
+        }
+
+        try {
+            // Delegates the actual INSERT to core's own EntityTagRepository —
+            // the canonical, single writer for entity_tags — rather than
+            // re-issuing the raw SQL here.
+            $created = (new EntityTagRepository($this->db))
+                ->attach($tenantId, 'tasker_task', $taskId, $tagId);
+
+            return Response::json([
+                'data' => ['entity_type' => 'tasker_task', 'entity_id' => $taskId, 'tag_id' => $tagId],
+            ], $created ? 201 : 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to attach tag', 500);
+        }
+    }
+
+    /**
+     * GET /api/tasker/projects/{id}/ready-work — non-done tasks across the
+     * whole project, ordered for "what should I work on next": pinned first,
+     * then by priority (rush > high > medium > low > none), then by nearest
+     * due_date (nulls last), then by each section's own sort_order.
+     * OU-scoped like get_board: visibility is checked once, up front, against
+     * the project — a caller outside scope gets 404, never a silently empty
+     * list (an empty list would leak "this project id exists" information).
+     */
+    public function readyWork(int $tenantId, ?int $callerOuId, int $projectId): Response
+    {
+        if (!$this->isProjectVisible($tenantId, $callerOuId, $projectId)) {
+            return Response::error('Project not found', 404);
+        }
+
+        try {
+            $idCol = $this->idColumn();
+            $stmt = $this->db->prepare(
+                "SELECT {$idCol} AS id, public_id, tenant_id, project_id, section_id, group_id, text, detail,
+                        status, priority, due_date, pinned, pinned_at, sort_order, completed_at,
+                        short_id, created_by, created_at, updated_at
+                 FROM tasker_tasks
+                 WHERE tenant_id = :tenant_id AND project_id = :project_id AND status != 'done'
+                 ORDER BY
+                    pinned DESC,
+                    CASE priority WHEN 'rush' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END ASC,
+                    due_date ASC NULLS LAST,
+                    sort_order ASC"
+            );
+            $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
+
+            /** @var array<int, array<string, mixed>> $rows */
+            $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+            return Response::json(['data' => array_map([$this, 'toPublicTask'], $rows)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to fetch ready work', 500);
+        }
+    }
+
+    private function isProjectVisible(int $tenantId, ?int $callerOuId, int $projectId): bool
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT 1 FROM tasker_projects WHERE id = :id AND tenant_id = :tenant_id AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $projectId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        return $stmt->fetch() !== false;
+    }
+
+    /**
+     * @return array<string, mixed>|null
+     */
+    private function findScoped(int $id, int $tenantId): ?array
+    {
+        $idCol = $this->idColumn();
+        $stmt = $this->db->prepare(
+            "SELECT {$idCol} AS id, public_id, tenant_id, project_id, section_id, group_id, text, detail, status, priority,
+                    due_date, pinned, pinned_at, sort_order, completed_at, short_id, created_by, created_at, updated_at
+             FROM tasker_tasks WHERE {$idCol} = :id AND tenant_id = :tenant_id"
+        );
+        $stmt->execute([':id' => $id, ':tenant_id' => $tenantId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * The physical column every id-keyed SELECT/UPDATE/DELETE above matches
+     * against.
+     *
+     * On PostgreSQL (production; see CreateTaskerTasksTable) `id BIGSERIAL
+     * PRIMARY KEY` populates the real `id` column and PDO::lastInsertId()
+     * (via lastval()) reads it back correctly — `id` is always right there.
+     *
+     * Under the in-memory SQLite double this plugin's own unit tests run
+     * against, SQLite only aliases a primary key column to its own rowid
+     * when the column's declared type is the LITERAL string "INTEGER" (case
+     * insensitive) — see https://www.sqlite.org/lang_createtable.html#rowid.
+     * "BIGSERIAL" (a PostgreSQL-only type name SQLite happily accepts but
+     * does not recognise) does not qualify, so a row inserted without
+     * specifying `id` gets a real, permanent NULL in its `id` column, while
+     * PDO::lastInsertId() still faithfully reports SQLite's own always-present
+     * `rowid`. A later `WHERE id = :id` lookup keyed off that value then
+     * matches nothing. Consequently every id-keyed statement in this class
+     * (not just the lookup right after create()) must key off `rowid` on
+     * SQLite so a caller's create()-returned id round-trips correctly
+     * through update()/move()/delete()/complete()/uncomplete()/pin()/tag()
+     * within the same test run.
+     *
+     * Mirrors the identical id/rowid branch already established in
+     * {@see \Tasker\Api\SectionsApiHandler::idColumn()} and
+     * {@see \Tasker\Api\GroupsApiHandler::idColumn()} for the exact same
+     * reason.
+     */
+    private function idColumn(): string
+    {
+        return $this->db->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite' ? 'rowid' : 'id';
+    }
+
+    private static function generateUuidV4(): string
+    {
+        $data = random_bytes(16);
+        $data[6] = chr((ord($data[6]) & 0x0f) | 0x40);
+        $data[8] = chr((ord($data[8]) & 0x3f) | 0x80);
+
+        return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+    }
+
+    /**
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private function toPublicTask(array $row): array
+    {
+        return [
+            'id' => (int) $row['id'],
+            'publicId' => (string) $row['public_id'],
+            'tenantId' => (int) $row['tenant_id'],
+            'projectId' => (int) $row['project_id'],
+            'sectionId' => (int) $row['section_id'],
+            'groupId' => $row['group_id'] !== null ? (int) $row['group_id'] : null,
+            'text' => (string) $row['text'],
+            'detail' => $row['detail'],
+            'status' => (string) $row['status'],
+            'priority' => $row['priority'],
+            'dueDate' => $row['due_date'],
+            'pinned' => (bool) $row['pinned'],
+            'sortOrder' => (int) $row['sort_order'],
+            'completedAt' => $row['completed_at'],
+            'shortId' => $row['short_id'] !== null ? (int) $row['short_id'] : null,
+            'createdBy' => (int) $row['created_by'],
+            'createdAt' => (string) $row['created_at'],
+            'updatedAt' => (string) $row['updated_at'],
+        ];
+    }
+}

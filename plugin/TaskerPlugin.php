@@ -8,12 +8,15 @@ use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\PingApiHandler;
 use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
+use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
+use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Migrations\GrantTaskerPingPermissions;
 use Tasker\Migrations\GrantTaskerProjectPermissions;
+use Tasker\Migrations\GrantTaskerTaskPermissions;
 use Whity\Sdk\Http\Request;
 use Whity\Sdk\Http\Response;
 use Whity\Sdk\PluginInterface;
@@ -339,6 +342,183 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/sections/{sectionId:\d+}/tasks',
+                'handler' => [$this, 'listTasksForSection'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:view',
+                'schema' => [
+                    'operationId' => 'list_tasks',
+                    'summary' => 'List a section\'s tasks',
+                    'tags' => ['tasker'],
+                    'responses' => [200 => ['description' => 'The task list']],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/sections/{sectionId:\d+}/tasks',
+                'handler' => [$this, 'createTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'create_task',
+                    'summary' => 'Create a task in a section',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        201 => ['description' => 'The created task'],
+                        400 => ['description' => 'text missing, empty, too long, or priority invalid'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/tasks/{id:\d+}',
+                'handler' => [$this, 'updateTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'update_task',
+                    'summary' => 'Update a task\'s text, detail, priority, or due_date',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The updated task'],
+                        400 => ['description' => 'text empty/too long, or priority invalid'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/{id:\d+}/move',
+                'handler' => [$this, 'moveTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'move_task',
+                    'summary' => 'Move a task to a different section/group, or reorder it',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The moved task'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        422 => ['description' => 'section_id/group_id does not belong to the task\'s own project'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/tasks/{id:\d+}',
+                'handler' => [$this, 'deleteTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:delete',
+                'schema' => [
+                    'operationId' => 'delete_task',
+                    'summary' => 'Delete a task',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        204 => ['description' => 'Deleted'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/{id:\d+}/complete',
+                'handler' => [$this, 'completeTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:complete',
+                'schema' => [
+                    'operationId' => 'complete_task',
+                    'summary' => 'Mark a task complete',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The completed task'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/{id:\d+}/uncomplete',
+                'handler' => [$this, 'uncompleteTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:complete',
+                'schema' => [
+                    'operationId' => 'uncomplete_task',
+                    'summary' => 'Restore a completed task to pending',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The reopened task'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/{id:\d+}/pin',
+                'handler' => [$this, 'pinTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'pin_task',
+                    'summary' => 'Pin a task',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The pinned task'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/{id:\d+}/unpin',
+                'handler' => [$this, 'unpinTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'unpin_task',
+                    'summary' => 'Unpin a task',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The unpinned task'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/{id:\d+}/tags',
+                'handler' => [$this, 'tagTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'tag_task',
+                    'summary' => 'Attach an existing tag to a task',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        201 => ['description' => 'Tag attached'],
+                        400 => ['description' => 'tag_id missing or not a positive integer'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/projects/{id:\d+}/ready-work',
+                'handler' => [$this, 'getReadyWork'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:view',
+                'schema' => [
+                    'operationId' => 'get_ready_work',
+                    'summary' => 'List a project\'s non-done tasks, ranked by what to work on next',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The ranked task list'],
+                        404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -398,6 +578,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             'tasker_project:view',
             'tasker_project:manage',
             'tasker_structure:manage',
+            'tasker_task:view',
+            'tasker_task:edit',
+            'tasker_task:complete',
+            'tasker_task:delete',
         ];
     }
 
@@ -421,6 +605,8 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             CreateTaskerSectionsTable::class,
             CreateTaskerGroupsTable::class,
             GrantTaskerProjectPermissions::class,
+            CreateTaskerTasksTable::class,
+            GrantTaskerTaskPermissions::class,
         ];
     }
 
@@ -665,6 +851,179 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new GroupsApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * GET /api/tasker/sections/{sectionId}/tasks
+     *
+     * @param array<string, string> $params
+     */
+    public function listTasksForSection(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))->listForSection($tenantId, (int) ($params['sectionId'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/sections/{sectionId}/tasks
+     *
+     * @param array<string, string> $params
+     */
+    public function createTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $createdBy = $this->callerProfileId($request) ?? 0;
+
+        return (new TasksApiHandler($this->resolvePdo()))
+            ->create($tenantId, (int) ($params['sectionId'] ?? 0), $createdBy, $request->getBody());
+    }
+
+    /**
+     * PATCH /api/tasker/tasks/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function updateTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))
+            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/move
+     *
+     * @param array<string, string> $params
+     */
+    public function moveTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))
+            ->move($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * DELETE /api/tasker/tasks/{id}
+     *
+     * @param array<string, string> $params
+     */
+    public function deleteTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/complete
+     *
+     * @param array<string, string> $params
+     */
+    public function completeTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))->complete($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/uncomplete
+     *
+     * @param array<string, string> $params
+     */
+    public function uncompleteTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))->uncomplete($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/pin
+     *
+     * @param array<string, string> $params
+     */
+    public function pinTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))->pin($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/unpin
+     *
+     * @param array<string, string> $params
+     */
+    public function unpinTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))->unpin($tenantId, (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * POST /api/tasker/tasks/{id}/tags
+     *
+     * @param array<string, string> $params
+     */
+    public function tagTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TasksApiHandler($this->resolvePdo()))->tag($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * GET /api/tasker/projects/{id}/ready-work
+     *
+     * @param array<string, string> $params
+     */
+    public function getReadyWork(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+
+        return (new TasksApiHandler($pdo))
+            ->readyWork($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
     }
 
     /**

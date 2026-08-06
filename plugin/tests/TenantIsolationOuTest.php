@@ -7,8 +7,11 @@ namespace Tasker\Tests;
 use PDO;
 use PHPUnit\Framework\TestCase;
 use Tasker\Api\ProjectsApiHandler;
+use Tasker\Api\TasksApiHandler;
+use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
+use Tasker\Migrations\CreateTaskerTasksTable;
 
 /**
  * Proves the four OU-descendant visibility cases against a REAL PostgreSQL
@@ -67,6 +70,10 @@ final class TenantIsolationOuTest extends TestCase
 
         (new CreateTaskerProjectsTable())->up($this->pdo);
         (new CreateTaskerSectionsTable())->up($this->pdo);
+        $this->pdo->exec('DROP TABLE IF EXISTS tasker_tasks CASCADE');
+        $this->pdo->exec('DROP TABLE IF EXISTS tasker_groups CASCADE');
+        (new CreateTaskerGroupsTable())->up($this->pdo);
+        (new CreateTaskerTasksTable())->up($this->pdo);
     }
 
     /**
@@ -108,6 +115,51 @@ final class TenantIsolationOuTest extends TestCase
              VALUES (gen_random_uuid(), :tenant_id, :ou_id, :name, :slug, 1, CURRENT_TIMESTAMP) RETURNING id"
         );
         $stmt->execute([':tenant_id' => $tenantId, ':ou_id' => $ouId, ':name' => $name, ':slug' => strtolower($name)]);
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    private function makeSectionDirect(int $tenantId, int $projectId): int
+    {
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tasker_sections (public_id, tenant_id, project_id, name, slug, created_at)
+             VALUES (gen_random_uuid(), :tenant_id, :project_id, 'Backlog', 'backlog', CURRENT_TIMESTAMP) RETURNING id"
+        );
+        $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * NOTE ON A BRIEF DEVIATION: the brief's own version of this helper bound
+     * `:pinned` through a plain `execute([...])` array call alongside every
+     * other parameter. `PDOStatement::execute(array)` binds every value as
+     * `PDO::PARAM_STR` regardless of its PHP type (the exact quirk
+     * {@see \Tasker\Access\OuScopeResolver::descendantIds()} already
+     * documents for a different column) — harmless for the int/string/null
+     * columns here, but fatal for `pinned`: PHP's `(string) false` is `''`,
+     * and PostgreSQL's boolean parser rejects an empty string
+     * (`SQLSTATE[22P02]: invalid input syntax for type boolean: ''`).
+     * Confirmed empirically: both `readyWork()` tests below errored on
+     * exactly this before `:pinned` was pulled out into its own
+     * `bindValue(..., PDO::PARAM_BOOL)` call, matching the same explicit-bool
+     * pattern {@see \Tasker\Api\ProjectsApiHandler::list()} already uses for
+     * `:unrestricted`.
+     */
+    private function makeTaskDirect(int $tenantId, int $projectId, int $sectionId, string $text, ?string $priority = null, bool $pinned = false): int
+    {
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tasker_tasks (public_id, tenant_id, project_id, section_id, text, priority, pinned, status, created_by, created_at, updated_at)
+             VALUES (gen_random_uuid(), :tenant_id, :project_id, :section_id, :text, :priority, :pinned, 'pending', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+             RETURNING id"
+        );
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':project_id', $projectId, PDO::PARAM_INT);
+        $stmt->bindValue(':section_id', $sectionId, PDO::PARAM_INT);
+        $stmt->bindValue(':text', $text, PDO::PARAM_STR);
+        $stmt->bindValue(':priority', $priority, $priority === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
+        $stmt->bindValue(':pinned', $pinned, PDO::PARAM_BOOL);
+        $stmt->execute();
 
         return (int) $stmt->fetchColumn();
     }
@@ -323,6 +375,49 @@ final class TenantIsolationOuTest extends TestCase
 
         $handler = new ProjectsApiHandler($this->pdo);
         $response = $handler->delete(7, null, $otherTenantProjectId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testReadyWorkExcludesDoneTasks(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Ready work project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $doneTaskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Already done');
+        $this->pdo->exec("UPDATE tasker_tasks SET status = 'done' WHERE id = {$doneTaskId}");
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Still open');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $payload = json_decode($handler->readyWork(7, null, $projectId)->getBody(), true);
+
+        self::assertCount(1, $payload['data']);
+        self::assertSame('Still open', $payload['data'][0]['text']);
+    }
+
+    public function testReadyWorkOrdersPinnedAndHigherPriorityFirst(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Ranking project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Low priority', 'low');
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Rush, unpinned', 'rush');
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Pinned, no priority', null, true);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $payload = json_decode($handler->readyWork(7, null, $projectId)->getBody(), true);
+
+        self::assertSame('Pinned, no priority', $payload['data'][0]['text'], 'pinned always sorts first, regardless of priority');
+        self::assertSame('Rush, unpinned', $payload['data'][1]['text']);
+        self::assertSame('Low priority', $payload['data'][2]['text']);
+    }
+
+    public function testReadyWorkRejects404ForAProjectOutsideTheCallersOuScope(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $projectId = $this->makeProjectDirect(7, 1, 'Parent OU project');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->readyWork(7, 2, $projectId);
 
         self::assertSame(404, $response->getStatusCode());
     }
