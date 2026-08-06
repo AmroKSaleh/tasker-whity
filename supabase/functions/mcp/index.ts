@@ -720,6 +720,42 @@ async function getOrCreateBacklog(sb: any, projectId: string): Promise<string> {
   return data.id
 }
 
+// TDE-875: the honest-overview line. get_project's affordable mode renders title + badges,
+// and on a task worked over weeks those are the STALEST fields on the record — a real status
+// report was written off them and asserted the opposite of what four task bodies said.
+//
+// The rule this encodes: the cheap overview NEVER GUESSES. Either the task carries a
+// deliberately-written current_state, or we say we cannot vouch for the title and the reader
+// should open it. There is no third branch that extracts a summary out of detail — a
+// heuristic that is usually right is worse than an admission, because it gets trusted.
+//
+// Thresholds exist so the warning stays scarce enough to mean something: a body that moved
+// a week after its title, with enough substance to contradict it. Below those, the title is
+// still a fair description and a flag would be noise.
+const STALE_TITLE_AFTER_MS = 7 * 24 * 60 * 60 * 1000
+const STALE_TITLE_MIN_DETAIL = 300
+const TITLE_WARN_CHARS = 120
+
+function taskStateLine(t: any): string | null {
+  const state = typeof t.current_state === 'string' ? t.current_state.trim() : ''
+  const detailMovedAt = Date.parse(t.detail_updated_at ?? '') || 0
+  const stateAt = Date.parse(t.current_state_at ?? '') || 0
+
+  // A state line written before the body last moved is itself suspect — surface it, but say so
+  // rather than presenting it as current. Silently trusting it would rebuild the exact bug.
+  if (state) {
+    const stale = detailMovedAt > stateAt
+    return `  ▸ ${state}${stale ? `  (set ${agoLabel(t.current_state_at) ?? 'earlier'}; body has moved since — verify before relying on it)` : ''}`
+  }
+
+  const titleWrittenAt = Date.parse(t.text_updated_at ?? '') || 0
+  const detailLen = typeof t.detail === 'string' ? t.detail.trim().length : 0
+  if (!titleWrittenAt || !detailMovedAt) return null
+  if (detailLen < STALE_TITLE_MIN_DETAIL) return null
+  if (detailMovedAt - titleWrittenAt < STALE_TITLE_AFTER_MS) return null
+  return `  ⚠ body edited ${agoLabel(t.detail_updated_at) ?? 'later'}, title unchanged since creation — open before relying on the title`
+}
+
 // Foundation = the project's grounding, stored in projects.context (TDE-262). Fixed-core
 // fields render first in a stable order; any flexible/extra keys the agent added per
 // project type render after. One renderer, used by get_project (full) and get_task
@@ -1555,7 +1591,7 @@ const TOOLS = [
   },
   {
     name: 'get_project',
-    description: 'Get project details: Foundation, all sections, and all tasks with their IDs, priorities, and statuses. Per-task Notes (the detail field) are OMITTED by default to keep the map small on large projects — pass include_notes:true for them, or read one task in full with get_task.',
+    description: 'Get project details: Foundation, all sections, and all tasks with their IDs, priorities, and statuses. Per-task Notes (the detail field) are OMITTED by default to keep the map small on large projects — pass include_notes:true for them, or read one task in full with get_task. READ THE MARKS (TDE-875): a title and a status are often the STALEST fields on a worked task — titles are written once, at creation, while bodies accrete. So each task may carry "▸ <line>", the task\'s own current-state statement, which OVERRIDES the title where they disagree; or "⚠", meaning its body moved well after its title and the title alone may be wrong — open that task with get_task before asserting anything about it. An unmarked task is one where neither applies. Do NOT write a status report, summary, or update off titles and statuses alone while ⚠ marks are present in the output.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1991,7 +2027,7 @@ const TOOLS = [
   },
   {
     name: 'update_task',
-    description: 'Update task fields. Only provided fields change. Pass append:true to ADD detail to the existing detail (blank-line separated) instead of replacing it. Setting status to in_progress or done is hard-blocked if the task has unmet upstream flow dependencies — finish the source task(s) first (the response explains which).',
+    description: 'Update task fields. Only provided fields change. Pass append:true to ADD detail to the existing detail (blank-line separated) instead of replacing it. Setting status to in_progress or done is hard-blocked if the task has unmet upstream flow dependencies — finish the source task(s) first (the response explains which). KEEP current_state HONEST (TDE-875): when your edit changes where the task actually STANDS — not merely adding background — pass current_state too. It is the one line the cheap get_project overview shows in place of a title that may be years out of date, and the only defence against a status report written off stale titles.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -2013,6 +2049,7 @@ const TOOLS = [
         agent_proposal: { type: 'string', description: 'Prepare→confirm→execute: the agent\'s PREPARED proposal (a concise summary of what it will do). Setting it puts the task in the web Agent Queue "Awaiting confirmation" tab. Clear it (empty string) once confirmed-and-executed, or if declined.' },
         agent_proposal_confirmed: { type: 'boolean', description: 'Usually set by the human (the "Confirm" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. Normally reset to false only by clearing the proposal after executing.' },
         tags:           { type: 'array', items: { type: 'string' }, description: 'Tags used to filter which Instruction Sets are loaded into this task\'s context.' },
+        current_state:  { type: 'string', description: 'ONE line on where this task actually stands right now — what is done, what is deliberately deferred and why, what is genuinely left. This is what the cheap get_project board overview renders instead of trusting the title, so write it for a reader who has NOT opened the task. Concrete over vague: "Step 1 mitigation shipped + regression verified 27 Jul; step 3 deferred by owner; step 2 belongs to another team" — not "in progress". Update it whenever the standing changes; empty string clears it (which restores the automatic stale-title warning).' },
       },
       required: ['task_id'],
     },
@@ -3668,7 +3705,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         ...(foundationLines.length ? foundationLines : ['(no Foundation set — run bootstrap_project to ground it)']),
         '',
       ]
-      if (!includeNotes) lines.push('_Task Notes omitted — pass include_notes:true, or read one task via get_task._', '')
+      if (!includeNotes) lines.push(
+        '_Task Notes omitted — pass include_notes:true, or read one task via get_task._',
+        '_▸ = the task\'s own current-state line. ⚠ = its body moved well after its title; the title alone may be wrong — open it. No mark means neither, so judge by the title._',
+        '',
+      )
 
       // TDE-804: phase roll-up, emitted only for projects that actually use phases. Flow steps
       // leave the denominator (TDE-320) so these tallies match the board and list_sections.
@@ -3696,6 +3737,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const sid = (project.prefix && t.short_id != null) ? `${project.prefix}-${t.short_id}` : t.id
         const badges = [t.kind === 'seed' ? `SEED→${t.seed_target}` : null, t.priority, t.status, t.due_date ? `due ${t.due_date}` : null].filter(Boolean).join(', ')
         lines.push(`- [${sid}] ${t.text}  (${badges})`)
+        // TDE-875: the whole point of this line is that it rides the CHEAP path. Suppressed
+        // under include_notes because the full body is already there to read.
+        if (!includeNotes) {
+          const stateLine = taskStateLine(t)
+          if (stateLine) lines.push(stateLine)
+        }
         if (includeNotes && t.detail) lines.push(`  Notes: ${t.detail}`)
       }
 
@@ -4487,7 +4534,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         await sb.rpc('append_milestone', { p_task_id: data.id, p_user_id: userId, p_text: m })
       }
       const relayNote = data.relay_context ? `\n[Recording context for the task] — relay context captured; the assignee will see it on get_task.` : ''
-      return `Created task "${text}"\nid: ${data.id}${relayNote}${dupAdvisory}`
+      // TDE-875: titles are returned IN FULL by every get_project call, so an over-long one is
+      // a tax on every board read forever (the case that prompted this: a "title" that was a
+      // multi-paragraph remediation document with a code block in it). Warn, never block —
+      // a hard cap would reject writes that work today, and the caller may have a reason.
+      const titleLen = String(text ?? '').length
+      const titleWarn = titleLen > TITLE_WARN_CHARS
+        ? `\n⚠ Title is ${titleLen} chars (~${Math.round(titleLen / 4)} tokens), re-sent on every get_project board read. Titles are a scanning surface, not a place for content — move the body into \`detail\` and keep the title to one scannable line.`
+        : ''
+      return `Created task "${text}"\nid: ${data.id}${relayNote}${titleWarn}${dupAdvisory}`
     }
 
     case 'merge_task_as_duplicate': {
@@ -4609,9 +4664,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'update_task': {
       const { task_id, append, ...updates } = args
-      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready', 'agent_proposal', 'agent_proposal_confirmed', 'tags']
+      const allowed = ['text', 'detail', 'priority', 'status', 'due_date', 'section_id', 'group_id', 'pinned', 'executor', 'human_guidance', 'relay_context', 'delegated_to', 'agent_ready', 'agent_proposal', 'agent_proposal_confirmed', 'tags', 'current_state']
       const patch: Record<string, any> = {}
-      const nullable = (k: string) => k === 'group_id' || k === 'delegated_to' || k === 'agent_proposal'   // clearable via null/empty
+      const nullable = (k: string) => k === 'group_id' || k === 'delegated_to' || k === 'agent_proposal' || k === 'current_state'   // clearable via null/empty
       for (const k of allowed) if (nullable(k) ? updates[k] !== undefined : updates[k] !== undefined && updates[k] !== null) patch[k] = updates[k]
       const task = await resolveTask(sb, userId, task_id)
       if (!task) return 'Task not found.'
@@ -4648,6 +4703,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         patch.pin_snoozed = false
       } else if (patch.pinned === false) {
         patch.pinned_at = null
+      }
+
+      // TDE-875: an empty string clears the state line rather than storing a blank one that
+      // would suppress the staleness warning while saying nothing.
+      if (patch.current_state !== undefined) {
+        patch.current_state = (typeof patch.current_state === 'string' && patch.current_state.trim()) ? patch.current_state.trim() : null
       }
 
       if (patch.agent_ready === true) patch.agent_ready_at = new Date().toISOString()
@@ -4700,7 +4761,24 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         data: { id: task.id, short_id: (task as any).short_id, text: task.text, project_id: (task as any).project_id, section_id: patch.section_id ?? (task as any).section_id, status: patch.status ?? task.status, ...patch },
         updatedFrom: changedFrom,
       }))
-      return `Updated "${task.text}".${appended ? ' (appended to detail)' : ''}`
+      // TDE-875: the maintenance half. current_state is only worth reading if it keeps up with
+      // the body — an unmaintained one decays to empty and the board falls back to the staleness
+      // warning, i.e. all of this reduces to a flag. So when a caller moves the body and leaves
+      // the state line behind, say so, and show them the line they are leaving stale. Advisory
+      // only: nothing is blocked, because a body edit that does not change the standing is
+      // perfectly normal and should not need a ceremony.
+      let stateNudge = ''
+      if (patch.detail !== undefined && patch.current_state === undefined) {
+        const { data: st } = await sb.from('tasks')
+          .select('current_state, current_state_at').eq('id', task.id).maybeSingle()
+        const prior = (st?.current_state ?? '').trim()
+        if (prior) {
+          stateNudge = `\n▸ You changed the body but not the state line, set ${agoLabel(st.current_state_at) ?? 'earlier'}:\n    "${prior}"\n  If that no longer describes where this stands, pass current_state:"…" — it is what the cheap get_project overview shows instead of the (possibly stale) title.`
+        } else {
+          stateNudge = `\n▸ This task has no current_state line. Once a body outgrows its title, the board overview has nothing accurate to show — pass current_state:"<one line on where this actually stands>" to fix that for every future reader.`
+        }
+      }
+      return `Updated "${task.text}".${appended ? ' (appended to detail)' : ''}${patch.current_state !== undefined ? (patch.current_state ? ' Current-state line set.' : ' Current-state line cleared.') : ''}${stateNudge}`
     }
 
     case 'complete_task': {
@@ -4951,6 +5029,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `Created: ${formatStamp(full.created_at, tz)} | Last edited: ${formatStamp(full.updated_at, tz)}${agoLabel(full.updated_at) ? ` (${agoLabel(full.updated_at)})` : ''}`,
       ]
       if (branchName) lines.push(`Branch: ${branchName}`)
+      // TDE-875: show it here too. A reader who opened the task can see the body, so this is not
+      // load-bearing for them — but seeing the line they are about to make stale is what prompts
+      // updating it, and the flag tells them the board is currently misrepresenting this task.
+      if (full.current_state) {
+        const behind = (Date.parse(full.detail_updated_at ?? '') || 0) > (Date.parse(full.current_state_at ?? '') || 0)
+        lines.push(`Current state: ${full.current_state}  (set ${agoLabel(full.current_state_at) ?? 'earlier'}${behind ? ' — the body has moved since; refresh it via update_task(current_state:…)' : ''})`)
+      } else if (taskStateLine(full)) {
+        lines.push(`Current state: — none set, and this task's body has moved well past its title, so the board overview is flagging it as unreliable. Set one via update_task(current_state:…).`)
+      }
       // TDE-804: the phase answers "is this in scope right now" — the question an agent
       // otherwise has to be told in prose every session.
       // Stays silent for projects not using phases at all (the common case) rather than
