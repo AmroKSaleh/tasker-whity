@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tasker;
 
+use Tasker\Api\BoardApiHandler;
 use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\PingApiHandler;
@@ -520,6 +521,22 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'tags' => ['tasker'],
                     'responses' => [
                         200 => ['description' => 'The ranked task list'],
+                        404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/projects/{id:\d+}/board',
+                'handler' => [$this, 'getBoard'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:view',
+                'schema' => [
+                    'operationId' => 'get_board',
+                    'summary' => 'Get a project\'s full board: sections, groups, tasks, milestones',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The composed board'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
                     ],
                 ],
@@ -1144,6 +1161,24 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
         return (new TasksApiHandler($pdo))
             ->readyWork($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
+    }
+
+    /**
+     * GET /api/tasker/projects/{id}/board
+     *
+     * @param array<string, string> $params
+     */
+    public function getBoard(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+
+        return (new BoardApiHandler($pdo))
+            ->get($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
     }
 
     /**
