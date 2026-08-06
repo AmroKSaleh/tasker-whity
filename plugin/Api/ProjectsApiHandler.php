@@ -76,9 +76,17 @@ final class ProjectsApiHandler
             return Response::error('name must be a non-empty string of at most ' . self::MAX_NAME_LENGTH . ' characters', 400);
         }
 
-        $ouId = null;
-        if (is_array($decoded) && isset($decoded['ou_id'])) {
-            $ouId = (int) $decoded['ou_id'];
+        // Default to the CALLER's own OU, not tenant-root: an OU-restricted
+        // caller who simply omits ou_id must not get a project that is
+        // wider than their own scope (a bare null ou_id is visible
+        // tenant-wide). An unrestricted caller's own OU is null, so this
+        // default is a no-op for them. When the body DOES supply the key
+        // (array_key_exists, not isset — an explicit `"ou_id": null` must
+        // still be validated, not skipped), the requested value — concrete
+        // id or null — is routed through ouIsInCallersScope() below.
+        $ouId = $callerOuId;
+        if (is_array($decoded) && array_key_exists('ou_id', $decoded)) {
+            $ouId = $decoded['ou_id'] !== null ? (int) $decoded['ou_id'] : null;
             if (!$this->ouIsInCallersScope($tenantId, $callerOuId, $ouId)) {
                 return Response::error('ou_id is outside the caller\'s scope', 422);
             }
@@ -165,7 +173,11 @@ final class ProjectsApiHandler
         }
         if (array_key_exists('ou_id', $decoded)) {
             $ouId = $decoded['ou_id'] !== null ? (int) $decoded['ou_id'] : null;
-            if ($ouId !== null && !$this->ouIsInCallersScope($tenantId, $callerOuId, $ouId)) {
+            // Validated regardless of whether the new value is a concrete OU
+            // id or null: an OU-restricted caller setting ou_id to null would
+            // otherwise unilaterally widen the project to tenant-wide
+            // visibility with no authorization check at all.
+            if (!$this->ouIsInCallersScope($tenantId, $callerOuId, $ouId)) {
                 return Response::error('ou_id is outside the caller\'s scope', 422);
             }
             $fields[] = 'ou_id = :ou_id';
@@ -242,12 +254,22 @@ final class ProjectsApiHandler
 
     /**
      * Whether $ouId is within the caller's own OU-descendant scope — used to
-     * stop a caller assigning a project to an OU they cannot themselves see.
+     * stop a caller assigning a project to an OU they cannot themselves see,
+     * INCLUDING assigning it to null (tenant-root, visible to the whole
+     * tenant) — a null ou_id is strictly WIDER than any non-null OU scope,
+     * so it must be treated as its own case, not skipped as "no OU to
+     * check".
      */
-    private function ouIsInCallersScope(int $tenantId, ?int $callerOuId, int $ouId): bool
+    private function ouIsInCallersScope(int $tenantId, ?int $callerOuId, ?int $ouId): bool
     {
         if ($callerOuId === null) {
-            return true; // unrestricted (tenant-root) caller may assign anywhere.
+            return true; // unrestricted (tenant-root) caller may assign anywhere, including null.
+        }
+
+        // An OU-restricted caller can never produce a null ou_id: that would
+        // grant tenant-wide visibility, strictly wider than their own scope.
+        if ($ouId === null) {
+            return false;
         }
 
         return in_array($ouId, OuScopeResolver::descendantIds($this->db, $tenantId, $callerOuId), true);

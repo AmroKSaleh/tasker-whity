@@ -200,6 +200,61 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(422, $response->getStatusCode());
     }
 
+    public function testCreateWithoutOuIdDefaultsToTheCallersOwnOuNotTenantRoot(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        // Caller restricted to OU 2 creates a project WITHOUT an ou_id in the body.
+        $created = json_decode(
+            $handler->create(7, 2, 1, json_encode(['name' => 'Scoped by default']))->getBody(),
+            true
+        );
+
+        self::assertSame(2, $created['data']['ouId'], 'omitting ou_id must scope to the caller\'s own OU, not tenant-root');
+
+        // A sibling OU (3) must never see it — proves omitting ou_id cannot
+        // widen visibility the way a bare `ou_id: null` default used to.
+        $siblingPayload = json_decode($handler->list(7, 3)->getBody(), true);
+        $siblingIds = array_column($siblingPayload['data'], 'id');
+        self::assertNotContains($created['data']['id'], $siblingIds);
+    }
+
+    public function testUpdateRejectsWideningAnOuScopedProjectToNull(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $projectId = $this->makeProjectDirect(7, 2, 'Scoped project');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        // Caller scoped to OU 2 already owns this project, but must not be
+        // able to unilaterally widen it to tenant-wide visibility.
+        $response = $handler->update(7, 2, $projectId, json_encode(['ou_id' => null]));
+
+        self::assertSame(422, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT ou_id FROM tasker_projects WHERE id = {$projectId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(2, (int) $row['ou_id'], 'a rejected update must not silently widen the project\'s ou_id');
+    }
+
+    public function testUnrestrictedCallerCanStillCreateAndUpdateWithNullOuId(): void
+    {
+        $handler = new ProjectsApiHandler($this->pdo);
+
+        $created = json_decode(
+            $handler->create(7, null, 1, json_encode(['name' => 'Root project', 'ou_id' => null]))->getBody(),
+            true
+        );
+        self::assertNull($created['data']['ouId']);
+
+        $response = $handler->update(7, null, (int) $created['data']['id'], json_encode(['ou_id' => null]));
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertNull($payload['data']['ouId'], 'a tenant-root caller must still be able to leave/set a project tenant-wide');
+    }
+
     public function testUpdateChangesNameAndPrefix(): void
     {
         $projectId = $this->makeProjectDirect(7, null, 'Original Name');
