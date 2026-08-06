@@ -8,7 +8,10 @@ import { CONNECTORS } from '../../lib/connectors'
 const BTN = 'w-full px-4 py-2 rounded-lg border border-line bg-paper text-[12px] text-ink hover:bg-surf-2 transition-colors disabled:opacity-40'
 
 // Shared card chrome. `action` renders on the right of the header; `children` below it.
-function Row({ icon: Icon, label, slice, connected, badge, account, action, children }) {
+// `warn` (TDE-865): the connector holds a credential that has been PROVEN dead. Distinct from
+// both connected and never-connected — a green dot over a 401 is worse than an honest failure,
+// because the dependent features fail with no explanation the user can act on.
+function Row({ icon: Icon, label, slice, connected, warn, badge, account, action, children }) {
   return (
     <div className="rounded-xl border border-line bg-surf-2 px-4 py-3">
       <div className="flex items-center justify-between gap-3">
@@ -17,12 +20,16 @@ function Row({ icon: Icon, label, slice, connected, badge, account, action, chil
           <div className="min-w-0">
             <div className="flex items-center gap-2">
               <span className="text-[13px] font-medium text-ink">{label}</span>
-              {connected && <span className="text-[10px] text-green-600">●</span>}
+              {warn
+                ? <span className="text-[10px] text-amber-500" title={warn}>▲</span>
+                : connected && <span className="text-[10px] text-green-600">●</span>}
               {badge && <span className="text-[9px] font-mono text-mute-2 uppercase tracking-wide">{badge}</span>}
             </div>
-            {connected && account
-              ? <p className="text-[11px] text-ink-2 truncate" title={account}>{account}</p>
-              : <p className="text-[11px] text-mute-2 truncate">{slice}</p>}
+            {warn
+              ? <p className="text-[11px] text-amber-600 truncate" title={warn}>{warn}</p>
+              : connected && account
+                ? <p className="text-[11px] text-ink-2 truncate" title={account}>{account}</p>
+                : <p className="text-[11px] text-mute-2 truncate">{slice}</p>}
           </div>
         </div>
         {action}
@@ -96,13 +103,18 @@ export default function ConnectorsSection() {
 
     if (c.kind === 'github') {
       const connected = gh.isConnected
+      const warn = gh.needsReconnect ? 'Token rejected by GitHub — reconnect to restore issue sync' : null
       return (
-        <Row {...common} connected={connected}
+        <Row {...common} connected={connected} warn={warn}
           account={gh.account?.login ? `@${gh.account.login}` : null}
-          action={connected && <DisconnectBtn onClick={gh.disconnect} />}>
+          action={(connected || gh.needsReconnect) && <DisconnectBtn onClick={gh.disconnect} />}>
           {gh.loading && <p className="mt-2 text-[12px] text-mute">Checking connection…</p>}
           {!gh.loading && !connected && (gh.isOAuthUser ? (
-            <p className="mt-2 text-[12px] text-mute">Sign out and back in with GitHub to connect automatically.</p>
+            <p className="mt-2 text-[12px] text-mute">
+              {gh.needsReconnect
+                ? 'The stored GitHub credential has expired or been revoked. Sign out and back in with GitHub to refresh it.'
+                : 'Sign out and back in with GitHub to connect automatically.'}
+            </p>
           ) : (
             <div className="mt-2.5 flex flex-col gap-2">
               <div className="flex gap-2">
