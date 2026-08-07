@@ -331,7 +331,9 @@ function escapeLike(s: string): string {
 async function resolveProject(sb: any, userId: string, projectId: string, logContext?: { tool_name: string, raw_params: any }) {
   let { data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('slug', projectId).eq('user_id', userId).maybeSingle()
   if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('id', projectId).eq('user_id', userId).maybeSingle())
-  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').ilike('prefix', escapeLike(projectId)).eq('user_id', userId).maybeSingle())
+  // TDE-822: was ilike (escaped by TDE-872). Now an equality match on the uppercase prefix so it
+  // uses the unique index on (user_id, lower(prefix)); ilike cannot.
+  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('prefix', String(projectId || '').toUpperCase()).eq('user_id', userId).maybeSingle())
   if (!data && logContext) {
     fireAndForget(sb.from('mcp_error_logs').insert({
       user_id: userId,
@@ -647,7 +649,7 @@ function diceSimilarity(a: string, b: string): number {
 }
 // Existing tasks in the project ranked by title similarity to `text`, above `floor`.
 async function findSimilarTasks(sb: any, projectId: string, text: string, floor = 0.5): Promise<any[]> {
-  const { data } = await sb.from('tasks').select('id, text, short_id, status, duplicate_of').eq('project_id', projectId)
+  const { data } = await sb.from('tasks').select('id, text, short_id, status, duplicate_of').eq('project_id', projectId).is('is_deleted', false)
   return ((data ?? []) as any[])
     .map((t: any) => ({ ...t, sim: diceSimilarity(text, t.text) }))
     .filter((t: any) => t.sim >= floor && !t.duplicate_of)
@@ -971,18 +973,26 @@ function renderFoundation(ctx: any): string[] {
   return out
 }
 
-// Derive a 2–5 uppercase-letter prefix (the short-ID handle, e.g. WMP-3) from a project
+// Derive a 2–6 uppercase alphanumeric prefix (the short-ID handle, e.g. WMP-3) from a project
 // name, unique within the user's projects. Returns null if a clean one can't be found.
+// TDE-822: prefix is NOT NULL + unique per user (case-insensitive), 2-6 uppercase alphanumerics.
+// The web UI capped at 3 while this capped at 5 — the two disagreed and nobody noticed; both are
+// now 6. The old ten-candidate loop could exhaust and return null, which silently produced a
+// prefix-less project; it now suffixes with digits until it finds a free one.
+// Kept behaviourally identical to rest-api's copy — if you change one, change both.
+const PREFIX_MAX = 6
 async function deriveProjectPrefix(sb: any, userId: string, name: string): Promise<string | null> {
-  const words = String(name || '').toUpperCase().split(/[^A-Z]+/).filter(Boolean)
-  let base = (words.length >= 2 ? words.slice(0, 4).map((w: string) => w[0]).join('') : (words[0] || '').slice(0, 4))
+  const words = String(name || '').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean)
+  let base = (words.length >= 2 ? words.slice(0, PREFIX_MAX).map((w: string) => w[0]).join('') : (words[0] || '').slice(0, PREFIX_MAX))
   if (base.length < 2) base = (base + 'PRJ').slice(0, 3)
-  base = base.slice(0, 5)
+  base = base.slice(0, PREFIX_MAX)
   const { data: rows } = await sb.from('projects').select('prefix').eq('user_id', userId)
   const taken = new Set((rows || []).map((r: any) => (r.prefix || '').toUpperCase()).filter(Boolean))
-  for (const suffix of ['', 'X', 'Y', 'Z', 'A', 'B', 'C', 'D', 'E', 'F']) {
-    const cand = (base.slice(0, 5 - suffix.length) + suffix)
-    if (cand.length >= 2 && cand.length <= 5 && !taken.has(cand)) return cand
+  if (!taken.has(base)) return base
+  for (let n = 2; n < 10000; n++) {
+    const suffix = String(n)
+    const cand = base.slice(0, Math.max(1, PREFIX_MAX - suffix.length)) + suffix
+    if (!taken.has(cand)) return cand
   }
   return null
 }
@@ -1335,7 +1345,7 @@ async function applyFlush(
     for (const [slug, hub] of hubSectionBySlug) {
       if (fileSectionSlugs.has(slug as string)) continue
       const secId = (hub as any).id
-      const { count: taskCount } = await sb.from('tasks').select('id', { count: 'exact', head: true }).eq('section_id', secId).eq('user_id', userId)
+      const { count: taskCount } = await sb.from('tasks').select('id', { count: 'exact', head: true }).eq('section_id', secId).eq('user_id', userId).is('is_deleted', false)
       const stillHasGroup = (groups || []).some((g: any) => g.section_id === secId && fileGroupSlugs.has(g.slug))
       if ((taskCount || 0) > 0 || stillHasGroup) {
         warnings.push(`structure.json: section "${slug}" NOT deleted — still has ${taskCount || 0} task(s)${stillHasGroup ? ' and group(s)' : ''}; empty it first (section delete is guarded)`)
@@ -1946,13 +1956,13 @@ const TOOLS = [
   },
   {
     name: 'update_project',
-    description: 'Update a project\'s name or prefix (short ID prefix like "BPW"). The prefix must be 2–5 uppercase letters and unique across your projects.',
+    description: 'Update a project\'s name or prefix (short ID prefix like "BPW"). The prefix must be 2–6 uppercase letters or digits and unique across your projects.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix, slug, or UUID' },
         name:   { type: 'string', description: 'New project name (optional)' },
-        prefix: { type: 'string', description: 'New prefix, 2–5 uppercase letters e.g. "BPW" (optional)' },
+        prefix: { type: 'string', description: 'New prefix, 2–6 uppercase letters or digits e.g. "BPW" (optional)' },
       },
       required: ['project_id'],
     },
@@ -3826,7 +3836,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (envFilter) projQuery = projQuery.eq('environment_id', envFilter)
       const [{ data: projects }, { data: tasks }, { data: envRows }, { data: us }] = await Promise.all([
         projQuery,
-        sb.from('tasks').select('project_id, status').eq('user_id', userId),
+        sb.from('tasks').select('project_id, status').eq('user_id', userId).is('is_deleted', false),
         sb.from('environments').select('id, name, sort_order').eq('user_id', userId).order('sort_order'),
         sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle(),
       ])
@@ -3877,7 +3887,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!project) return `Project "${args.project_id}" not found.`
       const [{ data: sections }, { data: tasks }, { data: projPhases }] = await Promise.all([
         sb.from('sections').select('*').eq('project_id', project.id).order('sort_order'),
-        sb.from('tasks').select('*').eq('project_id', project.id).order('sort_order'),
+        sb.from('tasks').select('*').eq('project_id', project.id).is('is_deleted', false).order('sort_order'),
         sb.from('phases').select(PHASE_COLS).eq('project_id', project.id).order('sort_order'),
       ])
       // TDE-319/371: Notes (task detail) are the bulk of a large project's payload and are the
@@ -4082,9 +4092,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         + '-' + Date.now().toString(36)
       // Auto-assign a short-ID handle (prefix) so tasks get usable IDs (e.g. WMP-3)
       // from the start. Caller can rename it later via update_project.
-      const prefix = await deriveProjectPrefix(sb, userId, name)
+      const prefix = await deriveProjectPrefix(sb, userId, args.prefix || name)
+      // TDE-822: previously a null prefix was spread away and the project was created without
+      // one, leaving its tasks unaddressable as PREFIX-n. Fail loudly instead.
+      if (!prefix) return 'Could not derive a unique project prefix. Pass an explicit prefix, or free one up.'
       const { data, error } = await sb.from('projects')
-        .insert({ name, slug, user_id: userId, context: context ?? {}, environment_id: environmentId, ...(prefix ? { prefix } : {}) })
+        .insert({ name, slug, user_id: userId, context: context ?? {}, environment_id: environmentId, prefix })
         .select().single()
       if (error) throw new Error(error.message)
       await getOrCreateBacklog(sb, data.id)
@@ -4260,7 +4273,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (args.name) updates.name = args.name
       if (args.prefix) {
         const p = args.prefix.trim().toUpperCase()
-        if (!/^[A-Z]{2,5}$/.test(p)) return 'Prefix must be 2–5 uppercase letters only (e.g. "BPW").'
+        if (!new RegExp(`^[A-Z0-9]{2,${PREFIX_MAX}}$`).test(p)) return `Prefix must be 2–${PREFIX_MAX} uppercase letters or digits (e.g. "BPW").`
         const { data: clash } = await sb.from('projects').select('id').eq('user_id', userId).eq('prefix', p).neq('id', project.id).maybeSingle()
         if (clash) return `Prefix "${p}" is already used by another project.`
         updates.prefix = p
@@ -4302,7 +4315,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!project) return `Project "${args.project_id}" not found.`
       const [{ data }, { data: tasks }] = await Promise.all([
         sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order'),
-        sb.from('tasks').select('section_id, status, flow_id').eq('project_id', project.id),
+        sb.from('tasks').select('section_id, status, flow_id').eq('project_id', project.id).is('is_deleted', false),
       ])
       if (!data?.length) return `No sections in "${project.name}".`
       // Per-section task tallies (default behaviour): open = not done, matching the app's hide-done convention.
@@ -4351,13 +4364,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .select('id, name').eq('id', args.section_id).eq('project_id', project.id).maybeSingle()
       if (!section) return `Section not found in "${project.name}".`
 
-      const { data: secTasks } = await sb.from('tasks').select('id').eq('section_id', section.id)
+      // Recycle-binned tasks keep their section_id, so an unfiltered count guards rows the user
+      // already deleted — it made empty sections undeletable (TDE-882).
+      const { data: secTasks } = await sb.from('tasks').select('id').eq('section_id', section.id).is('is_deleted', false)
       const taskCount = secTasks?.length ?? 0
       if (taskCount > 0 && !args.delete_tasks) {
         return `Section "${section.name}" still has ${taskCount} task${taskCount !== 1 ? 's' : ''}. Move them to another section first, or pass delete_tasks: true to delete the section together with its tasks.`
       }
       if (taskCount > 0 && args.delete_tasks) {
-        const { error: te } = await sb.from('tasks').delete().eq('section_id', section.id)
+        // Soft delete, matching delete_task — these land in the recycle bin and are recoverable
+        // for 7 days rather than being destroyed outright.
+        const { error: te } = await sb.from('tasks')
+          .update({ is_deleted: true, deleted_at: new Date().toISOString() })
+          .eq('section_id', section.id).is('is_deleted', false)
         if (te) throw new Error(te.message)
       }
       await sb.from('groups').delete().eq('section_id', section.id)
@@ -4371,7 +4390,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!project) return `Project "${args.project_id}" not found.`
       const [{ data: phases }, { data: tasks }] = await Promise.all([
         sb.from('phases').select(PHASE_COLS).eq('project_id', project.id).order('sort_order'),
-        sb.from('tasks').select('phase_id, status, flow_id').eq('project_id', project.id),
+        sb.from('tasks').select('phase_id, status, flow_id').eq('project_id', project.id).is('is_deleted', false),
       ])
       // TDE-320/TDE-806: flow steps leave every denominator — same rule the board and
       // list_sections use, so the phase tallies reconcile with what the human sees.
@@ -4444,7 +4463,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (!project) return `Project "${args.project_id}" not found.`
       const phase = await resolvePhase(sb, project.id, args.phase_id)
       if (!phase) return `Phase "${args.phase_id}" not found in "${project.name}".`
-      const { data: affected } = await sb.from('tasks').select('id').eq('phase_id', phase.id)
+      const { data: affected } = await sb.from('tasks').select('id').eq('phase_id', phase.id).is('is_deleted', false)
       const n = affected?.length ?? 0
       // tasks.phase_id is ON DELETE SET NULL and projects.active_phase_id likewise, so the
       // DB unphases and clears the pointer for us — no manual cleanup, no lost tasks.
@@ -5061,7 +5080,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
 
     case 'rank_tasks': {
-      let query = sb.from('tasks').select('*, project:projects(name, slug, prefix)').eq('user_id', userId).neq('status', 'done')
+      let query = sb.from('tasks').select('*, project:projects(name, slug, prefix)').eq('user_id', userId).neq('status', 'done').is('is_deleted', false)
       if (args.project_id) {
         const p = await resolveProject(sb, userId, args.project_id)
         if (p) query = query.eq('project_id', p.id)
@@ -6054,7 +6073,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       // ALSO fetch confirmed proposals ready to EXECUTE (human reviewed + approved in the web).
       let xq = sb.from('tasks').select('id, text, short_id, agent_proposal, project:projects(prefix)')
-        .eq('user_id', userId).eq('agent_proposal_confirmed', true).not('agent_proposal', 'is', null)
+        .eq('user_id', userId).eq('agent_proposal_confirmed', true).not('agent_proposal', 'is', null).is('is_deleted', false)
       if (args.project_id) { const p2 = await resolveProject(sb, userId, args.project_id); if (p2) xq = xq.eq('project_id', p2.id) }
       const [{ data: readyData }, { data: execData }] = await Promise.all([q, xq])
       const prio: Record<string, number> = { rush: 0, high: 1, medium: 2, low: 3 }
@@ -6901,7 +6920,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (error) throw new Error(error.message)
       if (!groups?.length) return 'No groups found.'
 
-      const { data: taskCounts } = await sb.from('tasks').select('group_id').eq('project_id', project.id)
+      const { data: taskCounts } = await sb.from('tasks').select('group_id').eq('project_id', project.id).is('is_deleted', false)
       const counts: Record<string, number> = {}
       for (const t of (taskCounts ?? [])) {
         if (t.group_id) counts[t.group_id] = (counts[t.group_id] ?? 0) + 1
@@ -7092,7 +7111,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const { data: section } = await sb.from('sections').select('*').eq('id', args.section_id).eq('project_id', project.id).single()
       if (!section) return `Section not found.`
 
-      const { data: tasks } = await sb.from('tasks').select('*').eq('section_id', args.section_id)
+      const { data: tasks } = await sb.from('tasks').select('*').eq('section_id', args.section_id).is('is_deleted', false)
       const { data: groups } = await sb.from('groups').select('*').eq('section_id', args.section_id)
 
       if (!tasks?.length) return `Section: ${section.name} (empty)`
@@ -7141,7 +7160,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const { data: section } = await sb.from('sections').select('*').eq('id', args.section_id).eq('project_id', project.id).single()
       if (!section) return `Section not found.`
 
-      const { data: tasks } = await sb.from('tasks').select('*').eq('section_id', args.section_id)
+      const { data: tasks } = await sb.from('tasks').select('*').eq('section_id', args.section_id).is('is_deleted', false)
       const { data: groups } = await sb.from('groups').select('*').eq('section_id', args.section_id)
 
       if (!tasks?.length) return `Section is empty. No insights to generate.`

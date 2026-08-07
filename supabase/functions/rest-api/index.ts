@@ -45,6 +45,30 @@ function slugify(name: string) {
   return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') + '-' + Date.now().toString(36)
 }
 
+// TDE-822: prefix is NOT NULL + unique per user (case-insensitive), 2-6 uppercase alphanumerics.
+// Kept behaviourally identical to the MCP's deriveProjectPrefix — if you change one, change both.
+const PREFIX_MAX = 6
+async function deriveProjectPrefix(sb: any, userId: string, name: string): Promise<string | null> {
+  const words = String(name || '').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean)
+  let base = words.length >= 2
+    ? words.slice(0, PREFIX_MAX).map((w: string) => w[0]).join('')
+    : (words[0] || '').slice(0, PREFIX_MAX)
+  if (base.length < 2) base = (base + 'PRJ').slice(0, 3)
+  base = base.slice(0, PREFIX_MAX)
+
+  const { data: rows } = await sb.from('projects').select('prefix').eq('user_id', userId)
+  const taken = new Set((rows || []).map((r: any) => (r.prefix || '').toUpperCase()).filter(Boolean))
+  if (!taken.has(base)) return base
+  // Suffix with digits until free rather than giving up — returning null here is what used to
+  // let a prefix-less project through.
+  for (let n = 2; n < 10000; n++) {
+    const suffix = String(n)
+    const cand = base.slice(0, Math.max(1, PREFIX_MAX - suffix.length)) + suffix
+    if (!taken.has(cand)) return cand
+  }
+  return null
+}
+
 // ── Milestone helpers ────────────────────────────────────────
 function milestoneLabel(s: any) { return typeof s === 'string' ? s : s?.summary ?? '' }
 
@@ -94,7 +118,11 @@ Deno.serve(async (req: Request) => {
   // POST /projects
   if (method === 'POST' && segments[0] === 'projects' && !segments[1]) {
     if (!body.name) return err('name is required')
-    const { data, error } = await sb.from('projects').insert({ name: body.name, slug: slugify(body.name), user_id: userId, context: body.context ?? {} }).select().single()
+    // TDE-822: this path used to insert no prefix at all, producing projects whose tasks could
+    // never be addressed as PREFIX-n. prefix is now NOT NULL + unique per user in the DB.
+    const prefix = await deriveProjectPrefix(sb, userId, body.prefix || body.name)
+    if (!prefix) return err('Could not derive a unique project prefix; pass an explicit prefix.', 409)
+    const { data, error } = await sb.from('projects').insert({ name: body.name, slug: slugify(body.name), user_id: userId, prefix, context: body.context ?? {} }).select().single()
     if (error) return err(error.message, 500)
     return json(data, 201)
   }
