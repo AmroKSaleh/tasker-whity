@@ -6,6 +6,9 @@ import {
   saveGitHubToken,
   loadGitHubToken,
   removeGitHubToken,
+  markGitHubTokenInvalid,
+  isGitHubTokenKnownInvalid,
+  clearGitHubTokenInvalid,
   fetchRepoIssues,
   fetchUserRepos,
   fetchRepoInfo,
@@ -20,6 +23,8 @@ export function useGitHub() {
   const [userId, setUserId] = useState(null)
   const [isOAuthUser, setIsOAuthUser] = useState(false)
   const [account, setAccount] = useState(null)   // { login, email } | null
+  // TDE-865: 'unknown' until the stored token has actually been exercised against GitHub.
+  const [tokenStatus, setTokenStatus] = useState('unknown')   // unknown | valid | invalid
 
   useEffect(() => {
     supabase.auth.getUser().then(({ data: { user } }) => {
@@ -29,18 +34,32 @@ export function useGitHub() {
       loadGitHubToken(user.id).then(t => {
         setToken(t)
         setLoading(false)
-        // Resolve the connected account handle live from the stored token (no reconsent).
-        if (t) fetchGitHubAccount(t).then(setAccount).catch(() => {})
+        if (!t) return
+        // A token we already know 401s is not probed again — that request is the console
+        // noise this bug is about, and it cannot succeed until the user reconnects.
+        if (isGitHubTokenKnownInvalid()) { setTokenStatus('invalid'); return }
+        // The probe IS the status. Previously this resolved the account handle and swallowed
+        // failures, so a dead credential still rendered as a healthy green connector.
+        fetchGitHubAccount(t)
+          .then(a => { setAccount(a); setTokenStatus('valid'); clearGitHubTokenInvalid() })
+          .catch(err => {
+            if (err?.status === 401) { markGitHubTokenInvalid(); setTokenStatus('invalid') }
+            // Anything else (offline, GitHub 5xx) is not evidence the credential is bad —
+            // leave it 'unknown' rather than telling the user to reconnect over a blip.
+          })
       })
     })
   }, [])
 
-  const isConnected = !!token
+  // A stored token is not a connection. Only claim connected when a probe has not disproved it.
+  const isConnected = !!token && tokenStatus !== 'invalid'
+  const needsReconnect = !!token && tokenStatus === 'invalid'
 
   const connect = useCallback(async (pat) => {
     await validateGitHubToken(pat)
     await saveGitHubToken(userId, pat)
     setToken(pat)
+    setTokenStatus('valid')          // validateGitHubToken just proved it
     fetchGitHubAccount(pat).then(setAccount).catch(() => {})
   }, [userId])
 
@@ -49,6 +68,7 @@ export function useGitHub() {
     await removeGitHubToken(userId)
     setToken(null)
     setAccount(null)
+    setTokenStatus('unknown')
   }, [userId])
 
   const syncIssues = useCallback(async (repo, existingIssueNumbers) => {
@@ -99,5 +119,5 @@ export function useGitHub() {
     return { repoInfo, readme, sections }
   }, [token, isConnected])
 
-  return { isConnected, isOAuthUser, loading, account, connect, disconnect, syncIssues, fetchRepos, getIssuesWithBody, importRepo }
+  return { isConnected, needsReconnect, isOAuthUser, loading, account, connect, disconnect, syncIssues, fetchRepos, getIssuesWithBody, importRepo }
 }

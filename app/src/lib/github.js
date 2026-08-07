@@ -59,7 +59,26 @@ export async function fetchUserRepos(token) {
   return githubFetch(token, '/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator,organization_member')
 }
 
+// TDE-865: a token that 401s is remembered, so the board and Settings stop firing a doomed
+// /user probe on every single page load. Cleared whenever a token is stored or removed —
+// including the OAuth re-login path, which routes through saveGitHubToken — so a genuinely
+// repaired credential is never held down by a stale verdict.
+const INVALID_KEY = 'tasker-github-token-invalid'
+
+export function markGitHubTokenInvalid() {
+  try { localStorage.setItem(INVALID_KEY, '1') } catch {}
+}
+
+export function isGitHubTokenKnownInvalid() {
+  try { return localStorage.getItem(INVALID_KEY) === '1' } catch { return false }
+}
+
+export function clearGitHubTokenInvalid() {
+  try { localStorage.removeItem(INVALID_KEY) } catch {}
+}
+
 export async function saveGitHubToken(userId, token) {
+  clearGitHubTokenInvalid()
   await supabase.from('user_settings').upsert({ user_id: userId, github_access_token: token })
 }
 
@@ -73,6 +92,7 @@ export async function loadGitHubToken(userId) {
 }
 
 export async function removeGitHubToken(userId) {
+  clearGitHubTokenInvalid()
   await supabase.from('user_settings').upsert({ user_id: userId, github_access_token: null })
 }
 
