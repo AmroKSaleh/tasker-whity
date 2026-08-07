@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import clsx from 'clsx'
 import { supabase } from '../lib/supabase'
 import AppShell from '../components/editorial/AppShell'
-import { Kicker } from '../components/editorial/atoms'
+import Breadcrumbs from '../components/layout/Breadcrumbs'
 import Conductor from '../components/connectors/Conductor'
 
 function fromName(from) {
@@ -73,7 +73,7 @@ export default function GmailPanelPage() {
     <AppShell active="gmail">
       <div className="px-7 py-8 md:px-10 flex items-start gap-8 lg:gap-12">
         <div className="w-full max-w-[760px] shrink-0">
-        <Kicker className="mb-2">CONNECTORS · GMAIL</Kicker>
+        <Breadcrumbs items={[{ label: 'Settings', to: '/settings' }, { label: 'Connectors', to: '/settings' }, { label: 'Gmail' }]} />
         <h1 className="text-h1 m-0">Gmail.</h1>
         <p className="text-[12px] text-mute-2 mt-1.5 mb-6">Recent inbox. <span className="font-medium text-ink-2">+ Task</span> hands the email to your agent (say <span className="font-mono">process intake</span> in CC) — it structures tasks you review &amp; import.</p>
 

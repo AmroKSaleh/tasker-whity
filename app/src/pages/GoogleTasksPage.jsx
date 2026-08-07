@@ -4,7 +4,7 @@ import clsx from 'clsx'
 import { ListChecks, RefreshCw, ArrowDownToLine, ChevronRight, X, Sparkles } from 'lucide-react'
 import { supabase } from '../lib/supabase'
 import AppShell from '../components/editorial/AppShell'
-import { Kicker } from '../components/editorial/atoms'
+import Breadcrumbs from '../components/layout/Breadcrumbs'
 import Conductor from '../components/connectors/Conductor'
 import { loadGoogleConnection, hasGoogleScope } from '../lib/google'
 import { GOOGLE_SCOPES } from '../lib/google'
@@ -193,7 +193,7 @@ export default function GoogleTasksPage() {
     <AppShell active="google-tasks">
       <div className="px-7 py-8 md:px-10 flex items-start gap-8 lg:gap-12">
         <div className="w-full max-w-[760px] shrink-0">
-        <Kicker className="mb-2">CONNECTORS · GOOGLE TASKS</Kicker>
+        <Breadcrumbs items={[{ label: 'Settings', to: '/settings' }, { label: 'Connectors', to: '/settings' }, { label: 'Google Tasks' }]} />
         <h1 className="text-h1 m-0">Google Tasks.</h1>
         <p className="text-[12px] text-mute-2 mt-1.5 mb-6">
           Your Google task lists, right here. Hit <span className="font-medium text-ink-2">Pull</span> to import a task into a Tasker project.
