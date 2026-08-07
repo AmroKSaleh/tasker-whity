@@ -721,6 +721,75 @@ function flowHardBlockedResponse(unmet: Array<{ text: string, status: string }>)
   })
 }
 
+// TDE-873: ONE delta, computed in one place. get_project_delta and post_project_update each
+// carried a verbatim copy of this block, so every fix below would have had to be made twice —
+// the same trap already recorded in the KB for the contract-gate logic.
+//
+// WHAT THE OLD SHAPE GOT WRONG, found by a reader reacting to a real update rather than by
+// reasoning about the feature. It reported "20 Added / 10 Completed" as two bare counts with no
+// stated relationship, which reads as two disjoint sets: twenty new things arrived AND ten old
+// things were cleared. In that window 8 of the 10 completions were among the 20 added, only 2
+// touched the standing backlog, and the open count moved by +10 rather than +20. The counts were
+// accurate and the story they told was the opposite of what happened.
+//
+// So the overlap is now computed rather than left for the reader to assume. This also makes
+// DISCOVERY legible: "added and closed in the same window" is what a find-and-fix sweep looks
+// like, and it was previously indistinguishable from churn.
+async function computeProjectDelta(sb: any, projectId: string, since: string) {
+  const [{ data: completed }, { data: added }, { data: blocked }] = await Promise.all([
+    sb.from('tasks').select('short_id, text, created_at, duplicate_of')
+      .eq('project_id', projectId).eq('is_deleted', false).eq('status', 'done').gte('completed_at', since),
+    sb.from('tasks').select('short_id, text, status, completed_at, duplicate_of')
+      .eq('project_id', projectId).eq('is_deleted', false).gte('created_at', since),
+    // KNOWN BROKEN — kept deliberately, see blocked_metric below.
+    sb.from('tasks').select('short_id, text')
+      .eq('project_id', projectId).eq('is_deleted', false).eq('status', 'blocked'),
+  ])
+
+  const completedRows = completed ?? []
+  const addedRows = added ?? []
+  const sinceMs = Date.parse(since)
+
+  const addedClosed = addedRows.filter((t: any) =>
+    t.status === 'done' && t.completed_at && Date.parse(t.completed_at) >= sinceMs)
+  const preexistingClosed = completedRows.filter((t: any) =>
+    !t.created_at || Date.parse(t.created_at) < sinceMs)
+  // A task filed and merged as a duplicate counts as both an add and a completion while
+  // representing no work at all (TDE-874 did exactly this). Reported, not silently dropped —
+  // the reader should see that the raw counts contain it.
+  const merged = addedRows.filter((t: any) => t.duplicate_of)
+
+  return {
+    since,
+    tasks_completed: completedRows.length,
+    tasks_added: addedRows.length,
+    blocked_items: blocked?.length || 0,
+    completed_list: completedRows.map((t: any) => `${t.short_id}: ${t.text}`),
+    added_list: addedRows.map((t: any) => `${t.short_id}: ${t.text}`),
+    blocked_list: (blocked ?? []).map((t: any) => `${t.short_id}: ${t.text}`),
+
+    // TDE-873 additions. Absent on updates published before this shipped, so every reader must
+    // treat them as optional rather than assuming zero.
+    added_still_open: addedRows.length - addedClosed.length,
+    added_closed_same_window: addedClosed.length,
+    completed_preexisting: preexistingClosed.length,
+    net_open_change: addedRows.length - completedRows.length,
+    duplicates_merged: merged.length,
+
+    // The third headline number has never been able to be anything but zero: it queries
+    // status='blocked', and a task's status is only ever pending / in_progress / done. Nothing
+    // in the codebase writes 'blocked'. Left in place and FLAGGED rather than deleted, so the
+    // update shows a struck-through number instead of a confident "0 Blocked" that reads as
+    // "nothing is stuck". Tasker does have a real blocked concept — flow dependencies, via
+    // unmetSourcesDeep — and pointing this at it is the actual fix, deliberately not done here.
+    blocked_metric: {
+      status: 'broken',
+      reason: 'Queries status=\'blocked\', which no task ever has (statuses are pending / in_progress / done). Structurally always 0.',
+      real_signal_available: 'Flow dependencies — unmetSourcesDeep already computes genuinely blocked tasks.',
+    },
+  }
+}
+
 async function getOrCreateBacklog(sb: any, projectId: string): Promise<string> {
   const { data: existing } = await sb.from('sections')
     .select('id').eq('project_id', projectId).eq('name', 'Backlog').maybeSingle()
@@ -4033,22 +4102,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .maybeSingle()
 
       const since = lastUpdate ? lastUpdate.created_at : project.created_at
-
-      const { data: completed } = await sb.from('tasks').select('short_id, text').eq('project_id', project.id).eq('is_deleted', false).eq('status', 'done').gte('completed_at', since)
-      const { data: added } = await sb.from('tasks').select('short_id, text').eq('project_id', project.id).eq('is_deleted', false).gte('created_at', since)
-      const { data: blocked } = await sb.from('tasks').select('short_id, text').eq('project_id', project.id).eq('is_deleted', false).eq('status', 'blocked')
-
-      const delta = {
-        since,
-        tasks_completed: completed?.length || 0,
-        tasks_added: added?.length || 0,
-        blocked_items: blocked?.length || 0,
-        completed_list: completed?.map(t => `${t.short_id}: ${t.text}`) || [],
-        added_list: added?.map(t => `${t.short_id}: ${t.text}`) || [],
-        blocked_list: blocked?.map(t => `${t.short_id}: ${t.text}`) || []
-      }
-
-      return JSON.stringify(delta, null, 2)
+      const delta = await computeProjectDelta(sb, project.id, since)
+      return JSON.stringify({
+        ...delta,
+        reading_note: `Do NOT report tasks_added and tasks_completed as independent figures — in most windows they overlap heavily. ${delta.added_closed_same_window} of the ${delta.tasks_completed} completions were tasks CREATED in this same window; only ${delta.completed_preexisting} touched the pre-existing backlog. The open count moved by ${delta.net_open_change >= 0 ? '+' : ''}${delta.net_open_change}. A high added-and-closed-same-window figure means work was DISCOVERED and fixed (a sweep), which is a different story from churn — say which it was.`,
+      }, null, 2)
     }
 
     case 'post_project_update': {
@@ -4064,19 +4122,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .maybeSingle()
 
       const since = lastUpdate ? lastUpdate.created_at : project.created_at
-      const { data: completed } = await sb.from('tasks').select('short_id, text').eq('project_id', project.id).eq('is_deleted', false).eq('status', 'done').gte('completed_at', since)
-      const { data: added } = await sb.from('tasks').select('short_id, text').eq('project_id', project.id).eq('is_deleted', false).gte('created_at', since)
-      const { data: blocked } = await sb.from('tasks').select('short_id, text').eq('project_id', project.id).eq('is_deleted', false).eq('status', 'blocked')
-
-      const delta = {
-        since,
-        tasks_completed: completed?.length || 0,
-        tasks_added: added?.length || 0,
-        blocked_items: blocked?.length || 0,
-        completed_list: completed?.map(t => `${t.short_id}: ${t.text}`) || [],
-        added_list: added?.map(t => `${t.short_id}: ${t.text}`) || [],
-        blocked_list: blocked?.map(t => `${t.short_id}: ${t.text}`) || []
-      }
+      const delta = await computeProjectDelta(sb, project.id, since)
 
       const { error } = await sb.from('project_updates').insert({
         project_id: project.id,

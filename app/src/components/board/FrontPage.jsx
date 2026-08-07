@@ -215,6 +215,66 @@ function LeadCard({ task, prefix, onOpenTask }) {
 // Attention-first landing for the project: lead slot (escalations, then in-flight),
 // ranked Next Up (lib/scoring), Just Shipped, and the sections digest.
 // Recomposes when the lead is empty: Next Up takes the lead column.
+// TDE-873. Two bare counts side by side read as disjoint sets — "twenty new things arrived AND
+// ten old things were cleared". In the window that exposed this, 8 of the 10 completions were
+// among the 20 added and the open count moved by +10, so the honest headline is the NET figure
+// with the overlap stated under it. The relationship has to be shown; a reader will not assume it.
+//
+// Blocked is rendered struck through on purpose. It queries a task status that does not exist,
+// so it has only ever been able to print 0 — and a confident "0 Blocked" reads as "nothing is
+// stuck", which is a claim the data cannot support. Marked rather than removed so the defect
+// stays visible until it is pointed at the real signal (flow dependencies).
+function DeltaMetrics({ delta }) {
+  if (!delta) return null
+  const enriched = delta.added_still_open !== undefined   // absent on updates published before TDE-873
+  const net = delta.net_open_change ?? 0
+
+  return (
+    <div className="bg-surf-2 border border-line-2 rounded-lg p-3">
+      <div className="text-[10px] font-bold text-mute-2 uppercase tracking-wider mb-2">Attached metrics (Delta)</div>
+      <div className="flex gap-6 flex-wrap">
+        {enriched && (
+          <div className="flex flex-col">
+            <span className="text-[15px] font-semibold text-ink">{net >= 0 ? `+${net}` : net}</span>
+            <span className="text-[10px] text-mute">Net open</span>
+          </div>
+        )}
+        <div className="flex flex-col">
+          <span className="text-[15px] font-semibold text-ink">{delta.tasks_completed || 0}</span>
+          <span className="text-[10px] text-mute">Completed</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[15px] font-semibold text-ink">{delta.tasks_added || 0}</span>
+          <span className="text-[10px] text-mute">Added</span>
+        </div>
+        <div className="flex flex-col" title="This metric is broken: it queries a task status that does not exist, so it is always 0.">
+          <span className="text-[15px] font-semibold text-mute-2 line-through decoration-2">{delta.blocked_items || 0}</span>
+          <span className="text-[10px] text-mute-2 line-through">Blocked</span>
+        </div>
+      </div>
+
+      {enriched && (
+        <div className="mt-2.5 pt-2.5 border-t border-line-2 flex flex-col gap-1">
+          <p className="text-[11px] text-mute leading-relaxed">
+            {delta.added_closed_same_window > 0
+              ? <><span className="text-ink-2 font-medium">{delta.added_closed_same_window} of the {delta.tasks_completed} completed</span> were also added this period — work found and closed here, not drawn from the backlog. Only {delta.completed_preexisting} came from the standing backlog.</>
+              : <>All {delta.tasks_completed} completed came from the standing backlog.</>}
+            {' '}{delta.added_still_open} of the {delta.tasks_added} added are still open.
+          </p>
+          {delta.duplicates_merged > 0 && (
+            <p className="text-[11px] text-mute-2 leading-relaxed">
+              Includes {delta.duplicates_merged} merged duplicate{delta.duplicates_merged === 1 ? '' : 's'}, counted in both figures but representing no work.
+            </p>
+          )}
+          <p className="text-[10px] text-mute-2 leading-relaxed">
+            Blocked is struck through because it is broken, not because it is zero — it reads a task status that never exists. TDE-873.
+          </p>
+        </div>
+      )}
+    </div>
+  )
+}
+
 export default function FrontPage({ project, tasks, sections, projectUpdates = [], onPublishUpdate, onDiscardUpdate, onOpenTask, onPause, onFocusSection }) {
   const sectionById = useMemo(() => new Map(sections.map(s => [s.id, s])), [sections])
   const sectionName = (id) => sectionById.get(id)?.name ?? ''
@@ -260,14 +320,7 @@ export default function FrontPage({ project, tasks, sections, projectUpdates = [
                     </div>
                     <div className="text-[13.5px] leading-relaxed text-ink mb-4 whitespace-pre-wrap">{draftUpdate.body}</div>
                     
-                    <div className="bg-surf-2 border border-line-2 rounded-lg p-3">
-                      <div className="text-[10px] font-bold text-mute-2 uppercase tracking-wider mb-2">Attached metrics (Delta)</div>
-                      <div className="flex gap-6">
-                        <div className="flex flex-col"><span className="text-[15px] font-semibold text-ink">{draftUpdate.delta?.tasks_completed || 0}</span><span className="text-[10px] text-mute">Completed</span></div>
-                        <div className="flex flex-col"><span className="text-[15px] font-semibold text-ink">{draftUpdate.delta?.tasks_added || 0}</span><span className="text-[10px] text-mute">Added</span></div>
-                        <div className="flex flex-col"><span className="text-[15px] font-semibold text-ink">{draftUpdate.delta?.blocked_items || 0}</span><span className="text-[10px] text-mute">Blocked</span></div>
-                      </div>
-                    </div>
+                    <DeltaMetrics delta={draftUpdate.delta} />
                   </article>
                 )}
 
@@ -286,9 +339,16 @@ export default function FrontPage({ project, tasks, sections, projectUpdates = [
                     </div>
                     <div className="text-[13.5px] leading-relaxed text-ink mt-2 whitespace-pre-wrap">{latestPublished.body}</div>
                     {(latestPublished.delta?.tasks_completed > 0 || latestPublished.delta?.tasks_added > 0) && (
-                      <div className="flex gap-4 mt-3 pt-3 border-t border-line-2">
+                      <div className="flex gap-4 mt-3 pt-3 border-t border-line-2 flex-wrap">
+                        {latestPublished.delta?.net_open_change !== undefined && (
+                          <span className="text-[11px] text-ink-2 font-medium">{latestPublished.delta.net_open_change >= 0 ? '+' : ''}{latestPublished.delta.net_open_change} net open</span>
+                        )}
                         {latestPublished.delta?.tasks_completed > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_completed} completed</span>}
                         {latestPublished.delta?.tasks_added > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_added} added</span>}
+                        {/* TDE-873: the overlap, stated inline — without it the two counts above read as disjoint. */}
+                        {latestPublished.delta?.added_closed_same_window > 0 && (
+                          <span className="text-[11px] text-mute-2">{latestPublished.delta.added_closed_same_window} added &amp; closed here</span>
+                        )}
                       </div>
                     )}
                   </article>
@@ -394,10 +454,16 @@ export default function FrontPage({ project, tasks, sections, projectUpdates = [
                   {update.delta && (update.delta.tasks_completed > 0 || update.delta.tasks_added > 0) && (
                     <div className="mt-3 pt-3 border-t border-line-2 flex flex-col gap-2">
                       <div className="text-[10px] font-mono tracking-wider text-mute-2 uppercase">Metrics</div>
-                      <div className="flex gap-4">
+                      <div className="flex gap-4 flex-wrap">
+                        {update.delta.net_open_change !== undefined && (
+                          <span className="text-[11px] text-ink-2 font-medium">{update.delta.net_open_change >= 0 ? '+' : ''}{update.delta.net_open_change} net open</span>
+                        )}
                         <span className="text-[11px] text-mute font-medium">{update.delta.tasks_completed || 0} completed</span>
                         <span className="text-[11px] text-mute font-medium">{update.delta.tasks_added || 0} added</span>
-                        <span className="text-[11px] text-mute font-medium">{update.delta.blocked_items || 0} blocked</span>
+                        {update.delta.added_closed_same_window > 0 && (
+                          <span className="text-[11px] text-mute-2">{update.delta.added_closed_same_window} added &amp; closed here</span>
+                        )}
+                        <span className="text-[11px] text-mute-2 font-medium line-through" title="Broken metric — reads a task status that never exists, so it is always 0. TDE-873.">{update.delta.blocked_items || 0} blocked</span>
                       </div>
                     </div>
                   )}
