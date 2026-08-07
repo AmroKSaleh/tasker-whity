@@ -270,7 +270,7 @@ function DeltaMetrics({ delta }) {
             </p>
           )}
           <p className="text-[10px] text-mute-2 leading-relaxed">
-            Blocked is struck through because it is broken, not because it is zero — it reads a task status that never exists. TDE-873.
+            Blocked is struck through because it is broken, not because it is zero — it reads a task status that never exists. TDE-880.
           </p>
         </div>
       )}
@@ -536,7 +536,7 @@ export default function FrontPage({ project, tasks, sections, projectUpdates = [
                               : `${Math.abs(update.delta.net_open_change)} fewer open`}
                           </span>
                         )}
-                        <span className="text-[11px] text-mute-2 font-medium line-through" title="Broken metric — reads a task status that never exists, so it is always 0. TDE-873.">{update.delta.blocked_items || 0} blocked</span>
+                        <span className="text-[11px] text-mute-2 font-medium line-through" title="Broken metric — reads a task status that never exists, so it is always 0. TDE-880.">{update.delta.blocked_items || 0} blocked</span>
                       </div>
                     </div>
                   )}
