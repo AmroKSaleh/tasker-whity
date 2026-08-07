@@ -1656,13 +1656,13 @@ const TOOLS = [
   },
   {
     name: 'post_project_update',
-    description: 'Creates a DRAFT project update with a health status and a rich text body. The server automatically attaches the delta (changes since the last update) to it. After calling this, tell the user to review and publish the draft in the Web UI.',
+    description: 'Creates (or REPLACES) the project\'s single DRAFT update — health status plus a rich text body. Calling it again overwrites the existing draft rather than stacking a second one. The server automatically attaches the delta. After calling, tell the user to review and publish the draft in the Web UI. Call get_project_delta FIRST and read its reading_note: added and completed counts usually OVERLAP, and reporting them as independent figures is the known way this feature misleads.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix, slug, or UUID' },
         health: { type: 'string', enum: ['on_track', 'at_risk', 'off_track'] },
-        body: { type: 'string', description: 'Rich text narrative of the update' }
+        body: { type: 'string', description: 'The narrative. MUST OPEN with a short plain-language summary — a few sentences someone can read on its own and understand what happened, with no jargon, no task IDs, and no technical detail. Assume the reader is skimming and will stop after it. Say what moved, what it means for the goal, what went wrong if anything, and what happens next. Only AFTER that opener may the body go into specifics, headings, task IDs and evidence, for the reader who wants them. An update that starts with detail has failed: its main job is to be understood in fifteen seconds.' }
       },
       required: ['project_id', 'health', 'body'],
     }
@@ -4124,17 +4124,28 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const since = lastUpdate ? lastUpdate.created_at : project.created_at
       const delta = await computeProjectDelta(sb, project.id, since)
 
-      const { error } = await sb.from('project_updates').insert({
-        project_id: project.id,
-        user_id: userId,
-        health: args.health,
-        body: args.body,
-        status: 'draft',
-        delta
-      })
+      // TDE-873: REPLACE an existing draft rather than stacking a second one. The front page
+      // renders only the newest draft, so a blind insert buried the previous one where the UI
+      // could neither show nor discard it — orphaned rows accumulating invisibly. It also forced
+      // a redraft to be a two-step dance: ask the human to discard, then post again.
+      const { data: existingDraft } = await sb.from('project_updates')
+        .select('id')
+        .eq('project_id', project.id)
+        .eq('user_id', userId)
+        .eq('status', 'draft')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
 
-      if (error) return `Error creating draft update: ${error.message}`
-      return `Draft project update created successfully! Please tell the user to review and publish it from the Web UI.`
+      const row = { health: args.health, body: args.body, status: 'draft', delta }
+      const { error } = existingDraft
+        ? await sb.from('project_updates').update(row).eq('id', existingDraft.id)
+        : await sb.from('project_updates').insert({ project_id: project.id, user_id: userId, ...row })
+
+      if (error) return `Error ${existingDraft ? 'updating' : 'creating'} draft update: ${error.message}`
+      return existingDraft
+        ? `Existing draft REPLACED (there is still exactly one). Tell the user to review and publish it from the Web UI.`
+        : `Draft project update created. Tell the user to review and publish it from the Web UI.`
     }
 
     case 'update_project': {
