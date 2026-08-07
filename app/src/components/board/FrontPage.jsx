@@ -233,12 +233,6 @@ function DeltaMetrics({ delta }) {
     <div className="bg-surf-2 border border-line-2 rounded-lg p-3">
       <div className="text-[10px] font-bold text-mute-2 uppercase tracking-wider mb-2">Attached metrics (Delta)</div>
       <div className="flex gap-6 flex-wrap">
-        {enriched && (
-          <div className="flex flex-col">
-            <span className="text-[15px] font-semibold text-ink">{net >= 0 ? `+${net}` : net}</span>
-            <span className="text-[10px] text-mute">Net open</span>
-          </div>
-        )}
         <div className="flex flex-col">
           <span className="text-[15px] font-semibold text-ink">{delta.tasks_completed || 0}</span>
           <span className="text-[10px] text-mute">Completed</span>
@@ -255,11 +249,20 @@ function DeltaMetrics({ delta }) {
 
       {enriched && (
         <div className="mt-2.5 pt-2.5 border-t border-line-2 flex flex-col gap-1">
+          {/* TDE-873: the meaning lives HERE, not in another tile. A fourth bare number repeats the
+              defect this whole change exists to fix — figures side by side with no relationship
+              stated. Say it in words, in the order a person actually asks: what overlapped, and did
+              the pile get bigger or smaller. */}
           <p className="text-[11px] text-mute leading-relaxed">
             {delta.added_closed_same_window > 0
-              ? <><span className="text-ink-2 font-medium">{delta.added_closed_same_window} of the {delta.tasks_completed} completed</span> were also added this period — work found and closed here, not drawn from the backlog. Only {delta.completed_preexisting} came from the standing backlog.</>
-              : <>All {delta.tasks_completed} completed came from the standing backlog.</>}
-            {' '}{delta.added_still_open} of the {delta.tasks_added} added are still open.
+              ? <><span className="text-ink-2 font-medium">{delta.added_closed_same_window} of the {delta.tasks_completed} completed were also added this period</span> — work found and fixed here, not taken off the backlog. {delta.completed_preexisting === 0 ? 'Nothing came off the old list.' : `Only ${delta.completed_preexisting} came off the old list.`}</>
+              : <>All {delta.tasks_completed} completed came off the standing backlog.</>}
+            {' '}
+            {net > 0
+              ? <>So the open pile <span className="text-ink-2 font-medium">grew by {net}</span>.</>
+              : net < 0
+                ? <>So the open pile <span className="text-ink-2 font-medium">shrank by {Math.abs(net)}</span>.</>
+                : <>The open pile ended the same size.</>}
           </p>
           {delta.duplicates_merged > 0 && (
             <p className="text-[11px] text-mute-2 leading-relaxed">
@@ -340,14 +343,18 @@ export default function FrontPage({ project, tasks, sections, projectUpdates = [
                     <div className="text-[13.5px] leading-relaxed text-ink mt-2 whitespace-pre-wrap">{latestPublished.body}</div>
                     {(latestPublished.delta?.tasks_completed > 0 || latestPublished.delta?.tasks_added > 0) && (
                       <div className="flex gap-4 mt-3 pt-3 border-t border-line-2 flex-wrap">
-                        {latestPublished.delta?.net_open_change !== undefined && (
-                          <span className="text-[11px] text-ink-2 font-medium">{latestPublished.delta.net_open_change >= 0 ? '+' : ''}{latestPublished.delta.net_open_change} net open</span>
-                        )}
                         {latestPublished.delta?.tasks_completed > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_completed} completed</span>}
                         {latestPublished.delta?.tasks_added > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_added} added</span>}
                         {/* TDE-873: the overlap, stated inline — without it the two counts above read as disjoint. */}
                         {latestPublished.delta?.added_closed_same_window > 0 && (
-                          <span className="text-[11px] text-mute-2">{latestPublished.delta.added_closed_same_window} added &amp; closed here</span>
+                          <span className="text-[11px] text-mute-2">{latestPublished.delta.added_closed_same_window} of those closed here</span>
+                        )}
+                        {latestPublished.delta?.net_open_change !== undefined && latestPublished.delta.net_open_change !== 0 && (
+                          <span className="text-[11px] text-ink-2 font-medium">
+                            {latestPublished.delta.net_open_change > 0
+                              ? `${latestPublished.delta.net_open_change} more open`
+                              : `${Math.abs(latestPublished.delta.net_open_change)} fewer open`}
+                          </span>
                         )}
                       </div>
                     )}
@@ -455,13 +462,17 @@ export default function FrontPage({ project, tasks, sections, projectUpdates = [
                     <div className="mt-3 pt-3 border-t border-line-2 flex flex-col gap-2">
                       <div className="text-[10px] font-mono tracking-wider text-mute-2 uppercase">Metrics</div>
                       <div className="flex gap-4 flex-wrap">
-                        {update.delta.net_open_change !== undefined && (
-                          <span className="text-[11px] text-ink-2 font-medium">{update.delta.net_open_change >= 0 ? '+' : ''}{update.delta.net_open_change} net open</span>
-                        )}
                         <span className="text-[11px] text-mute font-medium">{update.delta.tasks_completed || 0} completed</span>
                         <span className="text-[11px] text-mute font-medium">{update.delta.tasks_added || 0} added</span>
                         {update.delta.added_closed_same_window > 0 && (
-                          <span className="text-[11px] text-mute-2">{update.delta.added_closed_same_window} added &amp; closed here</span>
+                          <span className="text-[11px] text-mute-2">{update.delta.added_closed_same_window} of those closed here</span>
+                        )}
+                        {update.delta.net_open_change !== undefined && update.delta.net_open_change !== 0 && (
+                          <span className="text-[11px] text-ink-2 font-medium">
+                            {update.delta.net_open_change > 0
+                              ? `${update.delta.net_open_change} more open`
+                              : `${Math.abs(update.delta.net_open_change)} fewer open`}
+                          </span>
                         )}
                         <span className="text-[11px] text-mute-2 font-medium line-through" title="Broken metric — reads a task status that never exists, so it is always 0. TDE-873.">{update.delta.blocked_items || 0} blocked</span>
                       </div>
