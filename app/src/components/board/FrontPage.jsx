@@ -274,6 +274,68 @@ function DeltaMetrics({ delta }) {
           </p>
         </div>
       )}
+
+      <DayBreakdown days={delta.day_breakdown} />
+    </div>
+  )
+}
+
+// TDE-873: the FACT layer under the narrative. The written update is organised by thread, because
+// a discovery and what it changed is the part worth reading and it rarely respects midnight. This
+// answers the flatter question a person actually gets asked — "what did you do on the 4th" — and
+// it is the direct fix for not being able to remember your own days.
+//
+// Every date here comes from created_at / completed_at, so it cannot drift with the writer's
+// memory. The division of labour is the point: the server says what happened when, the author says
+// what it meant. Only the second half needs a human, and only the second half can be wrong.
+function DayBreakdown({ days }) {
+  const [open, setOpen] = useState(false)
+  if (!Array.isArray(days) || days.length === 0) return null   // absent on updates predating TDE-873
+
+  const label = (iso) => {
+    const d = new Date(`${iso}T12:00:00Z`)
+    return Number.isFinite(d.getTime())
+      ? d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+      : iso
+  }
+
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-line-2">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="text-[10px] font-bold text-mute-2 uppercase tracking-wider hover:text-ink transition-colors"
+      >
+        By day ({days.length}) {open ? '−' : '+'}
+      </button>
+
+      {open && (
+        <div className="mt-2 flex flex-col gap-2.5">
+          {days.map(day => (
+            <div key={day.date}>
+              <div className="text-[11px] font-medium text-ink-2">
+                {label(day.date)}
+                <span className="text-mute-2 font-normal">
+                  {' — '}
+                  {day.completed.length > 0 && `finished ${day.completed.length}`}
+                  {day.completed.length > 0 && day.added.length > 0 && ' · '}
+                  {day.added.length > 0 && `found ${day.added.length}`}
+                </span>
+              </div>
+              <div className="mt-0.5 flex flex-col">
+                {day.completed.map(t => (
+                  <span key={`c-${t}`} className="text-[11px] text-mute truncate" title={t}>✓ {t}</span>
+                ))}
+                {day.added.map(t => (
+                  <span key={`a-${t}`} className="text-[11px] text-mute-2 truncate" title={t}>+ {t}</span>
+                ))}
+              </div>
+            </div>
+          ))}
+          {/* Days with nothing are omitted rather than zero-filled; days with one small thing are
+              kept, unflattering as that is. A report you have learned to distrust is worse than none. */}
+          <p className="text-[10px] text-mute-2">Days with no activity are omitted.</p>
+        </div>
+      )}
     </div>
   )
 }

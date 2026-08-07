@@ -721,6 +721,44 @@ function flowHardBlockedResponse(unmet: Array<{ text: string, status: string }>)
   })
 }
 
+// Day buckets for the delta (TDE-873). Grouped in the USER'S timezone, not UTC — a task finished
+// at 01:30 Cairo belongs to that working night, and UTC bucketing would silently scatter a late
+// session across two dates and make the breakdown lie about which day the work happened on.
+function dayKeyIn(iso: string, tz?: string | null): string | null {
+  if (!iso) return null
+  const t = new Date(iso)
+  if (!Number.isFinite(t.getTime())) return null
+  // en-CA renders as YYYY-MM-DD, which sorts lexically — no separate sort key needed.
+  try {
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz || 'UTC', year: 'numeric', month: '2-digit', day: '2-digit',
+    }).format(t)
+  } catch {
+    return t.toISOString().slice(0, 10)
+  }
+}
+
+function buildDayBreakdown(addedRows: any[], completedRows: any[], since: string, tz?: string | null) {
+  const days: Record<string, { date: string; added: string[]; completed: string[] }> = {}
+  const bucket = (key: string | null) => {
+    if (!key) return null
+    return (days[key] ??= { date: key, added: [], completed: [] })
+  }
+  const sinceMs = Date.parse(since)
+
+  for (const t of addedRows) {
+    bucket(dayKeyIn(t.created_at, tz))?.added.push(`${t.short_id}: ${t.text}`)
+  }
+  for (const t of completedRows) {
+    // Guard the window edge: completed_at is what put the row in this set, so a null here would
+    // otherwise bucket by nothing and vanish from the breakdown while still counting in the total.
+    if (!t.completed_at || Date.parse(t.completed_at) < sinceMs) continue
+    bucket(dayKeyIn(t.completed_at, tz))?.completed.push(`${t.short_id}: ${t.text}`)
+  }
+
+  return Object.values(days).sort((a, b) => (a.date < b.date ? 1 : -1))   // newest first
+}
+
 // TDE-873: ONE delta, computed in one place. get_project_delta and post_project_update each
 // carried a verbatim copy of this block, so every fix below would have had to be made twice —
 // the same trap already recorded in the KB for the contract-gate logic.
@@ -735,11 +773,11 @@ function flowHardBlockedResponse(unmet: Array<{ text: string, status: string }>)
 // So the overlap is now computed rather than left for the reader to assume. This also makes
 // DISCOVERY legible: "added and closed in the same window" is what a find-and-fix sweep looks
 // like, and it was previously indistinguishable from churn.
-async function computeProjectDelta(sb: any, projectId: string, since: string) {
+async function computeProjectDelta(sb: any, projectId: string, since: string, tz?: string | null) {
   const [{ data: completed }, { data: added }, { data: blocked }] = await Promise.all([
-    sb.from('tasks').select('short_id, text, created_at, duplicate_of')
+    sb.from('tasks').select('short_id, text, created_at, completed_at, duplicate_of')
       .eq('project_id', projectId).eq('is_deleted', false).eq('status', 'done').gte('completed_at', since),
-    sb.from('tasks').select('short_id, text, status, completed_at, duplicate_of')
+    sb.from('tasks').select('short_id, text, status, created_at, completed_at, duplicate_of')
       .eq('project_id', projectId).eq('is_deleted', false).gte('created_at', since),
     // KNOWN BROKEN — kept deliberately, see blocked_metric below.
     sb.from('tasks').select('short_id, text')
@@ -775,6 +813,21 @@ async function computeProjectDelta(sb: any, projectId: string, since: string) {
     completed_preexisting: preexistingClosed.length,
     net_open_change: addedRows.length - completedRows.length,
     duplicates_merged: merged.length,
+
+    // TDE-873: what moved on each day, computed from records rather than recalled. This is the
+    // FACT layer under the narrative — the update's story is organised by thread (a discovery
+    // and what it changed usually spans hours and does not respect midnight), while this answers
+    // the flatter question a person actually gets asked: "what did you do on the 4th".
+    //
+    // The split matters for trust. The writer supplies MEANING, which no query can produce; the
+    // dates and movements come from created_at / completed_at, so they cannot drift no matter how
+    // long the session ran or how tired whoever wrote the narrative was. Recollection is the least
+    // reliable part of a long day and it is now carrying the least weight.
+    //
+    // Empty days are omitted, not zero-filled — a run of "nothing happened" rows is noise. Days
+    // with only one small thing are KEPT, unflattering as that is: a report you have quietly
+    // learned to distrust is worse than no report.
+    day_breakdown: buildDayBreakdown(addedRows, completedRows, since, tz),
 
     // The third headline number has never been able to be anything but zero: it queries
     // status='blocked', and a task's status is only ever pending / in_progress / done. Nothing
@@ -1662,7 +1715,7 @@ const TOOLS = [
       properties: {
         project_id: { type: 'string', description: 'Project prefix, slug, or UUID' },
         health: { type: 'string', enum: ['on_track', 'at_risk', 'off_track'] },
-        body: { type: 'string', description: 'The narrative. MUST OPEN with a short plain-language summary — a few sentences someone can read on its own and understand what happened, with no jargon, no task IDs, and no technical detail. Assume the reader is skimming and will stop after it. Say what moved, what it means for the goal, what went wrong if anything, and what happens next. Only AFTER that opener may the body go into specifics, headings, task IDs and evidence, for the reader who wants them. An update that starts with detail has failed: its main job is to be understood in fifteen seconds.' }
+        body: { type: 'string', description: 'MUST OPEN with a NARRATIVE account of the work, written the way a person describes their working day out loud — prose, not a report. Take as long as it needs; do not compress it into a summary. Organise it by THREAD (a discovery and what it changed), NEVER by date: the causal line is what makes it worth reading and it rarely respects midnight, and the per-day facts are computed separately and rendered beneath — do not duplicate them. Cover, in this order: (1) WHERE THINGS STAND NOW versus where they stood when the session began — the reader\'s real question is "are we further along", not "how much got done"; (2) WHAT WAS DISCOVERED during the work, especially anything nobody knew at the start, since discovery is usually the most valuable output and the one no task list records; (3) WHAT WAS DONE ABOUT IT, including anything that went wrong and how it was handled — an account that hides a mistake is worthless as a record, and to a manager it reads as STRONGER, not weaker, because it shows the author catches their own errors; (4) WHAT HAPPENS NEXT AND WHY, with the reasoning, not just the next item — the why is the part nothing else records. BANISH SCOREBOARD NUMBERS from this opener: tasks completed, tasks added, counts of anything. They answer "how much" when the reader is asking "where are we". A number that IS a finding ("roughly a third of the integration\'s running cost was being wasted") is not a scoreboard number and should stay. Task IDs belong BELOW the opener, not in it. AFTER the narrative, the rest of the body is RECEIPTS — IDs, evidence, exact causes — for a reader who wants to verify or pick something up. Do not re-tell the story there; the opener already told it. TWO READERS, one document: the author months later, checking the work is still aimed at the project\'s stated goal rather than drifting; and whoever the author reports to. Write so it serves both — that is why it must be candid AND legible without project context.' }
       },
       required: ['project_id', 'health', 'body'],
     }
@@ -4102,7 +4155,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .maybeSingle()
 
       const since = lastUpdate ? lastUpdate.created_at : project.created_at
-      const delta = await computeProjectDelta(sb, project.id, since)
+      const delta = await computeProjectDelta(sb, project.id, since, await userTimezone(sb, userId))
       return JSON.stringify({
         ...delta,
         reading_note: `Do NOT report tasks_added and tasks_completed as independent figures — in most windows they overlap heavily. ${delta.added_closed_same_window} of the ${delta.tasks_completed} completions were tasks CREATED in this same window; only ${delta.completed_preexisting} touched the pre-existing backlog. The open count moved by ${delta.net_open_change >= 0 ? '+' : ''}${delta.net_open_change}. A high added-and-closed-same-window figure means work was DISCOVERED and fixed (a sweep), which is a different story from churn — say which it was.`,
@@ -4122,7 +4175,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         .maybeSingle()
 
       const since = lastUpdate ? lastUpdate.created_at : project.created_at
-      const delta = await computeProjectDelta(sb, project.id, since)
+      const delta = await computeProjectDelta(sb, project.id, since, await userTimezone(sb, userId))
 
       // TDE-873: REPLACE an existing draft rather than stacking a second one. The front page
       // renders only the newest draft, so a blind insert buried the previous one where the UI
