@@ -313,11 +313,25 @@ function rpcErr(code: number, msg: string, id: any) { return json({ jsonrpc: '2.
 function toolOk(text: string, id: any)  { return rpcOk({ content: [{ type: 'text', text }] }, id) }
 function toolFail(msg: string, id: any) { return rpcOk({ content: [{ type: 'text', text: `Error: ${msg}` }], isError: true }, id) }
 
+// TDE-872: user input handed to `ilike` is a PATTERN, not a string. `%` and `_` are wildcards
+// there, so unescaped input silently becomes a query language — project_id "T_E" resolves TDE,
+// and "%" matches everything the caller owns. Every such query is scoped by user_id, so nothing
+// crosses a tenant boundary: this is a correctness bug, NOT injection and not an access-control
+// hole. The parameterization was never broken; the semantics of the value were.
+//
+// Postgres LIKE treats backslash as the default escape character, so prefixing the three
+// metacharacters is sufficient and no ESCAPE clause is needed. Escape at every interpolation
+// site, including the ones that intend an exact match — a "contains" wrapper added later around
+// an unescaped value is how this class of bug comes back.
+function escapeLike(s: string): string {
+  return String(s ?? '').replace(/[\\%_]/g, '\\$&')
+}
+
 // ── Project resolver helper ───────────────────────────────────
 async function resolveProject(sb: any, userId: string, projectId: string, logContext?: { tool_name: string, raw_params: any }) {
   let { data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('slug', projectId).eq('user_id', userId).maybeSingle()
   if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('id', projectId).eq('user_id', userId).maybeSingle())
-  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').ilike('prefix', projectId).eq('user_id', userId).maybeSingle())
+  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').ilike('prefix', escapeLike(projectId)).eq('user_id', userId).maybeSingle())
   if (!data && logContext) {
     fireAndForget(sb.from('mcp_error_logs').insert({
       user_id: userId,
@@ -417,7 +431,7 @@ async function resolvePhase(sb: any, projectId: string, ref: string) {
     if (data) return data
   }
   let { data } = await base().eq('slug', ref).maybeSingle()
-  if (!data) ({ data } = await base().ilike('name', ref).maybeSingle())
+  if (!data) ({ data } = await base().ilike('name', escapeLike(ref)).maybeSingle())
   return data ?? null
 }
 
@@ -3529,17 +3543,22 @@ async function resolveGroup(sb: any, userId: string, groupId: string) {
 }
 
 // Resolve a named flow from { flow_id (UUID or name) | task_id }. Returns {id, name} or null.
-async function resolveFlow(sb: any, userId: string, args: any): Promise<{ id: string, name: string } | null> {
+// Returns the flow, null if none, or { ambiguous } when a partial name matched several (TDE-872).
+// Untyped like resolveFlowRef: a discriminated union here would force narrowing at all seven
+// call sites for no behavioural gain, and the guard immediately follows every call.
+async function resolveFlow(sb: any, userId: string, args: any): Promise<any> {
   const isUuid = (s: string) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(s)
   if (args.flow_id && isUuid(args.flow_id)) {
     const { data } = await sb.from('flows').select('id, name').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
     return data || null
   }
   if (args.flow_id) {
-    let q = sb.from('flows').select('id, name').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
-    if (args.project_id) { const p = await resolveProject(sb, userId, args.project_id); if (p) q = q.eq('project_id', p.id) }
-    const { data } = await q
-    return (data && data.length === 1) ? data[0] : null
+    // TDE-872: this already refused to guess on ambiguity, but returned null — so every caller
+    // reported "not found", which is a different and misleading fact. Say which it was.
+    const p = args.project_id ? await resolveProject(sb, userId, args.project_id) : null
+    const { flow, matches } = await findFlowsByName(sb, userId, args.flow_id, 'id, name', p?.id)
+    if (!flow && matches.length > 1) return { ambiguous: ambiguousFlowMessage(args.flow_id, matches) }
+    return flow
   }
   if (args.task_id) {
     const task = await resolveTask(sb, userId, args.task_id)
@@ -3739,7 +3758,39 @@ async function importProjectBundle(sb: any, userId: string, bundle: any, opts: {
 }
 
 // ── Tool handlers ─────────────────────────────────────────────
+// TDE-872: ONE ambiguity policy for resolving a flow by partial name.
+//
+// Six sites looked a flow up by name and they had drifted into FOUR different behaviours: one
+// listed the candidates and refused (stop at 'save_flow_as_template'), two returned null so the
+// caller reported "not found" when the truth was "ambiguous", and three ran
+// `.order('created_at', desc).limit(1)` — silently returning the caller's most recently created
+// flow. That last shape is the reason TDE-872 exists: it does not fail, it hands back a plausible
+// WRONG flow and the agent operates on it with no error anywhere.
+//
+// Escaping the LIKE metacharacters (see escapeLike) removes the wildcard route into that bug, but
+// NOT the bug itself — two flows genuinely containing "deploy" are still ambiguous for perfectly
+// ordinary input. Picking the newest is a guess dressed as an answer.
+//
+// So the policy is the one the codebase already had in its best site: exactly one match resolves;
+// more than one refuses and NAMES the candidates so the caller can disambiguate. Never guess.
+async function findFlowsByName(sb: any, userId: string, nameRef: string, columns: string, projectId?: string | null) {
+  let q = sb.from('flows').select(columns).eq('user_id', userId).ilike('name', `%${escapeLike(nameRef)}%`)
+  if (projectId) q = q.eq('project_id', projectId)
+  // limit(5) bounds the response; the count is what matters, and 5 names is enough to choose from.
+  const { data } = await q.order('created_at', { ascending: false }).limit(5)
+  const matches = data ?? []
+  return { flow: matches.length === 1 ? matches[0] : null, matches }
+}
+
+function ambiguousFlowMessage(nameRef: string, matches: any[]): string {
+  return `Multiple flows match "${nameRef}":\n`
+    + matches.map((f: any) => `  • ${f.name} (id: ${f.id})`).join('\n')
+    + `\nPass the exact flow id. Resolving this by "newest" would silently act on the wrong flow.`
+}
+
 // TDE-384: resolve a flow by flow_id (UUID or partial name) or by a task_id within it.
+// Returns the flow, or null. On an AMBIGUOUS name it also returns `ambiguous` — callers must
+// surface that rather than reporting "not found", which is a different and misleading fact.
 async function resolveFlowRef(sb: any, userId: string, args: any) {
   if (args.flow_id) {
     const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
@@ -3747,8 +3798,9 @@ async function resolveFlowRef(sb: any, userId: string, args: any) {
       const { data } = await sb.from('flows').select('id, name').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
       return data
     }
-    const { data } = await sb.from('flows').select('id, name').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
-    return data
+    const { flow, matches } = await findFlowsByName(sb, userId, args.flow_id, 'id, name')
+    if (!flow && matches.length > 1) return { ambiguous: ambiguousFlowMessage(args.flow_id, matches) }
+    return flow
   }
   if (args.task_id) {
     const anchor = await resolveTask(sb, userId, args.task_id)
@@ -4482,6 +4534,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       // flow unless the user explicitly asked to see them via include_flow_steps or a flow filter.
       if (args.flow_id) {
         const flow = await resolveFlow(sb, userId, args)
+        if (flow?.ambiguous) return flow.ambiguous
         if (!flow) return `Flow "${args.flow_id}" not found.`
         query = query.eq('flow_id', flow.id)
       } else if (!include_flow_steps) {
@@ -5481,7 +5534,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       for (const t of titles) {
         const { data } = await sb.from('project_knowledge')
           .select('id, title, content, source')
-          .eq('project_id', project.id).is('archived_at', null).ilike('title', `%${t}%`)
+          .eq('project_id', project.id).is('archived_at', null).ilike('title', `%${escapeLike(t)}%`)
         for (const e of (data || [])) collected.set(e.id, e)
       }
       const entries = [...collected.values()]
@@ -5685,6 +5738,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     // ── Flow-level Instruction Set (TDE-233) ──
     case 'get_flow_is': {
       const flow = await resolveFlow(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return `Flow not found. Pass flow_id (UUID or name) or a task_id that belongs to the flow.`
       const { data: entries } = await sb.from('flow_instructions').select('id, title, content, tags').eq('flow_id', flow.id).order('created_at')
       if (!entries?.length) return `No flow IS defined for "${flow.name}". Tasks in this flow fall back to the project IS.`
@@ -5692,6 +5746,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
     case 'list_flow_is_entries': {
       const flow = await resolveFlow(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
       const { data } = await sb.from('flow_instructions').select('id, title, updated_at, tags').eq('flow_id', flow.id).order('created_at')
       if (!data?.length) return `No flow IS entries for "${flow.name}".`
@@ -5699,6 +5754,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
     case 'create_flow_is_entry': {
       const flow = await resolveFlow(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
       const { data, error } = await sb.from('flow_instructions').insert({ flow_id: flow.id, user_id: userId, title: args.title, content: args.content, tags: args.tags && Array.isArray(args.tags) ? args.tags : [] }).select().single()
       if (error) throw new Error(error.message)
@@ -5725,6 +5781,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     // ── Flow-level Knowledge Base (TDE-233) ──
     case 'get_flow_kb': {
       const flow = await resolveFlow(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return `Flow not found. Pass flow_id (UUID or name) or a task_id that belongs to the flow.`
       const { data: entries } = await sb.from('flow_knowledge').select('id, title, content').eq('flow_id', flow.id).order('created_at')
       if (!entries?.length) return `No flow KB entries for "${flow.name}".`
@@ -5732,6 +5789,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
     case 'list_flow_kb_entries': {
       const flow = await resolveFlow(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
       const { data } = await sb.from('flow_knowledge').select('id, title, updated_at').eq('flow_id', flow.id).order('created_at')
       if (!data?.length) return `No flow KB entries for "${flow.name}".`
@@ -5739,6 +5797,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     }
     case 'create_flow_kb_entry': {
       const flow = await resolveFlow(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return `Flow not found. Pass flow_id or a task_id in the flow.`
       const { data, error } = await sb.from('flow_knowledge').insert({ flow_id: flow.id, user_id: userId, title: args.title, content: args.content }).select().single()
       if (error) throw new Error(error.message)
@@ -6046,6 +6105,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'stop_flow': {
       const flow = await resolveFlowRef(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return 'Flow not found. Pass flow_id (UUID or name) or a task_id in the flow.'
       await sb.from('flows').update({ stop_requested: true, stop_reason: args.reason ?? null, stopped_at: new Date().toISOString() }).eq('id', flow.id)
       return `⛔ Stopped flow "${flow.name}". Agents will refuse to run, guide, or advance it until you resume_flow.${args.reason ? `\nReason: ${args.reason}` : ''}`
@@ -6053,6 +6113,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'resume_flow': {
       const flow = await resolveFlowRef(sb, userId, args)
+      if (flow?.ambiguous) return flow.ambiguous
       if (!flow) return 'Flow not found. Pass flow_id (UUID or name) or a task_id in the flow.'
       await sb.from('flows').update({ stop_requested: false, stop_reason: null, stopped_at: null }).eq('id', flow.id)
       return `▶ Resumed flow "${flow.name}". It picks up exactly where it stood.`
@@ -7139,10 +7200,15 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       let exTasks: any[] = []
       if (args.flow_id) {
         const looksLikeUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(args.flow_id)
-        const { data } = looksLikeUuid
-          ? await sb.from('flows').select('id, name, short_id, step_list_open').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
-          : await sb.from('flows').select('id, name, short_id, step_list_open').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
-        exFlow = data
+        if (looksLikeUuid) {
+          const { data } = await sb.from('flows').select('id, name, short_id, step_list_open').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
+          exFlow = data
+        } else {
+          // TDE-872: was order-by-newest + limit(1) — a wrong flow's exceptions are worse than none.
+          const { flow, matches } = await findFlowsByName(sb, userId, args.flow_id, 'id, name, short_id, step_list_open')
+          if (!flow && matches.length > 1) return ambiguousFlowMessage(args.flow_id, matches)
+          exFlow = flow
+        }
       } else if (args.task_id) {
         const anchor = await resolveTask(sb, userId, args.task_id)
         if (!anchor) return `Task "${args.task_id}" not found.`
@@ -7707,7 +7773,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           flow = data
         } else {
           // Name lookup — optionally scoped to a project
-          let q = sb.from('flows').select('id, name, short_id, context, project_id, step_list_open').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
+          let q = sb.from('flows').select('id, name, short_id, context, project_id, step_list_open').eq('user_id', userId).ilike('name', `%${escapeLike(args.flow_id)}%`)
           if (args.project_id) {
             const p = await resolveProject(sb, userId, args.project_id)
             if (p) q = q.eq('project_id', p.id)
@@ -7960,6 +8026,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       // Shared flow resolution for both guide tools
       let guideFlowRecord: any = null
       let guideTasks: any[] = []
+      let guideAmbiguity: string | null = null   // TDE-872: "ambiguous" must not be reported as "not found"
 
       const resolveGuideFlow = async () => {
         if (args.flow_id) {
@@ -7968,8 +8035,11 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
             const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor, step_list_open').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
             guideFlowRecord = data
           } else {
-            const { data } = await sb.from('flows').select('id, name, short_id, context, guide_cursor, step_list_open').eq('user_id', userId).ilike('name', `%${args.flow_id}%`).order('created_at', { ascending: false }).limit(1).maybeSingle()
-            guideFlowRecord = data
+            // TDE-872: was order-by-newest + limit(1). Guiding a human step-by-step through the
+            // WRONG flow is the worst instance of this bug in the file — the mistake gets acted on.
+            const { flow, matches } = await findFlowsByName(sb, userId, args.flow_id, 'id, name, short_id, context, guide_cursor, step_list_open')
+            if (!flow && matches.length > 1) { guideAmbiguity = ambiguousFlowMessage(args.flow_id, matches); return }
+            guideFlowRecord = flow
           }
         } else if (args.task_id) {
           const anchor = await resolveTask(sb, userId, args.task_id)
@@ -7987,6 +8057,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
 
       const found = await resolveGuideFlow()
+      if (guideAmbiguity) return guideAmbiguity
       if (!found || !guideFlowRecord) return 'Flow not found. Pass flow_id or task_id.'
       if (!guideTasks.length) return 'No tasks found in this flow.'
 
@@ -8628,7 +8699,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         const { data } = await sb.from('flows').select('id, name').eq('id', args.flow_id).eq('user_id', userId).maybeSingle()
         flow = data
       } else if (args.flow_id) {
-        let q = sb.from('flows').select('id, name').eq('user_id', userId).ilike('name', `%${args.flow_id}%`)
+        let q = sb.from('flows').select('id, name').eq('user_id', userId).ilike('name', `%${escapeLike(args.flow_id)}%`)
         if (args.project_id) { const p = await resolveProject(sb, userId, args.project_id); if (p) q = q.eq('project_id', p.id) }
         const { data } = await q
         if (!data?.length) return `No flow matches "${args.flow_id}".`
@@ -9583,7 +9654,7 @@ Call submit_validation_result with:
 
       let templateId = args.template_id
       if (!templateId && args.template_name) {
-        const { data: t } = await sb.from('flow_templates').select('id').ilike('name', `%${args.template_name}%`).eq('user_id', userId).maybeSingle()
+        const { data: t } = await sb.from('flow_templates').select('id').ilike('name', `%${escapeLike(args.template_name)}%`).eq('user_id', userId).maybeSingle()
         if (!t) return `Template "${args.template_name}" not found.`
         templateId = t.id
       }
