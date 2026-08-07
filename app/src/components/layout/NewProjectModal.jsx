@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { createProject, updateProject, derivePrefix } from '../../hooks/useProjects'
+import { createProject, updateProject, derivePrefix, PREFIX_MAX } from '../../hooks/useProjects'
 import { generateProjectFromDiscussion, generateProjectSummary, discussProject, generateProjectStructure } from '../../lib/gemini'
 import { createProjectWithStructure } from '../../lib/projectBuilder'
 import { EXAMPLE_PROJECT } from '../../lib/exampleProject'
@@ -314,8 +314,8 @@ export default function NewProjectModal({ onClose, onCreated }) {
     try {
       const proj = await createProject(trimmed, prefix || derivePrefix(trimmed), { localMode })
       onCreated(proj)
-    } catch {
-      setError('Failed to create project. Try again.')
+    } catch (e) {
+      setError(e?.message || 'Failed to create project. Try again.')
       setStep('input')
     }
   }
@@ -636,10 +636,10 @@ export default function NewProjectModal({ onClose, onCreated }) {
               <span className="text-[11px] text-mute-2 shrink-0">Prefix</span>
               <input
                 value={prefix}
-                onChange={e => setPrefix(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 3))}
+                onChange={e => setPrefix(e.target.value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, PREFIX_MAX))}
                 placeholder={name ? derivePrefix(name) : 'ABC'}
-                maxLength={3}
-                className="w-16 bg-surf-2 rounded-lg px-3 py-2 text-[13px] font-mono text-ink outline-none border border-line focus:border-ink transition-colors placeholder:text-mute-2 uppercase"
+                maxLength={PREFIX_MAX}
+                className="w-24 bg-surf-2 rounded-lg px-3 py-2 text-[13px] font-mono text-ink outline-none border border-line focus:border-ink transition-colors placeholder:text-mute-2 uppercase"
               />
               <span className="text-[11px] text-mute-2">Tasks will be numbered {prefix || (name ? derivePrefix(name) : 'ABC')}-1, {prefix || (name ? derivePrefix(name) : 'ABC')}-2…</span>
             </div>

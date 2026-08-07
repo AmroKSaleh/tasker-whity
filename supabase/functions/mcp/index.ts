@@ -331,7 +331,9 @@ function escapeLike(s: string): string {
 async function resolveProject(sb: any, userId: string, projectId: string, logContext?: { tool_name: string, raw_params: any }) {
   let { data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('slug', projectId).eq('user_id', userId).maybeSingle()
   if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('id', projectId).eq('user_id', userId).maybeSingle())
-  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').ilike('prefix', escapeLike(projectId)).eq('user_id', userId).maybeSingle())
+  // TDE-822: was ilike (escaped by TDE-872). Now an equality match on the uppercase prefix so it
+  // uses the unique index on (user_id, lower(prefix)); ilike cannot.
+  if (!data) ({ data } = await sb.from('projects').select('id, name, slug, prefix, context, active_phase_id').eq('prefix', String(projectId || '').toUpperCase()).eq('user_id', userId).maybeSingle())
   if (!data && logContext) {
     fireAndForget(sb.from('mcp_error_logs').insert({
       user_id: userId,
@@ -971,18 +973,26 @@ function renderFoundation(ctx: any): string[] {
   return out
 }
 
-// Derive a 2–5 uppercase-letter prefix (the short-ID handle, e.g. WMP-3) from a project
+// Derive a 2–6 uppercase alphanumeric prefix (the short-ID handle, e.g. WMP-3) from a project
 // name, unique within the user's projects. Returns null if a clean one can't be found.
+// TDE-822: prefix is NOT NULL + unique per user (case-insensitive), 2-6 uppercase alphanumerics.
+// The web UI capped at 3 while this capped at 5 — the two disagreed and nobody noticed; both are
+// now 6. The old ten-candidate loop could exhaust and return null, which silently produced a
+// prefix-less project; it now suffixes with digits until it finds a free one.
+// Kept behaviourally identical to rest-api's copy — if you change one, change both.
+const PREFIX_MAX = 6
 async function deriveProjectPrefix(sb: any, userId: string, name: string): Promise<string | null> {
-  const words = String(name || '').toUpperCase().split(/[^A-Z]+/).filter(Boolean)
-  let base = (words.length >= 2 ? words.slice(0, 4).map((w: string) => w[0]).join('') : (words[0] || '').slice(0, 4))
+  const words = String(name || '').toUpperCase().split(/[^A-Z0-9]+/).filter(Boolean)
+  let base = (words.length >= 2 ? words.slice(0, PREFIX_MAX).map((w: string) => w[0]).join('') : (words[0] || '').slice(0, PREFIX_MAX))
   if (base.length < 2) base = (base + 'PRJ').slice(0, 3)
-  base = base.slice(0, 5)
+  base = base.slice(0, PREFIX_MAX)
   const { data: rows } = await sb.from('projects').select('prefix').eq('user_id', userId)
   const taken = new Set((rows || []).map((r: any) => (r.prefix || '').toUpperCase()).filter(Boolean))
-  for (const suffix of ['', 'X', 'Y', 'Z', 'A', 'B', 'C', 'D', 'E', 'F']) {
-    const cand = (base.slice(0, 5 - suffix.length) + suffix)
-    if (cand.length >= 2 && cand.length <= 5 && !taken.has(cand)) return cand
+  if (!taken.has(base)) return base
+  for (let n = 2; n < 10000; n++) {
+    const suffix = String(n)
+    const cand = base.slice(0, Math.max(1, PREFIX_MAX - suffix.length)) + suffix
+    if (!taken.has(cand)) return cand
   }
   return null
 }
@@ -1946,13 +1956,13 @@ const TOOLS = [
   },
   {
     name: 'update_project',
-    description: 'Update a project\'s name or prefix (short ID prefix like "BPW"). The prefix must be 2–5 uppercase letters and unique across your projects.',
+    description: 'Update a project\'s name or prefix (short ID prefix like "BPW"). The prefix must be 2–6 uppercase letters or digits and unique across your projects.',
     inputSchema: {
       type: 'object',
       properties: {
         project_id: { type: 'string', description: 'Project prefix, slug, or UUID' },
         name:   { type: 'string', description: 'New project name (optional)' },
-        prefix: { type: 'string', description: 'New prefix, 2–5 uppercase letters e.g. "BPW" (optional)' },
+        prefix: { type: 'string', description: 'New prefix, 2–6 uppercase letters or digits e.g. "BPW" (optional)' },
       },
       required: ['project_id'],
     },
@@ -4082,9 +4092,12 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         + '-' + Date.now().toString(36)
       // Auto-assign a short-ID handle (prefix) so tasks get usable IDs (e.g. WMP-3)
       // from the start. Caller can rename it later via update_project.
-      const prefix = await deriveProjectPrefix(sb, userId, name)
+      const prefix = await deriveProjectPrefix(sb, userId, args.prefix || name)
+      // TDE-822: previously a null prefix was spread away and the project was created without
+      // one, leaving its tasks unaddressable as PREFIX-n. Fail loudly instead.
+      if (!prefix) return 'Could not derive a unique project prefix. Pass an explicit prefix, or free one up.'
       const { data, error } = await sb.from('projects')
-        .insert({ name, slug, user_id: userId, context: context ?? {}, environment_id: environmentId, ...(prefix ? { prefix } : {}) })
+        .insert({ name, slug, user_id: userId, context: context ?? {}, environment_id: environmentId, prefix })
         .select().single()
       if (error) throw new Error(error.message)
       await getOrCreateBacklog(sb, data.id)
@@ -4260,7 +4273,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (args.name) updates.name = args.name
       if (args.prefix) {
         const p = args.prefix.trim().toUpperCase()
-        if (!/^[A-Z]{2,5}$/.test(p)) return 'Prefix must be 2–5 uppercase letters only (e.g. "BPW").'
+        if (!new RegExp(`^[A-Z0-9]{2,${PREFIX_MAX}}$`).test(p)) return `Prefix must be 2–${PREFIX_MAX} uppercase letters or digits (e.g. "BPW").`
         const { data: clash } = await sb.from('projects').select('id').eq('user_id', userId).eq('prefix', p).neq('id', project.id).maybeSingle()
         if (clash) return `Prefix "${p}" is already used by another project.`
         updates.prefix = p
