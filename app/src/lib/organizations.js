@@ -10,6 +10,11 @@ export function orgLabel(org) {
   return org?.name?.trim() || 'n/a'
 }
 
+// The label for environments with org_id = null. This is NOT an organization — no such row
+// exists — it is the absence of one. It used to read "Personal", which was indistinguishable
+// from a real org and collided outright once a user named an actual org "Personal".
+export const NO_ORG_LABEL = 'N/A'
+
 async function refreshOrganizations() {
   const { data } = await supabase.from('organizations').select('id, name, owner_user_id').order('created_at')
   useEnvironmentStore.getState().setOrganizations(data ?? [])
@@ -32,7 +37,7 @@ export async function renameOrganization(id, name) {
 
 // Deletion is guarded rather than cascading: an org owns environments, which own projects, so a
 // cascade would silently destroy real work. Refuse while any environment remains and make the
-// caller move them to Personal first — the same shape as the section-delete guard.
+// caller move them out first — the same shape as the section-delete guard.
 export async function deleteOrganization(id) {
   const { data: envs, error: envErr } = await supabase
     .from('environments').select('id, name').eq('org_id', id)
@@ -41,7 +46,7 @@ export async function deleteOrganization(id) {
     const names = envs.map(e => e.name).join(', ')
     throw new Error(
       `This organization still owns ${envs.length} environment${envs.length === 1 ? '' : 's'} (${names}). ` +
-      `Move them to Personal or another organization on the Environments page first — deleting would orphan their projects.`
+      `Move them to N/A or another organization on the Environments page first — deleting would orphan their projects.`
     )
   }
   const { error } = await supabase.from('organizations').delete().eq('id', id)

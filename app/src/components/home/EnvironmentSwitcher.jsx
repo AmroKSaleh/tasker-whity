@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { envColor } from '../../lib/envColor'
-import { orgLabel } from '../../lib/organizations'
+import { orgLabel, NO_ORG_LABEL } from '../../lib/organizations'
 
 // Dropdown to switch the active Environment. Exclusive switching: picking one filters the
 // project grid to that Environment. Environments are grouped Personal + per-organization (org
@@ -62,7 +62,7 @@ export default function EnvironmentSwitcher({ environments, organizations = [], 
       </button>
       {open && (
         <div className="absolute right-0 mt-1 min-w-[200px] max-h-[70vh] overflow-y-auto bg-paper border border-line rounded-lg shadow-card z-50 py-1">
-          {grouped && personal.length > 0 && groupHead('Personal')}
+          {grouped && personal.length > 0 && groupHead(NO_ORG_LABEL)}
           {personal.map(envButton)}
           {orgGroups.map(({ org, envs }) => (
             <div key={org.id}>

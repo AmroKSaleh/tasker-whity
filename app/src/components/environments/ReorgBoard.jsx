@@ -1,7 +1,7 @@
 import { DndContext, PointerSensor, useSensor, useSensors, pointerWithin } from '@dnd-kit/core'
 import { ENV_COLORS, envColor } from '../../lib/envColor'
 import { moveProjectToEnvironment, updateEnvironment, deleteEmptyEnvironment, moveEnvironmentToOrg, createEnvironment } from '../../lib/environments'
-import { orgLabel } from '../../lib/organizations'
+import { orgLabel, NO_ORG_LABEL } from '../../lib/organizations'
 import ReorgColumn, { ProjectCard } from './ReorgColumn'
 import { Kicker } from '../editorial/atoms'
 
@@ -12,7 +12,7 @@ import { Kicker } from '../editorial/atoms'
 // here by design — switch tabs, or use a column's owner select to move the environment itself.
 export default function ReorgBoard({ ownerId, environments, organizations, projects }) {
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
-  const owners = [{ id: null, name: 'Personal' }, ...organizations.map(o => ({ id: o.id, name: orgLabel(o) }))]
+  const owners = [{ id: null, name: NO_ORG_LABEL }, ...organizations.map(o => ({ id: o.id, name: orgLabel(o) }))]
   const laneEnvs = environments.filter(e => (e.org_id ?? null) === ownerId)
   const envById = Object.fromEntries(laneEnvs.map(e => [e.id, e]))
 
@@ -51,7 +51,7 @@ export default function ReorgBoard({ ownerId, environments, organizations, proje
     </div>
   ) : null
 
-  const ownerName = owners.find(o => o.id === ownerId)?.name ?? 'Personal'
+  const ownerName = owners.find(o => o.id === ownerId)?.name ?? NO_ORG_LABEL
 
   return (
     <DndContext sensors={sensors} collisionDetection={pointerWithin} onDragEnd={onDragEnd}>
