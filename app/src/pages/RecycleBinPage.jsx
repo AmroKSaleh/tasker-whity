@@ -4,9 +4,13 @@ import { restoreOrganization } from '../lib/organizations'
 import { restoreEnvironment } from '../lib/environments'
 import AppShell from '../components/editorial/AppShell'
 
+const itemKey = item => `${item.type}-${item.id}`
+
 export default function RecycleBinPage() {
   const [deletedItems, setDeletedItems] = useState([])
   const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState(() => new Set())
+  const [busy, setBusy] = useState(false)
 
   async function fetchDeletedItems() {
     setLoading(true)
@@ -36,18 +40,61 @@ export default function RecycleBinPage() {
     // Sort by deleted_at descending
     items.sort((a, b) => new Date(b.deleted_at) - new Date(a.deleted_at))
     setDeletedItems(items)
+    // Drop selections whose rows are gone, so a stale key cannot survive a refetch and make the
+    // select-all state disagree with what is on screen.
+    setSelected(prev => {
+      const live = new Set(items.map(itemKey))
+      const next = new Set([...prev].filter(k => live.has(k)))
+      return next.size === prev.size ? prev : next
+    })
     setLoading(false)
+  }
+
+  function toggleOne(item) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      const k = itemKey(item)
+      next.has(k) ? next.delete(k) : next.add(k)
+      return next
+    })
+  }
+
+  const allSelected = deletedItems.length > 0 && selected.size === deletedItems.length
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(deletedItems.map(itemKey)))
+  }
+
+  const selectedItems = deletedItems.filter(i => selected.has(itemKey(i)))
+
+  async function restoreSelected() {
+    setBusy(true)
+    try { for (const item of selectedItems) await restoreOne(item) }
+    finally { setBusy(false); setSelected(new Set()); fetchDeletedItems() }
+  }
+
+  async function hardDeleteSelected() {
+    const n = selectedItems.length
+    if (!window.confirm(`Permanently delete ${n} item${n === 1 ? '' : 's'}? This cannot be undone.`)) return
+    setBusy(true)
+    // Containers last: purging an organization cascades its environments away, which would null
+    // environment_id on any project in the same selection that has not been purged yet.
+    const order = { task: 0, flow: 1, project: 2, environment: 3, organization: 4 }
+    const ordered = [...selectedItems].sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9))
+    try { for (const item of ordered) await hardDeleteOne(item) }
+    finally { setBusy(false); setSelected(new Set()); fetchDeletedItems() }
   }
 
   useEffect(() => {
     fetchDeletedItems()
   }, [])
 
-  async function restoreItem(item) {
+  // The *One helpers do the work WITHOUT refetching, so a bulk action can run many of them and
+  // refresh once at the end instead of once per item.
+  async function restoreOne(item) {
     // Containers restore their whole cascade AND any still-deleted ancestor, so a restored row
     // is never left pointing at an invisible parent.
-    if (item.type === 'organization') { await restoreOrganization(item.id); fetchDeletedItems(); return }
-    if (item.type === 'environment') { await restoreEnvironment(item.id); fetchDeletedItems(); return }
+    if (item.type === 'organization') return restoreOrganization(item.id)
+    if (item.type === 'environment') return restoreEnvironment(item.id)
 
     let table = ''
     if (item.type === 'task') table = 'tasks'
@@ -61,6 +108,10 @@ export default function RecycleBinPage() {
       await supabase.from('environments').update({ is_deleted: false, deleted_at: null, deleted_cascade_id: null })
         .eq('id', item.environment_id).eq('is_deleted', true)
     }
+  }
+
+  async function restoreItem(item) {
+    await restoreOne(item)
     fetchDeletedItems()
   }
 
@@ -68,7 +119,11 @@ export default function RecycleBinPage() {
     if (!window.confirm(`Are you sure you want to permanently delete this ${item.type}? This cannot be undone.`)) {
       return
     }
-    
+    await hardDeleteOne(item)
+    fetchDeletedItems()
+  }
+
+  async function hardDeleteOne(item) {
     if (item.type === 'task') {
       await Promise.all([
         supabase.from('task_discussions').delete().eq('task_id', item.id),
@@ -103,8 +158,6 @@ export default function RecycleBinPage() {
       if (item.type === 'environment') await supabase.from('environments').delete().eq('id', item.id)
       else await supabase.from('organizations').delete().eq('id', item.id)
     }
-
-    fetchDeletedItems()
   }
 
   async function hardDeleteProject(projectId) {
@@ -141,8 +194,53 @@ export default function RecycleBinPage() {
             <div className="text-slate-400 font-light">The recycle bin is empty.</div>
           ) : (
             <div className="space-y-2">
+              <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-slate-800/20 border border-slate-700/40">
+                <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={allSelected}
+                    ref={el => { if (el) el.indeterminate = selected.size > 0 && !allSelected }}
+                    onChange={toggleAll}
+                    className="w-4 h-4 accent-blue-500 cursor-pointer"
+                  />
+                  <span className="text-sm text-slate-300 font-light">
+                    {selected.size > 0 ? `${selected.size} selected` : `Select all (${deletedItems.length})`}
+                  </span>
+                </label>
+
+                {selected.size > 0 && (
+                  <div className="flex items-center gap-3 shrink-0">
+                    <button
+                      onClick={restoreSelected}
+                      disabled={busy}
+                      className="text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-40"
+                    >
+                      {busy ? 'Working…' : `Restore ${selected.size}`}
+                    </button>
+                    <button
+                      onClick={hardDeleteSelected}
+                      disabled={busy}
+                      className="text-sm font-medium text-red-400 hover:text-red-300 transition-colors disabled:opacity-40"
+                    >
+                      Delete {selected.size} permanently
+                    </button>
+                  </div>
+                )}
+              </div>
+
               {deletedItems.map((item) => (
-                <div key={`${item.type}-${item.id}`} className="bg-slate-800/40 rounded-lg p-4 flex items-center justify-between border border-slate-700/50">
+                <div key={itemKey(item)} className={`rounded-lg p-4 flex items-center justify-between border transition-colors ${
+                  selected.has(itemKey(item))
+                    ? 'bg-slate-800/70 border-blue-500/40'
+                    : 'bg-slate-800/40 border-slate-700/50'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={selected.has(itemKey(item))}
+                    onChange={() => toggleOne(item)}
+                    aria-label={`Select ${item.label}`}
+                    className="w-4 h-4 mr-4 shrink-0 accent-blue-500 cursor-pointer"
+                  />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 mb-1">
                       <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">{item.type}</span>
