@@ -16,8 +16,8 @@ export function useEnvironments() {
       // No user_id filter on environments: RLS returns the user's personal envs PLUS any org
       // envs they can access (owner/admin/granted). org_id distinguishes them.
       const [{ data: envs }, { data: orgs }, { data: settings }] = await Promise.all([
-        supabase.from('environments').select('id, name, sort_order, color, org_id').order('sort_order'),
-        supabase.from('organizations').select('id, name, owner_user_id').order('created_at'),
+        supabase.from('environments').select('id, name, sort_order, color, org_id').eq('is_deleted', false).order('sort_order'),
+        supabase.from('organizations').select('id, name, owner_user_id').eq('is_deleted', false).order('created_at'),
         supabase.from('user_settings').select('active_environment_id').eq('user_id', user.id).maybeSingle(),
       ])
       const list = envs ?? []

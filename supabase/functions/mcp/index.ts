@@ -3837,7 +3837,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const [{ data: projects }, { data: tasks }, { data: envRows }, { data: us }] = await Promise.all([
         projQuery,
         sb.from('tasks').select('project_id, status').eq('user_id', userId).is('is_deleted', false),
-        sb.from('environments').select('id, name, sort_order').eq('user_id', userId).order('sort_order'),
+        sb.from('environments').select('id, name, sort_order').eq('user_id', userId).eq('is_deleted', false).order('sort_order'),
         sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle(),
       ])
       if (!projects?.length) return envFilter ? 'No projects in that Environment.' : 'No projects found.'
@@ -4076,13 +4076,13 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       // The AI never silently inherits the active pointer for anything but this default (TDE-308).
       let environmentId = args.environment_id || null
       if (environmentId) {
-        const { data: env } = await sb.from('environments').select('id').eq('id', environmentId).eq('user_id', userId).maybeSingle()
+        const { data: env } = await sb.from('environments').select('id').eq('id', environmentId).eq('user_id', userId).eq('is_deleted', false).maybeSingle()
         if (!env) return `Environment "${environmentId}" not found. Call list_environments to see valid ids.`
       } else {
         const { data: usEnv } = await sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle()
         environmentId = usEnv?.active_environment_id ?? null
         if (!environmentId) {
-          const { data: envs } = await sb.from('environments').select('id').eq('user_id', userId).order('sort_order')
+          const { data: envs } = await sb.from('environments').select('id').eq('user_id', userId).eq('is_deleted', false).order('sort_order')
           if (!envs?.length) return 'No Environment exists yet. Create one with create_environment, then retry.'
           if (envs.length === 1) environmentId = envs[0].id
           else return 'No active Environment is set and you have more than one. Pass environment_id explicitly (see list_environments).'
@@ -4102,7 +4102,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (error) throw new Error(error.message)
       await getOrCreateBacklog(sb, data.id)
 
-      const { data: envRow } = await sb.from('environments').select('name').eq('id', environmentId).maybeSingle()
+      const { data: envRow } = await sb.from('environments').select('name').eq('id', environmentId).eq('is_deleted', false).maybeSingle()
 
       // A baseline Instruction Set (task hygiene + working preferences) is seeded
       // automatically by an AFTER INSERT trigger on `projects` (TDE-193), so it applies
@@ -4115,7 +4115,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'list_environments': {
       const [{ data: envs }, { data: projs }, { data: us }] = await Promise.all([
-        sb.from('environments').select('id, name, sort_order').eq('user_id', userId).order('sort_order'),
+        sb.from('environments').select('id, name, sort_order').eq('user_id', userId).eq('is_deleted', false).order('sort_order'),
         sb.from('projects').select('environment_id').eq('user_id', userId),
         sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle(),
       ])
@@ -4142,7 +4142,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
 
     case 'rename_environment': {
       if (!args.environment_id || !args.name?.trim()) return 'environment_id and name are required.'
-      const { data: env } = await sb.from('environments').select('id, name').eq('id', args.environment_id).eq('user_id', userId).maybeSingle()
+      const { data: env } = await sb.from('environments').select('id, name').eq('id', args.environment_id).eq('user_id', userId).eq('is_deleted', false).maybeSingle()
       if (!env) return `Environment "${args.environment_id}" not found.`
       await sb.from('environments').update({ name: args.name.trim() }).eq('id', env.id)
       return `Renamed Environment "${env.name}" → "${args.name.trim()}".`
@@ -4151,9 +4151,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
     case 'delete_environment': {
       if (!args.environment_id) return 'environment_id is required.'
       if (!args.confirmed) return 'You must set confirmed: true to delete an Environment. Its projects are preserved and moved to another Environment.'
-      const { data: env } = await sb.from('environments').select('id, name').eq('id', args.environment_id).eq('user_id', userId).maybeSingle()
+      const { data: env } = await sb.from('environments').select('id, name').eq('id', args.environment_id).eq('user_id', userId).eq('is_deleted', false).maybeSingle()
       if (!env) return `Environment "${args.environment_id}" not found.`
-      const { data: allEnvs } = await sb.from('environments').select('id, name').eq('user_id', userId).order('sort_order')
+      const { data: allEnvs } = await sb.from('environments').select('id, name').eq('user_id', userId).eq('is_deleted', false).order('sort_order')
       if ((allEnvs?.length ?? 0) <= 1) return 'Cannot delete the last Environment — every project must live in one. Create another first, or just rename this one.'
       // Resolve the reassignment target: explicit arg → an Environment named "Default" → the next one.
       const others = (allEnvs ?? []).filter((e: any) => e.id !== env.id)
@@ -4172,7 +4172,8 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       if (us?.active_environment_id === env.id) {
         await sb.from('user_settings').update({ active_environment_id: target.id }).eq('user_id', userId)
       }
-      await sb.from('environments').delete().eq('id', env.id)
+      // TDE-885: soft delete so the Environment stays restorable from the Recycle Bin.
+      await sb.from('environments').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', env.id)
       const n = moved?.length ?? 0
       return `Deleted Environment "${env.name}". Moved ${n} project${n === 1 ? '' : 's'} to "${target.name}".`
     }
@@ -6761,7 +6762,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const instructions = settings?.ai_instructions
       const { show_questionnaire } = args
 
-      const { data: envRows } = await sb.from('environments').select('id, name, sort_order').eq('user_id', userId).order('sort_order')
+      const { data: envRows } = await sb.from('environments').select('id, name, sort_order').eq('user_id', userId).eq('is_deleted', false).order('sort_order')
       const environments = (envRows ?? []).map((e: any) => ({ id: e.id, name: e.name }))
       const active_environment_id = settings?.active_environment_id ?? null
 

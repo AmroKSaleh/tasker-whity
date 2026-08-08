@@ -1,5 +1,7 @@
 import { useState, useEffect } from 'react'
 import { supabase } from '../lib/supabase'
+import { restoreOrganization } from '../lib/organizations'
+import { restoreEnvironment } from '../lib/environments'
 import AppShell from '../components/editorial/AppShell'
 
 export default function RecycleBinPage() {
@@ -8,18 +10,29 @@ export default function RecycleBinPage() {
 
   async function fetchDeletedItems() {
     setLoading(true)
-    const [{ data: tasks }, { data: projects }, { data: flows }] = await Promise.all([
+    const [{ data: tasks }, { data: projects }, { data: flows }, { data: envs }, { data: orgs }] = await Promise.all([
       supabase.from('tasks').select('*').eq('is_deleted', true),
       supabase.from('projects').select('*').eq('is_deleted', true),
-      supabase.from('flows').select('*').eq('is_deleted', true)
+      supabase.from('flows').select('*').eq('is_deleted', true),
+      supabase.from('environments').select('*').eq('is_deleted', true),
+      supabase.from('organizations').select('*').eq('is_deleted', true)
     ])
+
+    // A row deleted as PART of a container's cascade is not listed separately — restoring the
+    // container brings it back, and listing both invites a half-restore that leaves a project
+    // pointing at an environment still in the bin (TDE-885).
+    const cascadeRoots = new Set([...(envs || []), ...(orgs || [])].map(r => r.deleted_cascade_id).filter(Boolean))
+    const notInCascade = row => !row.deleted_cascade_id || !cascadeRoots.has(row.deleted_cascade_id)
 
     const items = [
       ...(tasks || []).map(t => ({ ...t, type: 'task', label: t.text })),
-      ...(projects || []).map(p => ({ ...p, type: 'project', label: p.name })),
-      ...(flows || []).map(f => ({ ...f, type: 'flow', label: f.name || f.short_id }))
+      ...(projects || []).filter(notInCascade).map(p => ({ ...p, type: 'project', label: p.name })),
+      ...(flows || []).map(f => ({ ...f, type: 'flow', label: f.name || f.short_id })),
+      ...(envs || []).filter(e => !orgs?.some(o => o.deleted_cascade_id && o.deleted_cascade_id === e.deleted_cascade_id))
+        .map(e => ({ ...e, type: 'environment', label: e.name })),
+      ...(orgs || []).map(o => ({ ...o, type: 'organization', label: o.name?.trim() || 'n/a' }))
     ]
-    
+
     // Sort by deleted_at descending
     items.sort((a, b) => new Date(b.deleted_at) - new Date(a.deleted_at))
     setDeletedItems(items)
@@ -31,12 +44,23 @@ export default function RecycleBinPage() {
   }, [])
 
   async function restoreItem(item) {
+    // Containers restore their whole cascade AND any still-deleted ancestor, so a restored row
+    // is never left pointing at an invisible parent.
+    if (item.type === 'organization') { await restoreOrganization(item.id); fetchDeletedItems(); return }
+    if (item.type === 'environment') { await restoreEnvironment(item.id); fetchDeletedItems(); return }
+
     let table = ''
     if (item.type === 'task') table = 'tasks'
     if (item.type === 'project') table = 'projects'
     if (item.type === 'flow') table = 'flows'
-    
-    await supabase.from(table).update({ is_deleted: false, deleted_at: null }).eq('id', item.id)
+
+    await supabase.from(table).update({ is_deleted: false, deleted_at: null, ...(table === 'projects' ? { deleted_cascade_id: null } : {}) }).eq('id', item.id)
+
+    // A project restored on its own still needs its environment back, or it lands nowhere visible.
+    if (item.type === 'project' && item.environment_id) {
+      await supabase.from('environments').update({ is_deleted: false, deleted_at: null, deleted_cascade_id: null })
+        .eq('id', item.environment_id).eq('is_deleted', true)
+    }
     fetchDeletedItems()
   }
 
@@ -66,9 +90,33 @@ export default function RecycleBinPage() {
       await supabase.from('projects').delete().eq('id', item.id)
     } else if (item.type === 'flow') {
       await supabase.from('flows').delete().eq('id', item.id)
+    } else if (item.type === 'environment' || item.type === 'organization') {
+      // Purge the cascade in dependency order. Organizations must go LAST: environments.org_id is
+      // ON DELETE CASCADE, so removing the org first would take environments with it and null the
+      // environment_id of any project not yet purged, silently returning it to the board.
+      if (item.deleted_cascade_id) {
+        const { data: projs } = await supabase.from('projects').select('id')
+          .eq('deleted_cascade_id', item.deleted_cascade_id)
+        for (const p of projs || []) await hardDeleteProject(p.id)
+        await supabase.from('environments').delete().eq('deleted_cascade_id', item.deleted_cascade_id)
+      }
+      if (item.type === 'environment') await supabase.from('environments').delete().eq('id', item.id)
+      else await supabase.from('organizations').delete().eq('id', item.id)
     }
-    
+
     fetchDeletedItems()
+  }
+
+  async function hardDeleteProject(projectId) {
+    const { data: secs } = await supabase.from('sections').select('id').eq('project_id', projectId)
+    const sectionIds = (secs || []).map(s => s.id)
+    if (sectionIds.length) await supabase.from('groups').delete().in('section_id', sectionIds)
+    const { data: taskRows } = await supabase.from('tasks').select('id').eq('project_id', projectId)
+    const taskIds = (taskRows || []).map(t => t.id)
+    if (taskIds.length) await supabase.from('task_discussions').delete().in('task_id', taskIds)
+    await supabase.from('tasks').delete().eq('project_id', projectId)
+    await supabase.from('sections').delete().eq('project_id', projectId)
+    await supabase.from('projects').delete().eq('id', projectId)
   }
 
   function getDaysRemaining(deletedAt) {

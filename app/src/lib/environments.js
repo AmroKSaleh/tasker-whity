@@ -10,7 +10,7 @@ async function refreshEnvironments() {
   // No user_id filter: RLS returns personal + accessible org envs.
   const { data } = await supabase
     .from('environments').select('id, name, sort_order, color, org_id')
-    .order('sort_order')
+    .eq('is_deleted', false).order('sort_order')
   useEnvironmentStore.getState().setEnvironments(data ?? [])
 }
 
@@ -58,7 +58,7 @@ export async function deleteEnvironment(id, reassignToId) {
     useEnvironmentStore.getState().setActiveEnvironmentId(target.id)
   }
 
-  await supabase.from('environments').delete().eq('id', id)
+  await supabase.from('environments').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', id)
 
   const projStore = useProjectStore.getState()
   projStore.projects.forEach(p => { if (p.environment_id === id) projStore.updateProject(p.id, { environment_id: target.id }) })
@@ -70,10 +70,11 @@ export async function deleteEnvironment(id, reassignToId) {
 // For org environments: delete only when empty (no "reassign to Default" fallback like personal
 // envs have — an org can simply have zero environments). Caller moves projects out first.
 export async function deleteEmptyEnvironment(envId) {
+  // Recycle-binned projects must not block this — they are already gone from the user's view.
   const { count } = await supabase.from('projects')
-    .select('id', { count: 'exact', head: true }).eq('environment_id', envId)
+    .select('id', { count: 'exact', head: true }).eq('environment_id', envId).eq('is_deleted', false)
   if (count && count > 0) throw new Error("Move this environment's projects out before deleting it.")
-  await supabase.from('environments').delete().eq('id', envId)
+  await supabase.from('environments').update({ is_deleted: true, deleted_at: new Date().toISOString() }).eq('id', envId)
   await refreshEnvironments()
 }
 
@@ -81,24 +82,24 @@ export async function deleteEmptyEnvironment(envId) {
 // anything, so the confirmation names real numbers instead of "and its contents".
 export async function environmentContents(envId) {
   const { data } = await supabase.from('projects')
-    .select('id, name').eq('environment_id', envId).is('is_deleted', false)
+    .select('id, name').eq('environment_id', envId).eq('is_deleted', false)
   return data ?? []
 }
 
-// Delete an environment AND its projects. The projects are SOFT-deleted, so they sit in the
-// Recycle Bin and stay restorable for 7 days; the environment itself is hard-deleted, having no
-// is_deleted column. A restored project reappears under Unassigned, because deleting its
-// environment nulls projects.environment_id (ON DELETE SET NULL) — visible, not orphaned.
+// Delete an environment AND its projects — all SOFT (TDE-885), sharing one cascade token so a
+// restore revives exactly what this delete took and nothing that was binned earlier.
+// Nothing is nulled, so projects.environment_id still points here and placement survives intact.
 export async function deleteEnvironmentWithContents(envId) {
+  const cascadeId = crypto.randomUUID()
+  const stamp = { is_deleted: true, deleted_at: new Date().toISOString(), deleted_cascade_id: cascadeId }
   const projects = await environmentContents(envId)
+
   if (projects.length) {
-    const { error } = await supabase.from('projects')
-      .update({ is_deleted: true, deleted_at: new Date().toISOString() })
-      .in('id', projects.map(p => p.id))
+    const { error } = await supabase.from('projects').update(stamp).in('id', projects.map(p => p.id))
     if (error) throw new Error(error.message)
   }
-  const { error: delErr } = await supabase.from('environments').delete().eq('id', envId)
-  if (delErr) throw new Error(delErr.message)
+  const { error: envErr } = await supabase.from('environments').update(stamp).eq('id', envId)
+  if (envErr) throw new Error(envErr.message)
 
   const projStore = useProjectStore.getState()
   projects.forEach(p => projStore.removeProject?.(p.id))
@@ -107,6 +108,24 @@ export async function deleteEnvironmentWithContents(envId) {
   if (store.activeEnvironmentId === envId) store.setActiveEnvironmentId(null)
   await refreshEnvironments()
   return projects.length
+}
+
+// Restore an environment and everything its delete took. Also revives a still-deleted parent
+// org — a restored row whose parent is invisible is not actually restored.
+export async function restoreEnvironment(envId) {
+  const { data: env } = await supabase.from('environments')
+    .select('id, org_id, deleted_cascade_id').eq('id', envId).maybeSingle()
+  if (!env) throw new Error('Environment not found.')
+  const revive = { is_deleted: false, deleted_at: null, deleted_cascade_id: null }
+
+  if (env.org_id) {
+    await supabase.from('organizations').update(revive).eq('id', env.org_id).eq('is_deleted', true)
+  }
+  await supabase.from('environments').update(revive).eq('id', envId)
+  if (env.deleted_cascade_id) {
+    await supabase.from('projects').update(revive).eq('deleted_cascade_id', env.deleted_cascade_id)
+  }
+  await refreshEnvironments()
 }
 
 export async function moveProjectToEnvironment(projectId, environmentId) {
