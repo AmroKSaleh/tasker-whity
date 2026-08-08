@@ -3,6 +3,7 @@ import { supabase } from '../lib/supabase'
 import { restoreOrganization } from '../lib/organizations'
 import { restoreEnvironment } from '../lib/environments'
 import AppShell from '../components/editorial/AppShell'
+import { Kicker } from '../components/editorial/atoms'
 
 const itemKey = item => `${item.type}-${item.id}`
 
@@ -183,93 +184,78 @@ export default function RecycleBinPage() {
 
   return (
     <AppShell active="recycle-bin">
-      <div className="flex-1 min-h-0 flex flex-col p-8 overflow-y-auto">
-        <div className="max-w-4xl w-full mx-auto">
-          <h1 className="text-3xl font-light text-slate-100 tracking-tight mb-2">Recycle Bin</h1>
-          <p className="text-slate-400 mb-8 font-light">Items here will be permanently deleted after 7 days.</p>
+      <div className="max-w-4xl mx-auto px-7 pt-8 pb-16">
+        <header className="mb-7">
+          <Kicker count={deletedItems.length} className="mb-2">RECYCLE BIN</Kicker>
+          <h1 className="text-h1 m-0">Recycle Bin.</h1>
+          <p className="text-[13px] text-mute mt-2">Anything here is permanently deleted after 7 days. Restoring a container brings its contents back with it.</p>
+        </header>
 
-          {loading ? (
-            <div className="text-slate-400 font-light">Loading deleted items...</div>
-          ) : deletedItems.length === 0 ? (
-            <div className="text-slate-400 font-light">The recycle bin is empty.</div>
-          ) : (
-            <div className="space-y-2">
-              <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-slate-800/20 border border-slate-700/40">
-                <label className="flex items-center gap-2.5 cursor-pointer select-none">
-                  <input
-                    type="checkbox"
-                    checked={allSelected}
-                    ref={el => { if (el) el.indeterminate = selected.size > 0 && !allSelected }}
-                    onChange={toggleAll}
-                    className="w-4 h-4 accent-blue-500 cursor-pointer"
-                  />
-                  <span className="text-sm text-slate-300 font-light">
-                    {selected.size > 0 ? `${selected.size} selected` : `Select all (${deletedItems.length})`}
-                  </span>
-                </label>
+        {loading ? (
+          <p className="text-[13px] text-mute">Loading deleted items…</p>
+        ) : deletedItems.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24 text-center">
+            <p className="text-[32px] mb-3 opacity-30">🗑</p>
+            <p className="text-[15px] font-semibold text-ink mb-1">The recycle bin is empty</p>
+            <p className="text-[13px] text-mute">Deleted items land here and stay recoverable for 7 days.</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-surf-2 border border-line-2">
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  ref={el => { if (el) el.indeterminate = selected.size > 0 && !allSelected }}
+                  onChange={toggleAll}
+                  className="w-4 h-4 accent-accent cursor-pointer"
+                />
+                <span className="text-[13px] text-ink-2">
+                  {selected.size > 0 ? `${selected.size} selected` : `Select all (${deletedItems.length})`}
+                </span>
+              </label>
 
-                {selected.size > 0 && (
-                  <div className="flex items-center gap-3 shrink-0">
-                    <button
-                      onClick={restoreSelected}
-                      disabled={busy}
-                      className="text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors disabled:opacity-40"
-                    >
-                      {busy ? 'Working…' : `Restore ${selected.size}`}
-                    </button>
-                    <button
-                      onClick={hardDeleteSelected}
-                      disabled={busy}
-                      className="text-sm font-medium text-red-400 hover:text-red-300 transition-colors disabled:opacity-40"
-                    >
-                      Delete {selected.size} permanently
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {deletedItems.map((item) => (
-                <div key={itemKey(item)} className={`rounded-lg p-4 flex items-center justify-between border transition-colors ${
-                  selected.has(itemKey(item))
-                    ? 'bg-slate-800/70 border-blue-500/40'
-                    : 'bg-slate-800/40 border-slate-700/50'
-                }`}>
-                  <input
-                    type="checkbox"
-                    checked={selected.has(itemKey(item))}
-                    onChange={() => toggleOne(item)}
-                    aria-label={`Select ${item.label}`}
-                    className="w-4 h-4 mr-4 shrink-0 accent-blue-500 cursor-pointer"
-                  />
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">{item.type}</span>
-                      <span className="text-xs text-orange-400/80 bg-orange-400/10 px-2 py-0.5 rounded-full">
-                        {getDaysRemaining(item.deleted_at)} days left
-                      </span>
-                    </div>
-                    <div className="text-slate-200 truncate pr-4">{item.label}</div>
-                  </div>
-                  
-                  <div className="flex items-center gap-3 shrink-0">
-                    <button 
-                      onClick={() => restoreItem(item)}
-                      className="text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors"
-                    >
-                      Restore
-                    </button>
-                    <button 
-                      onClick={() => hardDeleteItem(item)}
-                      className="text-sm font-medium text-red-400 hover:text-red-300 transition-colors"
-                    >
-                      Delete Forever
-                    </button>
-                  </div>
+              {selected.size > 0 && (
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={restoreSelected} disabled={busy} className="btn btn-sm disabled:opacity-40">
+                    {busy ? 'Working…' : `Restore ${selected.size}`}
+                  </button>
+                  <button onClick={hardDeleteSelected} disabled={busy} className="btn-delete btn-sm disabled:opacity-40">
+                    Delete {selected.size} permanently
+                  </button>
                 </div>
-              ))}
+              )}
             </div>
-          )}
-        </div>
+
+            {deletedItems.map((item) => (
+              <div key={itemKey(item)} className={`rounded-lg p-4 flex items-center gap-4 border transition-colors ${
+                selected.has(itemKey(item)) ? 'bg-accent-soft border-accent-edge' : 'bg-paper border-line-2'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={selected.has(itemKey(item))}
+                  onChange={() => toggleOne(item)}
+                  aria-label={`Select ${item.label}`}
+                  className="w-4 h-4 shrink-0 accent-accent cursor-pointer"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="kicker">{item.type}</span>
+                    <span className="font-mono text-[9.5px] tracking-[0.1em] uppercase text-accent border border-accent-edge rounded-full px-2 py-0.5">
+                      {getDaysRemaining(item.deleted_at)} days left
+                    </span>
+                  </div>
+                  <div className="text-[13px] text-ink truncate pr-4">{item.label}</div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => restoreItem(item)} className="btn btn-sm">Restore</button>
+                  <button onClick={() => hardDeleteItem(item)} className="btn-delete btn-sm">Delete Forever</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </AppShell>
   )
