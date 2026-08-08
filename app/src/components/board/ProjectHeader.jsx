@@ -1,10 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
-import Breadcrumbs from '../layout/Breadcrumbs'
-import { useEnvironmentStore } from '../../store/useEnvironmentStore'
+import { Link } from 'react-router-dom'
 
 export default function ProjectHeader({ project, onRename, onFocus, onOpenContext, onOpenKB, onOpenIS, onExportXLSX, onExportMarkdown, onCopyTaskList, githubConnected, onSaveRepo, onSyncIssues, syncing, onAnalyzeIssues, analyzing, hasGithubTasks }) {
-  const environments = useEnvironmentStore(s => s.environments)
-  const organizations = useEnvironmentStore(s => s.organizations)
   const [showExport, setShowExport] = useState(false)
   const [copied, setCopied] = useState(false)
   const [repoInput, setRepoInput] = useState(project.github_repo || '')
@@ -18,16 +15,6 @@ export default function ProjectHeader({ project, onRename, onFocus, onOpenContex
   const pct = project.totalCount > 0
     ? Math.round((project.doneCount / project.totalCount) * 100)
     : 0
-
-  // Org › Environment › Project. Org is omitted for personal environments (org_id null), and
-  // any segment whose row has not loaded yet is dropped rather than rendered blank.
-  const env = environments.find(e => e.id === project.environment_id)
-  const org = env?.org_id ? organizations.find(o => o.id === env.org_id) : null
-  const trail = [
-    org ? { label: org.name, to: '/organizations' } : null,
-    env ? { label: env.name, to: '/environments' } : { label: 'Projects', to: '/projects' },
-    { label: project.name },
-  ].filter(Boolean)
 
   function normalizeRepo(input) {
     const trimmed = input.trim().replace(/\/+$/, '')
@@ -45,9 +32,15 @@ export default function ProjectHeader({ project, onRename, onFocus, onOpenContex
 
   return (
     <header className="flex flex-col gap-2 border-b border-line-2 bg-paper px-6 py-3.5 shrink-0">
-      {/* Trail up the hierarchy. The old link here said "Home" but routed to /home (Today),
-          which is not a project board's parent — /projects is. */}
-      <Breadcrumbs items={trail} />
+      {/* Back nav */}
+      <div>
+        <Link
+          to="/home"
+          className="font-mono text-[10px] tracking-widest uppercase text-mute-2 hover:text-mute transition-colors"
+        >
+          ← Home
+        </Link>
+      </div>
 
       {/* Title + progress */}
       <div>

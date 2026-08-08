@@ -20,6 +20,8 @@ import { useProjectUpdates } from '../../hooks/useProjectUpdates'
 import { useGoogleCalendar } from '../../hooks/useGoogleCalendar'
 import { useGitHub } from '../../hooks/useGitHub'
 import AppShell from '../editorial/AppShell'
+import Breadcrumbs from '../layout/Breadcrumbs'
+import { useEnvironments } from '../../hooks/useEnvironments'
 import { Kicker, Pill } from '../editorial/atoms'
 import AddTaskInline from './AddTaskInline'
 import TaskDetailSheet from './TaskDetailSheet'
@@ -768,6 +770,23 @@ export default function ProjectBoard({ project }) {
 
   // Masthead dateline + one-sentence lede: the whole project in one breath.
   const dateline = new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
+
+  // TDE-158: the masthead trail used to be two static Kickers, so there was no way to click
+  // back up. Now Organization › Environment › PREFIX, with every ancestor a real link.
+  // ProjectBoard has to LOAD environments itself — reading the store alone left the trail
+  // dependent on having visited /projects or /home first, so a direct link to a board showed
+  // a bare prefix. The org segment appears only for org-owned environments (org_id set);
+  // a personal environment correctly has none.
+  const { environments, organizations } = useEnvironments()
+  const breadcrumbTrail = useMemo(() => {
+    const env = environments.find(e => e.id === project.environment_id)
+    const org = env?.org_id ? organizations.find(o => o.id === env.org_id) : null
+    return [
+      org ? { label: org.name, to: '/organizations' } : null,
+      env ? { label: env.name, to: '/environments' } : { label: 'Projects', to: '/projects' },
+      { label: project.prefix || project.name },
+    ].filter(Boolean)
+  }, [environments, organizations, project.environment_id, project.prefix, project.name])
   const shippedWeek = useMemo(() =>
     boardTasks.filter(t => t.status === 'done' && t.completed_at && (Date.now() - new Date(t.completed_at).getTime()) < 7 * 86400000).length,
     [boardTasks])
@@ -861,9 +880,7 @@ export default function ProjectBoard({ project }) {
               <MastheadSky tasks={boardTasks} />
               <div className="relative z-[2] px-7 pt-5">
                 <div className="flex items-center gap-2">
-                  <Kicker>PROJECTS</Kicker>
-                  <span className="text-mute-2">›</span>
-                  <Kicker className="text-ink">{project.prefix}</Kicker>
+                  <Breadcrumbs items={breadcrumbTrail} />
                   <span className="font-mono text-[9.5px] tracking-[0.12em] text-mute-2 uppercase ml-1.5">· {dateline}</span>
                   {project.local_mode && (
                     <span
