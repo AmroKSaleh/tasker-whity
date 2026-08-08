@@ -66,7 +66,7 @@ export default function ReorgColumn({ env, projects, owners, onRename, onRecolor
             onBlur={() => { const t = name.trim(); if (t && t !== env.name) onRename(env.id, t); else setName(env.name) }}
             className="flex-1 min-w-0 text-[13px] font-semibold text-ink bg-transparent border-b border-transparent focus:border-line outline-none"
           />
-          <button onClick={() => onDelete(env)} className="btn-delete shrink-0" title="Delete environment (must be empty)"><Trash2 size={12} /></button>
+          <button onClick={() => onDelete(env)} className="btn-delete shrink-0" title={projects.length ? `Delete environment and its ${projects.length} project${projects.length === 1 ? '' : 's'}` : 'Delete environment'}><Trash2 size={12} /></button>
         </div>
         <select
           value={env.org_id ?? ''}

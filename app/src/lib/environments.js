@@ -77,6 +77,38 @@ export async function deleteEmptyEnvironment(envId) {
   await refreshEnvironments()
 }
 
+// What a cascade delete would take with it. Used to state the blast radius BEFORE destroying
+// anything, so the confirmation names real numbers instead of "and its contents".
+export async function environmentContents(envId) {
+  const { data } = await supabase.from('projects')
+    .select('id, name').eq('environment_id', envId).is('is_deleted', false)
+  return data ?? []
+}
+
+// Delete an environment AND its projects. The projects are SOFT-deleted, so they sit in the
+// Recycle Bin and stay restorable for 7 days; the environment itself is hard-deleted, having no
+// is_deleted column. A restored project reappears under Unassigned, because deleting its
+// environment nulls projects.environment_id (ON DELETE SET NULL) — visible, not orphaned.
+export async function deleteEnvironmentWithContents(envId) {
+  const projects = await environmentContents(envId)
+  if (projects.length) {
+    const { error } = await supabase.from('projects')
+      .update({ is_deleted: true, deleted_at: new Date().toISOString() })
+      .in('id', projects.map(p => p.id))
+    if (error) throw new Error(error.message)
+  }
+  const { error: delErr } = await supabase.from('environments').delete().eq('id', envId)
+  if (delErr) throw new Error(delErr.message)
+
+  const projStore = useProjectStore.getState()
+  projects.forEach(p => projStore.removeProject?.(p.id))
+
+  const store = useEnvironmentStore.getState()
+  if (store.activeEnvironmentId === envId) store.setActiveEnvironmentId(null)
+  await refreshEnvironments()
+  return projects.length
+}
+
 export async function moveProjectToEnvironment(projectId, environmentId) {
   useProjectStore.getState().updateProject(projectId, { environment_id: environmentId })
   await supabase.from('projects').update({ environment_id: environmentId }).eq('id', projectId)

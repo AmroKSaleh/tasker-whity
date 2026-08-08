@@ -1,8 +1,9 @@
 import { useState, useEffect } from 'react'
 import { useEnvironments } from '../hooks/useEnvironments'
 import { useProjects } from '../hooks/useProjects'
-import { createOrganization, renameOrganization, deleteOrganization, orgLabel } from '../lib/organizations'
-import { createEnvironment, updateEnvironment, deleteEmptyEnvironment } from '../lib/environments'
+import { createOrganization, renameOrganization, deleteOrganization, deleteOrganizationWithContents, organizationContents, orgLabel } from '../lib/organizations'
+import { createEnvironment, updateEnvironment, deleteEmptyEnvironment, deleteEnvironmentWithContents, environmentContents } from '../lib/environments'
+import { confirmDestructive } from '../lib/confirmDestructive'
 import { supabase } from '../lib/supabase'
 import AppShell from '../components/editorial/AppShell'
 import { Kicker } from '../components/editorial/atoms'
@@ -27,14 +28,45 @@ export default function OrganizationsPage() {
     setNewOrg('')
   }
 
+  // Empty environments delete outright. A non-empty one offers the cascade rather than just
+  // refusing — the refusal is still the default, the cascade is the deliberate second step.
   async function handleDeleteEnv(env) {
-    try { await deleteEmptyEnvironment(env.id) } catch (err) { window.alert(err.message) }
+    try {
+      await deleteEmptyEnvironment(env.id)
+    } catch {
+      const projects = await environmentContents(env.id)
+      const ok = confirmDestructive({
+        name: env.name,
+        restorable: true,
+        lines: [`This environment holds ${projects.length} project${projects.length === 1 ? '' : 's'}:`,
+          ...projects.map(p => `  • ${p.name}`)],
+      })
+      if (!ok) return
+      try { await deleteEnvironmentWithContents(env.id) } catch (err) { window.alert(err.message) }
+    }
   }
 
   async function handleDeleteOrg(org) {
     const label = orgLabel(org)
-    if (!window.confirm(`Delete the organization "${label}"? Its members and invitations go with it. This cannot be undone.`)) return
-    try { await deleteOrganization(org.id) } catch (err) { window.alert(err.message) }
+    try {
+      if (!window.confirm(`Delete the organization "${label}"? Its members and invitations go with it. This cannot be undone.`)) return
+      await deleteOrganization(org.id)
+    } catch {
+      const { envs, projects } = await organizationContents(org.id)
+      const ok = confirmDestructive({
+        name: label,
+        restorable: projects.length > 0,
+        lines: [
+          `${envs.length} environment${envs.length === 1 ? '' : 's'}: ${envs.map(e => e.name).join(', ')}`,
+          `${projects.length} project${projects.length === 1 ? '' : 's'}${projects.length ? ':' : ''}`,
+          ...projects.map(p => `  • ${p.name}`),
+          '',
+          'Members and invitations are deleted with the organization.',
+        ],
+      })
+      if (!ok) return
+      try { await deleteOrganizationWithContents(org.id) } catch (err) { window.alert(err.message) }
+    }
   }
 
   return (
