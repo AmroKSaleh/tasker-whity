@@ -1,6 +1,7 @@
 import { DndContext, PointerSensor, useSensor, useSensors, pointerWithin } from '@dnd-kit/core'
 import { ENV_COLORS, envColor } from '../../lib/envColor'
-import { moveProjectToEnvironment, updateEnvironment, deleteEmptyEnvironment, moveEnvironmentToOrg, createEnvironment } from '../../lib/environments'
+import { moveProjectToEnvironment, updateEnvironment, deleteEmptyEnvironment, deleteEnvironmentWithContents, environmentContents, moveEnvironmentToOrg, createEnvironment } from '../../lib/environments'
+import { confirmDestructive } from '../../lib/confirmDestructive'
 import { orgLabel, NO_ORG_LABEL } from '../../lib/organizations'
 import ReorgColumn, { ProjectCard } from './ReorgColumn'
 import { Kicker } from '../editorial/atoms'
@@ -39,7 +40,23 @@ export default function ReorgBoard({ ownerId, environments, organizations, proje
   const onRename = (id, name) => updateEnvironment(id, { name })
   const onRecolor = (id, color) => updateEnvironment(id, { color })
   const onMoveOwner = (id, orgId) => moveEnvironmentToOrg(id, orgId)
-  const onDelete = async (env) => { try { await deleteEmptyEnvironment(env.id) } catch (e) { window.alert(e.message) } }
+  // Empty environments delete outright; a non-empty one offers the cascade instead of only
+  // refusing. The refusal stays the default path — the cascade takes a typed confirmation.
+  const onDelete = async (env) => {
+    try {
+      await deleteEmptyEnvironment(env.id)
+    } catch {
+      const contents = await environmentContents(env.id)
+      const ok = confirmDestructive({
+        name: env.name,
+        restorable: true,
+        lines: [`This environment holds ${contents.length} project${contents.length === 1 ? '' : 's'}:`,
+          ...contents.map(p => `  • ${p.name}`)],
+      })
+      if (!ok) return
+      try { await deleteEnvironmentWithContents(env.id) } catch (e) { window.alert(e.message) }
+    }
+  }
 
   const unassignedCol = ownerId === null && unassigned.length > 0 ? (
     <div className="shrink-0 w-56 flex flex-col rounded-xl border border-dashed border-line bg-paper/50">

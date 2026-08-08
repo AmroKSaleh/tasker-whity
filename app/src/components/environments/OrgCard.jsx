@@ -36,7 +36,7 @@ export default function OrgCard({ org, envs, projectCounts, isOwner, currentUid,
           {isOwner && (
             <button
               onClick={() => onDeleteOrg(org)}
-              title={envs.length ? 'Move its environments out before deleting' : `Delete ${orgLabel(org)}`}
+              title={envs.length ? `Delete ${orgLabel(org)} and its ${envs.length} environment${envs.length === 1 ? '' : 's'}` : `Delete ${orgLabel(org)}`}
               className="btn btn-sm text-mute hover:text-ink"
             >
               <Trash2 size={12} />
