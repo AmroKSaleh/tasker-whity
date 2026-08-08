@@ -1,11 +1,12 @@
 import { useState, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { envColor } from '../../lib/envColor'
+import { orgLabel, NO_ORG_LABEL } from '../../lib/organizations'
 
 // Dropdown to switch the active Environment. Exclusive switching: picking one filters the
 // project grid to that Environment. Environments are grouped Personal + per-organization (org
 // envs arrive via RLS once you can access them). Hidden until at least one Environment exists.
-export default function EnvironmentSwitcher({ environments, organizations = [], activeEnvironmentId, onSelect }) {
+export default function EnvironmentSwitcher({ environments, organizations = [], projects = [], activeEnvironmentId, onSelect }) {
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
   const navigate = useNavigate()
@@ -20,9 +21,16 @@ export default function EnvironmentSwitcher({ environments, organizations = [], 
   const active = environments.find(e => e.id === activeEnvironmentId) ?? environments[0]
 
   const personal = environments.filter(e => !e.org_id)
+  // An org earns a place in this list by holding actual work. Filtering on environments alone
+  // left orgs full of empty environments cluttering the switcher. The active environment is
+  // always kept, so switching INTO an org and then emptying it cannot hide where you are.
+  const projectsPerEnv = projects.reduce((acc, p) => {
+    if (p.environment_id) acc[p.environment_id] = (acc[p.environment_id] || 0) + 1
+    return acc
+  }, {})
   const orgGroups = organizations
     .map(o => ({ org: o, envs: environments.filter(e => e.org_id === o.id) }))
-    .filter(g => g.envs.length)
+    .filter(g => g.envs.some(e => (projectsPerEnv[e.id] ?? 0) > 0 || e.id === activeEnvironmentId))
   const grouped = orgGroups.length > 0
 
   const envButton = (e) => (
@@ -54,11 +62,11 @@ export default function EnvironmentSwitcher({ environments, organizations = [], 
       </button>
       {open && (
         <div className="absolute right-0 mt-1 min-w-[200px] max-h-[70vh] overflow-y-auto bg-paper border border-line rounded-lg shadow-card z-50 py-1">
-          {grouped && personal.length > 0 && groupHead('Personal')}
+          {grouped && personal.length > 0 && groupHead(NO_ORG_LABEL)}
           {personal.map(envButton)}
           {orgGroups.map(({ org, envs }) => (
             <div key={org.id}>
-              {groupHead(org.name)}
+              {groupHead(orgLabel(org))}
               {envs.map(envButton)}
             </div>
           ))}
