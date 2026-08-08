@@ -24,7 +24,7 @@ export default function EnvironmentsPage() {
           <Kicker count={environments.length} className="mb-2">ORGANIZE</Kicker>
           <h1 className="text-h1 m-0">Environments.</h1>
           <p className="text-[13px] text-mute mt-2 max-w-2xl">
-            Drag a project card between environments to move it. Use an environment's owner dropdown to move the whole environment between N/A (no organization) and your organizations — its access grants reset on move. Create organizations on the{' '}
+            Drag a project card between environments to move it. Use an environment's owner dropdown to move the whole environment between “{NO_ORG_LABEL}” and your organizations — its access grants reset on move. Create organizations on the{' '}
             <Link to="/organizations" className="underline hover:text-ink">Organizations</Link> page.
           </p>
         </header>

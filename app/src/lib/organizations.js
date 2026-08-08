@@ -13,7 +13,7 @@ export function orgLabel(org) {
 // The label for environments with org_id = null. This is NOT an organization — no such row
 // exists — it is the absence of one. It used to read "Personal", which was indistinguishable
 // from a real org and collided outright once a user named an actual org "Personal".
-export const NO_ORG_LABEL = 'N/A'
+export const NO_ORG_LABEL = 'No organization'
 
 async function refreshOrganizations() {
   const { data } = await supabase.from('organizations').select('id, name, owner_user_id').order('created_at')
@@ -46,7 +46,7 @@ export async function deleteOrganization(id) {
     const names = envs.map(e => e.name).join(', ')
     throw new Error(
       `This organization still owns ${envs.length} environment${envs.length === 1 ? '' : 's'} (${names}). ` +
-      `Move them to N/A or another organization on the Environments page first — deleting would orphan their projects.`
+      `Move them to "${NO_ORG_LABEL}" or another organization on the Environments page first — deleting would orphan their projects.`
     )
   }
   const { error } = await supabase.from('organizations').delete().eq('id', id)
