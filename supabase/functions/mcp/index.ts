@@ -4318,20 +4318,51 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order'),
         sb.from('tasks').select('section_id, status, flow_id').eq('project_id', project.id).is('is_deleted', false),
       ])
-      if (!data?.length) return `No sections in "${project.name}".`
       // Per-section task tallies (default behaviour): open = not done, matching the app's hide-done convention.
       // TDE-320: flow steps are not tasks — they leave the section tally (matches list_tasks + the board).
+      // A task that reaches neither bucket used to be dropped in silence, which is why this
+      // tool's sum could sit below list_phases / get_project on the SAME query. Two ways to
+      // fall out: no section_id at all, or a section_id this project's section query does not
+      // return (RLS-hidden or stale row — the phantom rows that block section deletion). Both
+      // are now counted and reported, so the tallies reconcile and the residue is nameable.
+      const known = new Set(((data ?? []) as any[]).map((s) => s.id))
       const counts: Record<string, { open: number; total: number }> = {}
+      const unsectioned = { open: 0, total: 0 }
+      const unreachable = { open: 0, total: 0 }
+      const unreachableIds = new Set<string>()
       for (const t of ((tasks ?? []) as any[])) {
-        if (!t.section_id || t.flow_id) continue
-        const c = counts[t.section_id] ?? (counts[t.section_id] = { open: 0, total: 0 })
-        c.total++
-        if (t.status !== 'done') c.open++
+        if (t.flow_id) continue
+        let bucket: { open: number; total: number }
+        if (!t.section_id) {
+          bucket = unsectioned
+        } else if (!known.has(t.section_id)) {
+          bucket = unreachable
+          unreachableIds.add(t.section_id)
+        } else {
+          bucket = counts[t.section_id] ?? (counts[t.section_id] = { open: 0, total: 0 })
+        }
+        bucket.total++
+        if (t.status !== 'done') bucket.open++
       }
-      return data.map((s: any) => {
+      const residue: string[] = []
+      if (unsectioned.total) residue.push(
+        `[no section] — ${unsectioned.open} open / ${unsectioned.total} total`
+        + `\n    These tasks belong to no section row. They are real and counted by list_phases / get_project, but they appear in no section column.`
+      )
+      if (unreachable.total) residue.push(
+        `[unreachable section] — ${unreachable.open} open / ${unreachable.total} total`
+        + `\n    ⚠ section_id points at ${unreachableIds.size} row${unreachableIds.size !== 1 ? 's' : ''} this project does not return: ${[...unreachableIds].join(', ')}`
+        + `\n    Move these tasks to a live section (move_task) — an unreachable section also blocks delete_section.`
+      )
+      if (!data?.length) {
+        return `No sections in "${project.name}".`
+          + (residue.length ? `\n\n${residue.join('\n')}` : '')
+      }
+      const lines = (data as any[]).map((s: any) => {
         const c = counts[s.id] ?? { open: 0, total: 0 }
         return `[id: ${s.id}] ${s.name} — ${c.open} open / ${c.total} total`
-      }).join('\n')
+      })
+      return [...lines, ...residue].join('\n')
     }
 
     case 'create_section': {
