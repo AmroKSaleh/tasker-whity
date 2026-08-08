@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useEnvironments } from '../hooks/useEnvironments'
 import { useProjects } from '../hooks/useProjects'
-import { createOrganization, renameOrganization } from '../lib/organizations'
+import { createOrganization, renameOrganization, deleteOrganization, orgLabel } from '../lib/organizations'
 import { createEnvironment, updateEnvironment, deleteEmptyEnvironment } from '../lib/environments'
 import { supabase } from '../lib/supabase'
 import AppShell from '../components/editorial/AppShell'
@@ -29,6 +29,12 @@ export default function OrganizationsPage() {
 
   async function handleDeleteEnv(env) {
     try { await deleteEmptyEnvironment(env.id) } catch (err) { window.alert(err.message) }
+  }
+
+  async function handleDeleteOrg(org) {
+    const label = orgLabel(org)
+    if (!window.confirm(`Delete the organization "${label}"? Its members and invitations go with it. This cannot be undone.`)) return
+    try { await deleteOrganization(org.id) } catch (err) { window.alert(err.message) }
   }
 
   return (
@@ -71,6 +77,7 @@ export default function OrganizationsPage() {
             onRenameEnv={(id, name) => updateEnvironment(id, { name })}
             onRecolorEnv={(id, color) => updateEnvironment(id, { color })}
             onDeleteEnv={handleDeleteEnv}
+            onDeleteOrg={handleDeleteOrg}
           />
         ))}
       </div>

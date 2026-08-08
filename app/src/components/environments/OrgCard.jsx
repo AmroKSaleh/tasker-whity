@@ -1,12 +1,14 @@
 import { useState } from 'react'
+import { Trash2 } from 'lucide-react'
 import { ENV_COLORS } from '../../lib/envColor'
+import { orgLabel } from '../../lib/organizations'
 import OrgEnvRow from './OrgEnvRow'
 import OrgMembers from './OrgMembers'
 
 // One organization's card: rename the org, manage its environments (create/rename/recolor/
 // delete-empty), and manage members + email invitations (TDE-361).
-export default function OrgCard({ org, envs, projectCounts, isOwner, currentUid, onRenameOrg, onCreateEnv, onRenameEnv, onRecolorEnv, onDeleteEnv }) {
-  const [orgName, setOrgName] = useState(org.name)
+export default function OrgCard({ org, envs, projectCounts, isOwner, currentUid, onRenameOrg, onCreateEnv, onRenameEnv, onRecolorEnv, onDeleteEnv, onDeleteOrg }) {
+  const [orgName, setOrgName] = useState(org.name ?? '')
   const [envName, setEnvName] = useState('')
   const [envColorSel, setEnvColorSel] = useState(ENV_COLORS[0])
 
@@ -24,11 +26,23 @@ export default function OrgCard({ org, envs, projectCounts, isOwner, currentUid,
         <input
           value={orgName}
           onChange={e => setOrgName(e.target.value)}
-          onBlur={() => { const t = orgName.trim(); if (t && t !== org.name) onRenameOrg(org.id, t); else setOrgName(org.name) }}
+          onBlur={() => { const t = orgName.trim(); if (t && t !== org.name) onRenameOrg(org.id, t); else setOrgName(org.name ?? '') }}
           disabled={!isOwner}
-          className="text-[16px] font-semibold text-ink bg-transparent border-b border-transparent focus:border-line outline-none disabled:opacity-100"
+          placeholder={orgLabel(org)}
+          className="text-[16px] font-semibold text-ink bg-transparent border-b border-transparent focus:border-line outline-none disabled:opacity-100 placeholder:text-mute-2 placeholder:italic"
         />
-        <span className="font-mono text-[9px] uppercase tracking-widest text-mute-2">{isOwner ? 'Owner' : 'Member'}</span>
+        <div className="flex items-center gap-2.5 shrink-0">
+          <span className="font-mono text-[9px] uppercase tracking-widest text-mute-2">{isOwner ? 'Owner' : 'Member'}</span>
+          {isOwner && (
+            <button
+              onClick={() => onDeleteOrg(org)}
+              title={envs.length ? 'Move its environments out before deleting' : `Delete ${orgLabel(org)}`}
+              className="btn btn-sm text-mute hover:text-ink"
+            >
+              <Trash2 size={12} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="font-mono text-[9px] font-bold tracking-widest text-mute-2 uppercase mb-1.5">Environments</div>

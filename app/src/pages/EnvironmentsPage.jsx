@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import { useEnvironments } from '../hooks/useEnvironments'
 import { useProjects } from '../hooks/useProjects'
+import { orgLabel } from '../lib/organizations'
 import AppShell from '../components/editorial/AppShell'
 import { Kicker, Pill } from '../components/editorial/atoms'
 import ReorgBoard from '../components/environments/ReorgBoard'
@@ -11,7 +12,7 @@ export default function EnvironmentsPage() {
   const { projects } = useProjects()
   const [ownerId, setOwnerId] = useState(null) // null = Personal
 
-  const owners = [{ id: null, name: 'Personal' }, ...organizations.map(o => ({ id: o.id, name: o.name }))]
+  const owners = [{ id: null, name: 'Personal' }, ...organizations.map(o => ({ id: o.id, name: orgLabel(o) }))]
   // If the active org tab was deleted (or an org's own list changes), fall back to Personal
   // rather than showing a stale, now-nonexistent tab as selected.
   const activeOwner = owners.some(o => o.id === ownerId) ? ownerId : null

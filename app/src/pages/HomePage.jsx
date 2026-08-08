@@ -60,6 +60,7 @@ export default function HomePage() {
               <EnvironmentSwitcher
                 environments={environments}
                 organizations={organizations}
+                projects={projects}
                 activeEnvironmentId={activeEnvironmentId}
                 onSelect={setActiveEnvironment}
               />
