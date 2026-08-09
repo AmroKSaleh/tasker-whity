@@ -7,12 +7,17 @@ namespace Tasker\Tests;
 use PDO;
 use PHPUnit\Framework\TestCase;
 use Tasker\Api\BoardApiHandler;
+use Tasker\Api\GroupsApiHandler;
+use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\ProjectsApiHandler;
+use Tasker\Api\SectionsApiHandler;
+use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
+use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
 
 /**
@@ -47,12 +52,22 @@ final class TenantIsolationOuTest extends TestCase
 
     protected function setUp(): void
     {
+        // REGRESSION FIX (whole-branch review finding C2): this defaulted to
+        // `dbname=tasker` — the live, SHARED host database — so running this
+        // suite locally while `npm run host:up` is up would DESTROY Tasker's
+        // real data (every test DROPs/DELETEs its fixture tables). The
+        // default now points at a disposable `tasker_test` database instead.
+        // The TASKER_TEST_PG_DSN/_USER/_PASS env var override mechanism is
+        // unchanged — CI sets these explicitly to point at its own Postgres
+        // service (see .github/workflows/ci.yml); a local run against the
+        // real `tasker` db remains possible by setting TASKER_TEST_PG_DSN
+        // explicitly, it is simply no longer the silent default.
         $dsn = getenv('TASKER_TEST_PG_DSN');
         $user = getenv('TASKER_TEST_PG_USER') ?: 'tasker';
         $pass = getenv('TASKER_TEST_PG_PASS') ?: 'tasker_dev';
         $candidates = $dsn !== false
             ? [$dsn]
-            : ['pgsql:host=host.docker.internal;port=5433;dbname=tasker', 'pgsql:host=localhost;port=5433;dbname=tasker'];
+            : ['pgsql:host=host.docker.internal;port=5433;dbname=tasker_test', 'pgsql:host=localhost;port=5433;dbname=tasker_test'];
 
         $connected = false;
         foreach ($candidates as $candidate) {
@@ -71,17 +86,37 @@ final class TenantIsolationOuTest extends TestCase
 
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_sections CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_projects CASCADE');
-        // This suite runs against the host's own live database (see the
-        // class doc), which ALREADY has a real organizational_units table —
-        // richer than the 3-column shape this CREATE TABLE IF NOT EXISTS
-        // assumed: real name/slug (both NOT NULL) plus a tenant_id FK to a
-        // real `tenants` row. The IF NOT EXISTS below is a no-op there; it
-        // only matters for a genuinely fresh database with neither table.
+        // REGRESSION FIX (whole-branch review finding C2): this suite used to
+        // assume it was always running against the host's own live,
+        // already-migrated database, so `tenants`/`organizational_units`
+        // already existed with the host's real (richer) shape. That
+        // assumption breaks CI's whole point here: a genuinely fresh
+        // `postgres:15` service container has NEITHER table, and no host
+        // migrations are run against it (CI only needs Postgres + pdo_pgsql,
+        // nothing else). Both tables are now created here, matching the
+        // real host schema closely enough (NOT NULL name/slug, the same
+        // uniqueness constraints) that this is a genuine no-op against the
+        // shared dev database (where both already exist in this exact
+        // shape) AND makes this suite fully self-sufficient against a bare
+        // Postgres server with no pre-existing schema at all.
+        $this->pdo->exec('
+            CREATE TABLE IF NOT EXISTS tenants (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(255) NOT NULL UNIQUE,
+                slug VARCHAR(255) UNIQUE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ');
         $this->pdo->exec('
             CREATE TABLE IF NOT EXISTS organizational_units (
                 id SERIAL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
-                parent_id INTEGER NULL REFERENCES organizational_units(id)
+                tenant_id INTEGER NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+                parent_id INTEGER NULL REFERENCES organizational_units(id),
+                name VARCHAR(255) NOT NULL,
+                slug VARCHAR(255) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT tasker_test_ou_tenant_name_unique UNIQUE (tenant_id, name),
+                CONSTRAINT tasker_test_ou_tenant_slug_unique UNIQUE (tenant_id, slug)
             )
         ');
         $this->pdo->exec('DELETE FROM organizational_units WHERE tenant_id IN (7, 9)');
@@ -91,18 +126,21 @@ final class TenantIsolationOuTest extends TestCase
 
         (new CreateTaskerProjectsTable())->up($this->pdo);
         (new CreateTaskerSectionsTable())->up($this->pdo);
-        // Drop order matters: tasker_milestones FK-references tasker_tasks,
-        // so it must be dropped before tasker_tasks — otherwise `DROP TABLE
-        // tasker_tasks CASCADE` only cascade-drops the FK CONSTRAINT on
-        // tasker_milestones (Postgres semantics for a referenced table being
-        // dropped), leaving the table itself, and any stale rows from a
-        // PRIOR test run, in place for the next test.
+        // Drop order matters: tasker_milestones and tasker_task_discussions
+        // both FK-reference tasker_tasks, so both must be dropped before
+        // tasker_tasks — otherwise `DROP TABLE tasker_tasks CASCADE` only
+        // cascade-drops the FK CONSTRAINT on the referencing table (Postgres
+        // semantics for a referenced table being dropped), leaving the table
+        // itself, and any stale rows from a PRIOR test run, in place for the
+        // next test.
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_milestones CASCADE');
+        $this->pdo->exec('DROP TABLE IF EXISTS tasker_task_discussions CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_tasks CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_groups CASCADE');
         (new CreateTaskerGroupsTable())->up($this->pdo);
         (new CreateTaskerTasksTable())->up($this->pdo);
         (new CreateTaskerMilestonesTable())->up($this->pdo);
+        (new CreateTaskerTaskDiscussionsTable())->up($this->pdo);
     }
 
     /**
@@ -633,5 +671,616 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->get(7, 2, $siblingProjectId);
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== SectionsApiHandler (whole-branch review finding C1) ====================
+    //
+    // list()/create() moved here from the old (now removed) SQLite-backed
+    // cases in SectionsApiHandlerTest.php: both now call
+    // OuScopeResolver::whereFragment() unconditionally, which SQLite's
+    // PDO::prepare() rejects outright. Plus new OU-boundary regression tests.
+
+    public function testSectionsCreateAddsASecondSectionToTheProject(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $this->makeSectionDirect(7, $projectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->create(7, null, $projectId, json_encode(['name' => 'In Progress']));
+
+        self::assertSame(201, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('In Progress', $payload['data']['name']);
+        self::assertSame('in-progress', $payload['data']['slug']);
+    }
+
+    public function testSectionsCreateRejects404ForAProjectOutsideTheCallersTenant(): void
+    {
+        $otherTenantProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->create(7, null, $otherTenantProjectId, json_encode(['name' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testSectionsListReturnsSectionsForTheGivenProjectAndTenant(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $this->makeSectionDirect(7, $projectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $payload = json_decode($handler->list(7, null, $projectId)->getBody(), true);
+
+        self::assertCount(1, $payload['data']);
+        self::assertSame('Backlog', $payload['data'][0]['name']);
+    }
+
+    /**
+     * Regression test proving the C1 fix: {projectId} is a path parameter,
+     * not a discovered value -- an OU-restricted caller must not be able to
+     * list a sibling OU's project's sections by simply iterating project ids.
+     */
+    public function testSectionsListRejects404ForAProjectInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $this->makeSectionDirect(7, $siblingProjectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        // Caller scoped to OU 2; the project lives in sibling OU 3.
+        $response = $handler->list(7, 2, $siblingProjectId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * Same as above, for create_section: an OU-restricted caller must not be
+     * able to CREATE a section under a sibling OU's project either.
+     */
+    public function testSectionsCreateRejects404ForAProjectInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->create(7, 2, $siblingProjectId, json_encode(['name' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== GroupsApiHandler (whole-branch review finding C1) ====================
+
+    public function testGroupsCreateStampsTheCallersTenantAndTheGivenSection(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Group project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, json_encode(['name' => 'Backend']));
+
+        self::assertSame(201, $response->getStatusCode());
+        $row = $this->pdo->query(
+            "SELECT tenant_id, section_id, name, slug FROM tasker_groups WHERE section_id = {$sectionId}"
+        )->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(7, (int) $row['tenant_id']);
+        self::assertSame($sectionId, (int) $row['section_id']);
+        self::assertSame('Backend', $row['name']);
+        self::assertSame('backend', $row['slug']);
+    }
+
+    public function testGroupsCreateRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->create(7, null, $otherSectionId, json_encode(['name' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testGroupsListReturnsOnlyGroupsForTheGivenSectionAndTenant(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Group project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $this->makeGroupDirect(7, $sectionId, 'A');
+
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $this->makeGroupDirect(9, $otherSectionId, 'B');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $payload = json_decode($handler->list(7, null, $sectionId)->getBody(), true);
+
+        self::assertCount(1, $payload['data']);
+        self::assertSame('A', $payload['data'][0]['name']);
+    }
+
+    public function testGroupsListRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->list(7, null, $otherSectionId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testGroupsListRejects404ForANonexistentSection(): void
+    {
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->list(7, null, 999999);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * Regression test proving the C1 fix: {sectionId} is a path parameter --
+     * an OU-restricted caller must not be able to list a sibling OU's
+     * section's groups by iterating section ids.
+     */
+    public function testGroupsListRejects404ForASectionInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->list(7, 2, $siblingSectionId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testGroupsCreateRejects404ForASectionInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->create(7, 2, $siblingSectionId, json_encode(['name' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== TasksApiHandler::create() (whole-branch review finding C1) ====================
+
+    public function testTasksCreateStampsTenantAndDefaultsStatusToPending(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, 3, json_encode(['text' => 'Ship it']));
+
+        self::assertSame(201, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('pending', $payload['data']['status']);
+        self::assertSame('Ship it', $payload['data']['text']);
+        self::assertNull($payload['data']['priority']);
+    }
+
+    public function testTasksCreateRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $otherSectionId, 3, json_encode(['text' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testTasksCreateAcceptsAValidPriority(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, 3, json_encode(['text' => 'Urgent', 'priority' => 'rush']));
+
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('rush', $payload['data']['priority']);
+    }
+
+    public function testTasksCreateRejectsAnInvalidPriority(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, 3, json_encode(['text' => 'Bad', 'priority' => 'urgent-ish']));
+
+        self::assertSame(400, $response->getStatusCode());
+    }
+
+    /**
+     * Regression test proving the C1 fix: {sectionId} is a path parameter --
+     * an OU-restricted caller must not be able to create a task under a
+     * sibling OU's section by iterating section ids.
+     */
+    public function testTasksCreateRejects404ForASectionInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, 2, $siblingSectionId, 3, json_encode(['text' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== MilestonesApiHandler::create() (whole-branch review finding C1) ====================
+
+    public function testMilestonesCreateDefaultsCheckedToFalse(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Milestone project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Task with milestones');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->create(7, null, $taskId, json_encode(['summary' => 'Write tests']));
+
+        self::assertSame(201, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertFalse($payload['data']['checked']);
+    }
+
+    public function testMilestonesCreateRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Other tenant task');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->create(7, null, $otherTaskId, json_encode(['summary' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * Regression test proving the C1 fix: {taskId} is a path parameter -- an
+     * OU-restricted caller must not be able to add a milestone to a sibling
+     * OU's task by iterating task ids.
+     */
+    public function testMilestonesCreateRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Sibling OU task');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->create(7, 2, $siblingTaskId, json_encode(['summary' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== TaskDiscussionsApiHandler (whole-branch review finding C1) ====================
+    //
+    // get()/put() moved here from the old (now removed) SQLite-backed
+    // TaskDiscussionsApiHandlerTest.php: both now call
+    // OuScopeResolver::whereFragment() unconditionally.
+
+    public function testDiscussionGetOnATaskWithNoDiscussionYetReturnsAnEmptyShape(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Discussion project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Discuss me');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $payload = json_decode($handler->get(7, null, $taskId)->getBody(), true);
+
+        self::assertSame([], $payload['data']['messages']);
+        self::assertNull($payload['data']['reason']);
+    }
+
+    public function testDiscussionGetRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Other tenant task');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $response = $handler->get(7, null, $otherTaskId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * Regression test proving the C1 fix: {id}=task is a path parameter --
+     * an OU-restricted caller must not be able to read a sibling OU's
+     * task's discussion by iterating task ids.
+     */
+    public function testDiscussionGetRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Sibling OU task');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $response = $handler->get(7, 2, $siblingTaskId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testDiscussionPutCreatesTheDiscussionRowOnFirstWrite(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Discussion project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Discuss me');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $body = json_encode(['messages' => [['role' => 'user', 'content' => 'hi']], 'reason' => 'testing']);
+        $response = $handler->put(7, null, $taskId, $body);
+
+        self::assertSame(200, $response->getStatusCode());
+
+        $row = $this->pdo->query(
+            "SELECT task_id, reason FROM tasker_task_discussions WHERE task_id = {$taskId}"
+        )->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($taskId, (int) $row['task_id']);
+        self::assertSame('testing', $row['reason']);
+    }
+
+    public function testDiscussionPutUpdatesAnExistingDiscussionRowRatherThanDuplicating(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Discussion project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Discuss me');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $handler->put(7, null, $taskId, json_encode(['messages' => [], 'reason' => 'first']));
+        $handler->put(7, null, $taskId, json_encode(['messages' => [], 'reason' => 'second']));
+
+        $count = (int) $this->pdo->query(
+            "SELECT COUNT(*) FROM tasker_task_discussions WHERE task_id = {$taskId}"
+        )->fetchColumn();
+        self::assertSame(1, $count);
+
+        $row = $this->pdo->query(
+            "SELECT reason FROM tasker_task_discussions WHERE task_id = {$taskId}"
+        )->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('second', $row['reason']);
+    }
+
+    public function testDiscussionPutRejectsAMalformedOrNonObjectBodyAndDoesNotOverwriteExistingData(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Discussion project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Discuss me');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $handler->put(7, null, $taskId, json_encode([
+            'messages' => [['role' => 'user', 'content' => 'keep me']],
+            'reason' => 'keep this reason',
+        ]));
+
+        $malformed = $handler->put(7, null, $taskId, 'not valid json at all');
+        self::assertSame(400, $malformed->getStatusCode());
+
+        $nonObject = $handler->put(7, null, $taskId, json_encode([1, 2, 3]));
+        self::assertSame(400, $nonObject->getStatusCode());
+
+        $row = $this->pdo->query(
+            "SELECT messages, reason FROM tasker_task_discussions WHERE task_id = {$taskId}"
+        )->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('keep this reason', $row['reason']);
+        self::assertSame([['role' => 'user', 'content' => 'keep me']], json_decode((string) $row['messages'], true));
+    }
+
+    public function testDiscussionPutRejectsANonScalarReasonAndDoesNotOverwriteExistingData(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Discussion project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Discuss me');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $handler->put(7, null, $taskId, json_encode(['messages' => [], 'reason' => 'original reason']));
+
+        $body = json_encode([
+            'messages' => [['role' => 'user', 'content' => 'should not be saved']],
+            'reason' => ['nested' => 'object'],
+        ]);
+        $response = $handler->put(7, null, $taskId, $body);
+
+        self::assertSame(400, $response->getStatusCode());
+
+        $row = $this->pdo->query(
+            "SELECT messages, reason FROM tasker_task_discussions WHERE task_id = {$taskId}"
+        )->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('original reason', $row['reason']);
+        self::assertSame([], json_decode((string) $row['messages'], true));
+    }
+
+    /**
+     * Regression test for the whole-branch review's data-loss guard finding:
+     * a structurally-valid PUT body whose `messages` field is present but
+     * the WRONG TYPE (a string, not an array) must be rejected (400) BEFORE
+     * touching the database -- not silently coerced to `[]`, which would
+     * overwrite an existing conversation's real messages.
+     */
+    public function testDiscussionPutRejectsANonArrayMessagesFieldAndDoesNotOverwriteExistingData(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Discussion project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Discuss me');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $handler->put(7, null, $taskId, json_encode([
+            'messages' => [['role' => 'user', 'content' => 'keep me']],
+            'reason' => 'keep this reason',
+        ]));
+
+        $response = $handler->put(7, null, $taskId, json_encode(['messages' => 'hello']));
+
+        self::assertSame(400, $response->getStatusCode());
+
+        $row = $this->pdo->query(
+            "SELECT messages, reason FROM tasker_task_discussions WHERE task_id = {$taskId}"
+        )->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('keep this reason', $row['reason']);
+        self::assertSame([['role' => 'user', 'content' => 'keep me']], json_decode((string) $row['messages'], true));
+    }
+
+    public function testDiscussionPutRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Sibling OU task');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $response = $handler->put(7, 2, $siblingTaskId, json_encode(['messages' => []]));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== BoardApiHandler defensive fallback (whole-branch review finding I1) ====================
+
+    /**
+     * A task whose group_id points at a group that EXISTS but belongs to a
+     * DIFFERENT project (not part of the groups BoardApiHandler::get()
+     * fetches for the requested project) must still render -- under
+     * ungroupedTasks for its own section -- rather than being silently
+     * dropped from the response entirely. This state should not be
+     * reachable through move() going forward (its own I1 fix validates
+     * group_id against the task's own project/section), but the defensive
+     * fallback protects against it regardless of how it arose.
+     */
+    public function testBoardFallsBackToUngroupedForATaskWithAGroupIdFromADifferentProject(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Project A');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Orphaned group ref');
+
+        $otherProjectId = $this->makeProjectDirect(7, null, 'Project B');
+        $otherSectionId = $this->makeSectionDirect(7, $otherProjectId);
+        $otherGroupId = $this->makeGroupDirect(7, $otherSectionId, 'Foreign group');
+
+        $this->pdo->exec("UPDATE tasker_tasks SET group_id = {$otherGroupId} WHERE id = {$taskId}");
+
+        $handler = new BoardApiHandler($this->pdo);
+        $payload = json_decode($handler->get(7, null, $projectId)->getBody(), true);
+
+        self::assertCount(
+            1,
+            $payload['data']['sections'][0]['ungroupedTasks'],
+            'a group_id from a different project must not silently drop the task from the response'
+        );
+        self::assertSame('Orphaned group ref', $payload['data']['sections'][0]['ungroupedTasks'][0]['text']);
+    }
+
+    // ==================== Duplicate-name -> 409, not 500 (whole-branch review finding I2) ====================
+
+    public function testProjectsCreateRejects409ForADuplicateNameInTheSameTenant(): void
+    {
+        $handler = new ProjectsApiHandler($this->pdo);
+        $first = $handler->create(7, null, 1, json_encode(['name' => 'Duplicate Project']));
+        self::assertSame(201, $first->getStatusCode());
+
+        $second = $handler->create(7, null, 1, json_encode(['name' => 'Duplicate Project']));
+
+        self::assertSame(409, $second->getStatusCode());
+    }
+
+    public function testSectionsCreateRejects409ForADuplicateNameInTheSameProject(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section dup project');
+        $this->makeSectionDirect(7, $projectId); // the default Backlog, a distinct name.
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $first = $handler->create(7, null, $projectId, json_encode(['name' => 'Sprint 1']));
+        self::assertSame(201, $first->getStatusCode());
+
+        $second = $handler->create(7, null, $projectId, json_encode(['name' => 'Sprint 1']));
+
+        self::assertSame(409, $second->getStatusCode());
+    }
+
+    /**
+     * The always-reproducible case the finding calls out specifically:
+     * every project auto-creates a "Backlog" section
+     * ({@see ProjectsApiHandler::create()}), so creating a section literally
+     * named "Backlog" in that SAME project always collides on the
+     * (project_id, slug) unique constraint.
+     */
+    public function testSectionsCreateRejects409ForTheBacklogAutoCollision(): void
+    {
+        $projectHandler = new ProjectsApiHandler($this->pdo);
+        $created = json_decode(
+            $projectHandler->create(7, null, 1, json_encode(['name' => 'Backlog collision project']))->getBody(),
+            true
+        );
+        $projectId = (int) $created['data']['id'];
+
+        $sectionHandler = new SectionsApiHandler($this->pdo);
+        $response = $sectionHandler->create(7, null, $projectId, json_encode(['name' => 'Backlog']));
+
+        self::assertSame(409, $response->getStatusCode());
+    }
+
+    public function testGroupsCreateRejects409ForADuplicateNameInTheSameSection(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Group dup project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $first = $handler->create(7, null, $sectionId, json_encode(['name' => 'Frontend']));
+        self::assertSame(201, $first->getStatusCode());
+
+        $second = $handler->create(7, null, $sectionId, json_encode(['name' => 'Frontend']));
+
+        self::assertSame(409, $second->getStatusCode());
+    }
+
+    // ==================== Tenant-root ou_id assignment validation (whole-branch review finding I5) ====================
+
+    public function testProjectsCreateRejects422ForATenantRootCallerAssigningANonexistentOuId(): void
+    {
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->create(7, null, 1, json_encode(['name' => 'Bad OU assignment', 'ou_id' => 999999]));
+
+        self::assertSame(422, $response->getStatusCode());
+    }
+
+    public function testProjectsCreateRejects422ForATenantRootCallerAssigningAForeignTenantsOuId(): void
+    {
+        $this->makeOu(50, 9, null); // An OU that genuinely exists, but in a DIFFERENT tenant.
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->create(7, null, 1, json_encode(['name' => 'Foreign OU assignment', 'ou_id' => 50]));
+
+        self::assertSame(422, $response->getStatusCode());
+    }
+
+    public function testProjectsUpdateRejects422ForATenantRootCallerAssigningANonexistentOuId(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update OU project');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $projectId, json_encode(['ou_id' => 999999]));
+
+        self::assertSame(422, $response->getStatusCode());
     }
 }

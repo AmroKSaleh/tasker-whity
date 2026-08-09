@@ -10,6 +10,25 @@ use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Tests\Support\SqlitePolyfills;
 
+/**
+ * NOTE ON WHAT MOVED (whole-branch review finding C1): create()'s
+ * section-existence check used to be tenant-scoped only; it is now OU-aware,
+ * joining tasker_sections to tasker_projects and calling
+ * OuScopeResolver::whereFragment() UNCONDITIONALLY — PostgreSQL's
+ * `= ANY(:scope)`, which SQLite's PDO::prepare() rejects outright regardless
+ * of runtime branching. The four tests that exercised create() directly
+ * (testCreateStampsTenantAndDefaultsStatusToPending,
+ * testCreateRejectsASectionOutsideTheCallersTenant,
+ * testCreateAcceptsAValidPriority, testCreateRejectsAnInvalidPriority) moved
+ * to TenantIsolationOuTest.php (Postgres-backed), alongside new OU-boundary
+ * regression tests proving the fix. Every OTHER test below only ever used
+ * create() as a convenience fixture-builder for some other method under
+ * test (update/move/delete/complete/pin/tag/listForSection) — those now
+ * build their task fixture via insertTaskDirect() (a raw INSERT bypassing
+ * create() entirely) so they stay on SQLite unchanged in every other
+ * respect. listForSection() itself remains tenant-scoped only (finding I7)
+ * and has no Postgres-only syntax, so it keeps its SQLite coverage as-is.
+ */
 final class TasksApiHandlerTest extends TestCase
 {
     private PDO $pdo;
@@ -33,6 +52,40 @@ final class TasksApiHandlerTest extends TestCase
         (new CreateTaskerTasksTable())->up($this->pdo);
 
         $this->handler = new TasksApiHandler($this->pdo);
+    }
+
+    /**
+     * Inserts a task directly (bypassing handler->create(), which now
+     * requires a real Postgres connection for its section-existence check —
+     * see this class's own docblock) and returns the id a subsequent
+     * handler call must use: SQLite's own `rowid`, not the `id` column value
+     * (see TasksApiHandler::idColumn()'s own doc for why those diverge under
+     * the in-memory SQLite double).
+     */
+    private function insertTaskDirect(
+        int $tenantId,
+        int $projectId,
+        int $sectionId,
+        string $text,
+        ?string $priority = null,
+        ?int $groupId = null
+    ): int {
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tasker_tasks
+                (public_id, tenant_id, project_id, section_id, group_id, text, priority, status, created_by, created_at, updated_at)
+             VALUES
+                (:public_id, :tenant_id, :project_id, :section_id, :group_id, :text, :priority, 'pending', 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+        );
+        $stmt->bindValue(':public_id', sprintf('dddddddd-0000-0000-0000-%012d', random_int(1, 999999999999)));
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':project_id', $projectId, PDO::PARAM_INT);
+        $stmt->bindValue(':section_id', $sectionId, PDO::PARAM_INT);
+        $stmt->bindValue(':group_id', $groupId, $groupId === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+        $stmt->bindValue(':text', $text, PDO::PARAM_STR);
+        $stmt->bindValue(':priority', $priority, $priority === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
+        $stmt->execute();
+
+        return (int) $this->pdo->lastInsertId();
     }
 
     /**
@@ -86,44 +139,11 @@ final class TasksApiHandlerTest extends TestCase
         ');
     }
 
-    public function testCreateStampsTenantAndDefaultsStatusToPending(): void
-    {
-        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Ship it']));
-
-        self::assertSame(201, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('pending', $payload['data']['status']);
-        self::assertSame('Ship it', $payload['data']['text']);
-        self::assertNull($payload['data']['priority']);
-    }
-
-    public function testCreateRejectsASectionOutsideTheCallersTenant(): void
-    {
-        $response = $this->handler->create(7, 2, 3, json_encode(['text' => 'Should fail']));
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testCreateAcceptsAValidPriority(): void
-    {
-        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Urgent', 'priority' => 'rush']));
-
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('rush', $payload['data']['priority']);
-    }
-
-    public function testCreateRejectsAnInvalidPriority(): void
-    {
-        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Bad', 'priority' => 'urgent-ish']));
-
-        self::assertSame(400, $response->getStatusCode());
-    }
-
     public function testCompleteSetsStatusAndCompletedAt(): void
     {
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Finish me']))->getBody(), true);
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Finish me');
 
-        $response = $this->handler->complete(7, (int) $created['data']['id']);
+        $response = $this->handler->complete(7, $taskId);
 
         self::assertSame(200, $response->getStatusCode());
         $payload = json_decode($response->getBody(), true);
@@ -140,7 +160,7 @@ final class TasksApiHandlerTest extends TestCase
 
     public function testListForSectionReturnsOnlyThatSectionsTasksForTheCallersTenant(): void
     {
-        $this->handler->create(7, 1, 3, json_encode(['text' => 'A']));
+        $this->insertTaskDirect(7, 100, 1, 'A');
 
         $payload = json_decode($this->handler->listForSection(7, 1)->getBody(), true);
 
@@ -148,10 +168,29 @@ final class TasksApiHandlerTest extends TestCase
         self::assertSame('A', $payload['data'][0]['text']);
     }
 
+    /**
+     * Regression test for whole-branch review finding I7: listForSection()
+     * used to have NO existence check on its parent {sectionId} at all — a
+     * nonexistent or cross-tenant section returned `200 []` instead of 404.
+     */
+    public function testListForSectionRejects404ForANonexistentSection(): void
+    {
+        $response = $this->handler->listForSection(7, 999);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testListForSectionRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        // Section 2 belongs to tenant 9, not the caller's tenant 7.
+        $response = $this->handler->listForSection(7, 2);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
     public function testUpdateChangesTextDetailAndPriority(): void
     {
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Original']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
 
         $response = $this->handler->update(7, $taskId, json_encode(['text' => 'Edited', 'detail' => 'more info', 'priority' => 'high']));
 
@@ -164,8 +203,7 @@ final class TasksApiHandlerTest extends TestCase
 
     public function testUpdateRejectsAnInvalidPriority(): void
     {
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Original']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
 
         $response = $this->handler->update(7, $taskId, json_encode(['priority' => 'urgent-ish']));
 
@@ -182,8 +220,7 @@ final class TasksApiHandlerTest extends TestCase
     public function testMoveChangesSectionAndSortOrder(): void
     {
         $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Movable']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Movable');
 
         $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 3, 'sort_order' => 5]));
 
@@ -193,12 +230,35 @@ final class TasksApiHandlerTest extends TestCase
         self::assertSame(5, $payload['data']['sortOrder']);
     }
 
+    /**
+     * Regression test for whole-branch review finding I1: changing
+     * section_id WITHOUT supplying group_id in the same request must clear
+     * the task's group_id — the old group has no relationship to the new
+     * section, and leaving it in place made BoardApiHandler::get() render
+     * the task under the OLD section while listForSection() for the NEW
+     * section returned it (the two read paths disagreed).
+     */
+    public function testMoveToADifferentSectionWithoutGroupIdClearsTheGroup(): void
+    {
+        $this->createGroupsTable();
+        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
+        // Group 10 lives in section 1 -- the task's OLD section.
+        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (10, 7, 1)');
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Grouped, about to move', null, 10);
+
+        $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 3]));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame(3, $payload['data']['sectionId']);
+        self::assertNull($payload['data']['groupId'], 'a group from the OLD section must not silently survive a move to a new section');
+    }
+
     public function testMoveRejectsASectionFromADifferentProject(): void
     {
         $this->pdo->exec("INSERT INTO tasker_projects (id, tenant_id) VALUES (200, 7)");
         $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (4, 7, 200)");
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Movable']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Movable');
 
         $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 4]));
 
@@ -207,23 +267,20 @@ final class TasksApiHandlerTest extends TestCase
 
     /**
      * Fixture for `tasker_groups`, minus the FK/UNIQUE clauses the SQLite
-     * double doesn't need — only the columns move()'s
-     * `tasker_groups g JOIN tasker_sections s ON s.id = g.section_id` query
-     * selects/joins on are required.
+     * double doesn't need — only the columns move()'s group-validation query
+     * selects/filters on are required.
      */
     private function createGroupsTable(): void
     {
         $this->pdo->exec('CREATE TABLE tasker_groups (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, section_id INTEGER NOT NULL)');
     }
 
-    public function testMoveAcceptsAGroupIdFromTheSameProject(): void
+    public function testMoveAcceptsAGroupIdFromTheSameSection(): void
     {
         $this->createGroupsTable();
-        // Group 10 lives in section 1, which belongs to the task's own
-        // project (100) — see setUp()'s fixture data.
+        // Group 10 lives in section 1, which is the task's own (unchanged) section.
         $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (10, 7, 1)');
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Groupable']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Groupable');
 
         $response = $this->handler->move(7, $taskId, json_encode(['group_id' => 10]));
 
@@ -233,21 +290,39 @@ final class TasksApiHandlerTest extends TestCase
     }
 
     /**
-     * Mirrors testMoveRejectsASectionFromADifferentProject(), but for
-     * group_id instead of section_id — move()'s group_id branch (the
-     * `tasker_groups g JOIN tasker_sections s` query) was previously
-     * completely untested, positive or negative.
+     * Regression test for whole-branch review finding I1: a group_id
+     * explicitly supplied in the SAME request as a section_id change must be
+     * validated against the TARGET (new) section, not the task's old one.
      */
-    public function testMoveRejectsAGroupIdFromADifferentProject(): void
+    public function testMoveAcceptsAGroupIdFromTheNewSectionInTheSameRequest(): void
     {
         $this->createGroupsTable();
-        $this->pdo->exec("INSERT INTO tasker_projects (id, tenant_id) VALUES (200, 7)");
-        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (4, 7, 200)");
-        // Group 20 lives in section 4, which belongs to project 200 — a
-        // DIFFERENT project than the task's own (100).
-        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (20, 7, 4)');
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Movable']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
+        // Group 30 lives in section 3 -- the NEW target section, not the task's current one (1).
+        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (30, 7, 3)');
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Moving with its new group');
+
+        $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 3, 'group_id' => 30]));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame(3, $payload['data']['sectionId']);
+        self::assertSame(30, $payload['data']['groupId']);
+    }
+
+    /**
+     * Mirrors testMoveRejectsASectionFromADifferentProject(), but for
+     * group_id: a group_id belonging to a DIFFERENT section than the
+     * request's target section_id must be rejected (422), even when that
+     * section belongs to the same project.
+     */
+    public function testMoveRejectsAGroupIdFromADifferentSectionThanTheTarget(): void
+    {
+        $this->createGroupsTable();
+        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
+        // Group 20 lives in section 3, but the request's target section stays 1 (unchanged).
+        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (20, 7, 3)');
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Movable');
 
         $response = $this->handler->move(7, $taskId, json_encode(['group_id' => 20]));
 
@@ -256,8 +331,7 @@ final class TasksApiHandlerTest extends TestCase
 
     public function testDeleteRemovesTheTask(): void
     {
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Doomed']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Doomed');
 
         $response = $this->handler->delete(7, $taskId);
 
@@ -276,8 +350,7 @@ final class TasksApiHandlerTest extends TestCase
 
     public function testUncompleteRestoresPendingStatusAndClearsCompletedAt(): void
     {
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Flip-flop']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Flip-flop');
         $this->handler->complete(7, $taskId);
 
         $response = $this->handler->uncomplete(7, $taskId);
@@ -290,8 +363,7 @@ final class TasksApiHandlerTest extends TestCase
 
     public function testPinAndUnpinToggleThePinnedFlag(): void
     {
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Pin me']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Pin me');
 
         $pinned = json_decode($this->handler->pin(7, $taskId)->getBody(), true);
         self::assertTrue($pinned['data']['pinned']);
@@ -317,11 +389,10 @@ final class TasksApiHandlerTest extends TestCase
      */
     public function testPinnedCoercesAPostgresStyleFalseStringToBooleanFalse(): void
     {
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'String-bool row']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'String-bool row');
 
-        // rowid is safe to hardcode here: this test's own PDO is always the
-        // in-memory SQLite double (see setUp()), never Postgres.
+        // rowid is safe to hardcode as $taskId here: this test's own PDO is
+        // always the in-memory SQLite double (see setUp()), never Postgres.
         $this->pdo->exec("UPDATE tasker_tasks SET pinned = 'f' WHERE rowid = {$taskId}");
 
         $payload = json_decode($this->handler->listForSection(7, 1)->getBody(), true);
@@ -337,9 +408,9 @@ final class TasksApiHandlerTest extends TestCase
         $this->createEntityTagsTable();
         $this->createTagsTable();
         $this->insertTag(11, 7);
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Taggable');
 
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Taggable']))->getBody(), true);
-        $response = $this->handler->tag(7, (int) $created['data']['id'], json_encode(['tag_id' => 11]));
+        $response = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
 
         self::assertSame(201, $response->getStatusCode());
     }
@@ -349,9 +420,7 @@ final class TasksApiHandlerTest extends TestCase
         $this->createEntityTagsTable();
         $this->createTagsTable();
         $this->insertTag(11, 7);
-
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Taggable']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Taggable');
 
         $first = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
         $second = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
@@ -385,9 +454,9 @@ final class TasksApiHandlerTest extends TestCase
     {
         $this->createTagsTable();
         $this->insertTag(11, 9);
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Taggable');
 
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Taggable']))->getBody(), true);
-        $response = $this->handler->tag(7, (int) $created['data']['id'], json_encode(['tag_id' => 11]));
+        $response = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
 
         self::assertSame(422, $response->getStatusCode());
     }

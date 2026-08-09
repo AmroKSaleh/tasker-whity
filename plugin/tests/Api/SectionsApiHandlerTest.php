@@ -9,6 +9,22 @@ use PHPUnit\Framework\TestCase;
 use Tasker\Api\SectionsApiHandler;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 
+/**
+ * NOTE ON WHAT MOVED (whole-branch review finding C1): list()/create() used
+ * to be tenant-scoped only; they are now OU-aware, joining to tasker_projects
+ * and calling OuScopeResolver::whereFragment() UNCONDITIONALLY — which uses
+ * PostgreSQL's `= ANY(:scope)`, syntax SQLite's PDO::prepare() rejects
+ * outright regardless of which branch would be live at runtime. Every test
+ * that exercised list()/create() (testCreateAddsASecondSectionToTheProject,
+ * testCreateRejects404ForAProjectOutsideTheCallersTenant,
+ * testListReturnsSectionsForTheGivenProjectAndTenant) therefore moved to
+ * TenantIsolationOuTest.php (Postgres-backed), alongside new OU-boundary
+ * regression tests proving the fix. update()/delete() are UNCHANGED by C1
+ * (they take the section's own id directly, not a project id path
+ * parameter — explicitly out of C1's scope) and keep their SQLite coverage
+ * here; testDeleteRemovesANonLastSection's fixture now uses a raw INSERT
+ * instead of handler->create() so it doesn't need to move too.
+ */
 final class SectionsApiHandlerTest extends TestCase
 {
     private PDO $pdo;
@@ -28,29 +44,29 @@ final class SectionsApiHandlerTest extends TestCase
         $this->handler = new SectionsApiHandler($this->pdo);
     }
 
-    public function testCreateAddsASecondSectionToTheProject(): void
+    /**
+     * Inserts a section directly (bypassing handler->create(), which now
+     * requires a real Postgres connection — see this class's own docblock)
+     * and returns the id that a subsequent handler->update()/delete() call
+     * must use: SQLite's own `rowid`, NOT the `id` column value bound above
+     * (see SectionsApiHandler::idColumn()'s own doc for why those two
+     * diverge under the in-memory SQLite double).
+     */
+    private function insertSection(int $tenantId, int $projectId, string $name): int
     {
-        $response = $this->handler->create(7, 100, json_encode(['name' => 'In Progress']));
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tasker_sections (public_id, tenant_id, project_id, name, slug, created_at)
+             VALUES (:public_id, :tenant_id, :project_id, :name, :slug, CURRENT_TIMESTAMP)"
+        );
+        $stmt->execute([
+            ':public_id' => sprintf('bbbbbbbb-0000-0000-0000-%012d', random_int(1, 999999999999)),
+            ':tenant_id' => $tenantId,
+            ':project_id' => $projectId,
+            ':name' => $name,
+            ':slug' => strtolower(str_replace(' ', '-', $name)),
+        ]);
 
-        self::assertSame(201, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('In Progress', $payload['data']['name']);
-        self::assertSame('in-progress', $payload['data']['slug']);
-    }
-
-    public function testCreateRejects404ForAProjectOutsideTheCallersTenant(): void
-    {
-        $response = $this->handler->create(7, 200, json_encode(['name' => 'Should fail']));
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testListReturnsSectionsForTheGivenProjectAndTenant(): void
-    {
-        $payload = json_decode($this->handler->list(7, 100)->getBody(), true);
-
-        self::assertCount(1, $payload['data']);
-        self::assertSame('Backlog', $payload['data'][0]['name']);
+        return (int) $this->pdo->lastInsertId();
     }
 
     public function testUpdateChangesNameAndDescription(): void
@@ -85,8 +101,7 @@ final class SectionsApiHandlerTest extends TestCase
 
     public function testDeleteRemovesANonLastSection(): void
     {
-        $created = json_decode($this->handler->create(7, 100, json_encode(['name' => 'Extra section']))->getBody(), true);
-        $extraId = (int) $created['data']['id'];
+        $extraId = $this->insertSection(7, 100, 'Extra section');
 
         $response = $this->handler->delete(7, $extraId);
 

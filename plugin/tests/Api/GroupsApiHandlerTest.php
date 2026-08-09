@@ -9,6 +9,20 @@ use PHPUnit\Framework\TestCase;
 use Tasker\Api\GroupsApiHandler;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 
+/**
+ * NOTE ON WHAT MOVED (whole-branch review finding C1): list()/create() used
+ * to check only tenant ownership of the parent section; they are now
+ * OU-aware, joining tasker_sections to tasker_projects and calling
+ * OuScopeResolver::whereFragment() UNCONDITIONALLY — PostgreSQL's
+ * `= ANY(:scope)`, which SQLite's PDO::prepare() rejects outright regardless
+ * of runtime branching. Every test that exercised list()/create() moved to
+ * TenantIsolationOuTest.php (Postgres-backed), alongside new OU-boundary
+ * regression tests proving the fix. update()/delete() are UNCHANGED by C1
+ * (they take the GROUP's own id directly, not a section id path parameter —
+ * explicitly out of C1's scope) and keep their SQLite coverage here; their
+ * fixtures now use a raw INSERT instead of handler->create() so they don't
+ * need to move too.
+ */
 final class GroupsApiHandlerTest extends TestCase
 {
     private PDO $pdo;
@@ -25,57 +39,34 @@ final class GroupsApiHandlerTest extends TestCase
         $this->handler = new GroupsApiHandler($this->pdo);
     }
 
-    public function testCreateStampsTheCallersTenantAndTheGivenSection(): void
+    /**
+     * Inserts a group directly (bypassing handler->create(), which now
+     * requires a real Postgres connection — see this class's own docblock)
+     * and returns the id a subsequent handler->update()/delete() call must
+     * use: SQLite's own `rowid`, not the `id` column value (see
+     * GroupsApiHandler::idColumn()'s own doc for why those diverge under the
+     * in-memory SQLite double).
+     */
+    private function insertGroup(int $tenantId, int $sectionId, string $name): int
     {
-        $response = $this->handler->create(7, 1, json_encode(['name' => 'Backend']));
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO tasker_groups (public_id, tenant_id, section_id, name, slug, created_at)
+             VALUES (:public_id, :tenant_id, :section_id, :name, :slug, CURRENT_TIMESTAMP)'
+        );
+        $stmt->execute([
+            ':public_id' => sprintf('cccccccc-0000-0000-0000-%012d', random_int(1, 999999999999)),
+            ':tenant_id' => $tenantId,
+            ':section_id' => $sectionId,
+            ':name' => $name,
+            ':slug' => strtolower(str_replace(' ', '-', $name)),
+        ]);
 
-        self::assertSame(201, $response->getStatusCode());
-
-        $row = $this->pdo->query('SELECT tenant_id, section_id, name, slug FROM tasker_groups')->fetch(PDO::FETCH_ASSOC);
-        self::assertSame(7, (int) $row['tenant_id']);
-        self::assertSame(1, (int) $row['section_id']);
-        self::assertSame('Backend', $row['name']);
-        self::assertSame('backend', $row['slug']);
-    }
-
-    public function testCreateRejectsASectionOutsideTheCallersTenant(): void
-    {
-        // Section 2 belongs to tenant 9, not the caller's tenant 7.
-        $response = $this->handler->create(7, 2, json_encode(['name' => 'Should fail']));
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testListReturnsOnlyGroupsForTheGivenSectionAndTenant(): void
-    {
-        $this->handler->create(7, 1, json_encode(['name' => 'A']));
-        $this->handler->create(9, 2, json_encode(['name' => 'B']));
-
-        $payload = json_decode($this->handler->list(7, 1)->getBody(), true);
-
-        self::assertCount(1, $payload['data']);
-        self::assertSame('A', $payload['data'][0]['name']);
-    }
-
-    public function testListRejects404ForASectionOutsideTheCallersTenant(): void
-    {
-        // Section 2 belongs to tenant 9, not the caller's tenant 7.
-        $response = $this->handler->list(7, 2);
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testListRejects404ForANonexistentSection(): void
-    {
-        $response = $this->handler->list(7, 999);
-
-        self::assertSame(404, $response->getStatusCode());
+        return (int) $this->pdo->lastInsertId();
     }
 
     public function testUpdateChangesNameAndSortOrder(): void
     {
-        $created = json_decode($this->handler->create(7, 1, json_encode(['name' => 'Original']))->getBody(), true);
-        $groupId = (int) $created['data']['id'];
+        $groupId = $this->insertGroup(7, 1, 'Original');
 
         $response = $this->handler->update(7, $groupId, json_encode(['name' => 'Renamed', 'sort_order' => 3]));
 
@@ -87,8 +78,7 @@ final class GroupsApiHandlerTest extends TestCase
 
     public function testUpdateRejects404ForAGroupOutsideTheCallersTenant(): void
     {
-        $created = json_decode($this->handler->create(9, 2, json_encode(['name' => 'Other tenant group']))->getBody(), true);
-        $groupId = (int) $created['data']['id'];
+        $groupId = $this->insertGroup(9, 2, 'Other tenant group');
 
         $response = $this->handler->update(7, $groupId, json_encode(['name' => 'Should fail']));
 
@@ -97,8 +87,7 @@ final class GroupsApiHandlerTest extends TestCase
 
     public function testDeleteRemovesTheGroup(): void
     {
-        $created = json_decode($this->handler->create(7, 1, json_encode(['name' => 'Doomed']))->getBody(), true);
-        $groupId = (int) $created['data']['id'];
+        $groupId = $this->insertGroup(7, 1, 'Doomed');
 
         $response = $this->handler->delete(7, $groupId);
 
@@ -110,8 +99,7 @@ final class GroupsApiHandlerTest extends TestCase
 
     public function testDeleteRejects404ForAGroupOutsideTheCallersTenant(): void
     {
-        $created = json_decode($this->handler->create(9, 2, json_encode(['name' => 'Other tenant group']))->getBody(), true);
-        $groupId = (int) $created['data']['id'];
+        $groupId = $this->insertGroup(9, 2, 'Other tenant group');
 
         $response = $this->handler->delete(7, $groupId);
 

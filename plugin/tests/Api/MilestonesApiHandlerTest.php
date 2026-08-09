@@ -9,6 +9,23 @@ use PHPUnit\Framework\TestCase;
 use Tasker\Api\MilestonesApiHandler;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 
+/**
+ * NOTE ON WHAT MOVED (whole-branch review finding C1): create()'s
+ * task-existence check used to be tenant-scoped only; it is now OU-aware,
+ * joining tasker_tasks to tasker_projects and calling
+ * OuScopeResolver::whereFragment() UNCONDITIONALLY — PostgreSQL's
+ * `= ANY(:scope)`, which SQLite's PDO::prepare() rejects outright regardless
+ * of runtime branching. The two tests that exercised create() directly
+ * (testCreateDefaultsCheckedToFalse, testCreateRejectsATaskOutsideTheCallersTenant)
+ * moved to TenantIsolationOuTest.php (Postgres-backed), alongside new
+ * OU-boundary regression tests proving the fix. Every OTHER test below only
+ * ever used create() as a convenience fixture-builder for some other method
+ * under test (toggle/update/delete/listForTask) — those now build their
+ * milestone fixture via insertMilestoneDirect() (a raw INSERT bypassing
+ * create() entirely) so they stay on SQLite unchanged in every other
+ * respect. listForTask() itself remains tenant-scoped only (finding I7) and
+ * has no Postgres-only syntax, so it keeps its SQLite coverage as-is.
+ */
 final class MilestonesApiHandlerTest extends TestCase
 {
     private PDO $pdo;
@@ -25,26 +42,35 @@ final class MilestonesApiHandlerTest extends TestCase
         $this->handler = new MilestonesApiHandler($this->pdo);
     }
 
-    public function testCreateDefaultsCheckedToFalse(): void
+    /**
+     * Inserts a milestone directly (bypassing handler->create(), which now
+     * requires a real Postgres connection for its task-existence check — see
+     * this class's own docblock) and returns the id a subsequent
+     * handler->update()/delete()/toggle() call must use: SQLite's own
+     * `rowid`, not the `id` column value (see
+     * MilestonesApiHandler::idColumn()'s own doc for why those diverge under
+     * the in-memory SQLite double).
+     */
+    private function insertMilestoneDirect(int $tenantId, int $taskId, string $summary, int $sortOrder = 0): int
     {
-        $response = $this->handler->create(7, 1, json_encode(['summary' => 'Write tests']));
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO tasker_milestones (public_id, tenant_id, task_id, summary, sort_order, created_at)
+             VALUES (:public_id, :tenant_id, :task_id, :summary, :sort_order, CURRENT_TIMESTAMP)'
+        );
+        $stmt->execute([
+            ':public_id' => sprintf('eeeeeeee-0000-0000-0000-%012d', random_int(1, 999999999999)),
+            ':tenant_id' => $tenantId,
+            ':task_id' => $taskId,
+            ':summary' => $summary,
+            ':sort_order' => $sortOrder,
+        ]);
 
-        self::assertSame(201, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertFalse($payload['data']['checked']);
-    }
-
-    public function testCreateRejectsATaskOutsideTheCallersTenant(): void
-    {
-        $response = $this->handler->create(7, 2, json_encode(['summary' => 'Should fail']));
-
-        self::assertSame(404, $response->getStatusCode());
+        return (int) $this->pdo->lastInsertId();
     }
 
     public function testToggleFlipsCheckedState(): void
     {
-        $created = json_decode($this->handler->create(7, 1, json_encode(['summary' => 'Toggle me']))->getBody(), true);
-        $id = (int) $created['data']['id'];
+        $id = $this->insertMilestoneDirect(7, 1, 'Toggle me');
 
         $first = json_decode($this->handler->toggle(7, $id)->getBody(), true);
         $second = json_decode($this->handler->toggle(7, $id)->getBody(), true);
@@ -55,8 +81,7 @@ final class MilestonesApiHandlerTest extends TestCase
 
     public function testToggleRejects404ForAMilestoneOutsideTheCallersTenant(): void
     {
-        $created = json_decode($this->handler->create(9, 2, json_encode(['summary' => 'Other tenant']))->getBody(), true);
-        $id = (int) $created['data']['id'];
+        $id = $this->insertMilestoneDirect(9, 2, 'Other tenant');
 
         $response = $this->handler->toggle(7, $id);
 
@@ -65,8 +90,8 @@ final class MilestonesApiHandlerTest extends TestCase
 
     public function testListForTaskOrdersBySortOrder(): void
     {
-        $this->handler->create(7, 1, json_encode(['summary' => 'Second', 'sort_order' => 2]));
-        $this->handler->create(7, 1, json_encode(['summary' => 'First', 'sort_order' => 1]));
+        $this->insertMilestoneDirect(7, 1, 'Second', 2);
+        $this->insertMilestoneDirect(7, 1, 'First', 1);
 
         $payload = json_decode($this->handler->listForTask(7, 1)->getBody(), true);
 
@@ -74,10 +99,29 @@ final class MilestonesApiHandlerTest extends TestCase
         self::assertSame('Second', $payload['data'][1]['summary']);
     }
 
+    /**
+     * Regression test for whole-branch review finding I7: listForTask() used
+     * to have NO existence check on its parent {taskId} at all — a
+     * nonexistent or cross-tenant task returned `200 []` instead of 404.
+     */
+    public function testListForTaskRejects404ForANonexistentTask(): void
+    {
+        $response = $this->handler->listForTask(7, 999);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testListForTaskRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        // Task 2 belongs to tenant 9, not the caller's tenant 7.
+        $response = $this->handler->listForTask(7, 2);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
     public function testUpdateChangesSummaryAndDetail(): void
     {
-        $created = json_decode($this->handler->create(7, 1, json_encode(['summary' => 'Original']))->getBody(), true);
-        $id = (int) $created['data']['id'];
+        $id = $this->insertMilestoneDirect(7, 1, 'Original');
 
         $response = $this->handler->update(7, $id, json_encode(['summary' => 'Edited', 'detail' => 'more info']));
 
@@ -89,8 +133,7 @@ final class MilestonesApiHandlerTest extends TestCase
 
     public function testUpdateRejects404ForAMilestoneOutsideTheCallersTenant(): void
     {
-        $created = json_decode($this->handler->create(9, 2, json_encode(['summary' => 'Other tenant']))->getBody(), true);
-        $id = (int) $created['data']['id'];
+        $id = $this->insertMilestoneDirect(9, 2, 'Other tenant');
 
         $response = $this->handler->update(7, $id, json_encode(['summary' => 'Should fail']));
 
@@ -99,8 +142,7 @@ final class MilestonesApiHandlerTest extends TestCase
 
     public function testDeleteRemovesTheMilestone(): void
     {
-        $created = json_decode($this->handler->create(7, 1, json_encode(['summary' => 'Doomed']))->getBody(), true);
-        $id = (int) $created['data']['id'];
+        $id = $this->insertMilestoneDirect(7, 1, 'Doomed');
 
         $response = $this->handler->delete(7, $id);
 
@@ -112,8 +154,7 @@ final class MilestonesApiHandlerTest extends TestCase
 
     public function testDeleteRejects404ForAMilestoneOutsideTheCallersTenant(): void
     {
-        $created = json_decode($this->handler->create(9, 2, json_encode(['summary' => 'Other tenant']))->getBody(), true);
-        $id = (int) $created['data']['id'];
+        $id = $this->insertMilestoneDirect(9, 2, 'Other tenant');
 
         $response = $this->handler->delete(7, $id);
 
