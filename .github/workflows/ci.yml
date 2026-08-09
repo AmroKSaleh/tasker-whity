@@ -9,6 +9,38 @@ jobs:
   plugin:
     runs-on: ubuntu-latest
     container: php:8.4-cli
+    # REGRESSION FIX (whole-branch review finding C2): this job used to run
+    # with no Postgres service and no pdo_pgsql extension at all, so every
+    # TenantIsolationOuTest case (25 of them — ALL of ProjectsApiHandler,
+    # BoardApiHandler, readyWork(), and the entire OU boundary) silently
+    # markTestSkipped() instead of running, giving that surface zero real CI
+    # coverage. A postgres:15 service is added below, seeded with its own
+    # disposable `tasker_test` database (matching TenantIsolationOuTest's own
+    # new local default — see its setUp()), and pdo_pgsql is installed onto
+    # the plain php:8.4-cli image the same way the local dev script
+    # (host/scripts/phpunit-pgsql.Dockerfile) already does, so this stays the
+    # same base image CI has always used.
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_DB: tasker_test
+          POSTGRES_USER: tasker
+          POSTGRES_PASSWORD: tasker_dev
+        # A job running IN a container (as this one does) reaches a service
+        # container via the service id as hostname, over the service's own
+        # normal port (5432) — not via a host-mapped port. No `ports:`
+        # mapping is needed here for that reason (unlike a job that runs
+        # directly on the runner).
+        options: >-
+          --health-cmd "pg_isready -U tasker -d tasker_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      TASKER_TEST_PG_DSN: "pgsql:host=postgres;port=5432;dbname=tasker_test"
+      TASKER_TEST_PG_USER: tasker
+      TASKER_TEST_PG_PASS: tasker_dev
     steps:
       - uses: actions/checkout@v4
 
@@ -19,6 +51,13 @@ jobs:
           apt-get update -qq && apt-get install -y -qq git unzip
           git clone https://github.com/AmroKSaleh/whity-core.git host/.core
           git -C host/.core checkout "$(cat host/core.version)"
+
+      - name: Install pdo_pgsql
+        env:
+          DEBIAN_FRONTEND: noninteractive
+        run: |
+          apt-get update -qq && apt-get install -y -qq libpq-dev
+          docker-php-ext-install pdo_pgsql
 
       - name: Install Composer
         run: |
