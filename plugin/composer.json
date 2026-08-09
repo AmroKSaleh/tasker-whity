@@ -22,6 +22,6 @@
   },
   "autoload-dev": {
     "psr-4": { "Tasker\\Tests\\": "tests/" },
-    "classmap": ["../host/.core/src/Core/Audit/", "../host/.core/src/Core/Taxonomy/"]
+    "classmap": ["../host/.core/src/Core/Audit/", "../host/.core/src/Core/Taxonomy/", "../host/.core/src/Core/Identity/"]
   }
 }

@@ -295,7 +295,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'list_groups',
                     'summary' => 'List a section\'s groups',
                     'tags' => ['tasker'],
-                    'responses' => [200 => ['description' => 'The group list']],
+                    'responses' => [
+                        200 => ['description' => 'The group list'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant or OU scope'],
+                    ],
                 ],
             ],
             [
@@ -358,7 +361,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'list_tasks',
                     'summary' => 'List a section\'s tasks',
                     'tags' => ['tasker'],
-                    'responses' => [200 => ['description' => 'The task list']],
+                    'responses' => [
+                        200 => ['description' => 'The task list'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                    ],
                 ],
             ],
             [
@@ -408,7 +414,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The moved task'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
-                        422 => ['description' => 'section_id/group_id does not belong to the task\'s own project'],
+                        422 => ['description' => 'section_id does not belong to the task\'s own project, or group_id does not belong to the target section'],
                     ],
                 ],
             ],
@@ -551,7 +557,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'list_milestones',
                     'summary' => 'List a task\'s milestones',
                     'tags' => ['tasker'],
-                    'responses' => [200 => ['description' => 'The milestone list']],
+                    'responses' => [
+                        200 => ['description' => 'The milestone list'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                    ],
                 ],
             ],
             [
@@ -807,8 +816,12 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
 
-        return (new ProjectsApiHandler($pdo))->list($tenantId, $this->callerOuId($pdo, $request, $tenantId));
+        return (new ProjectsApiHandler($pdo))->list($tenantId, $callerOu['ouId']);
     }
 
     /**
@@ -824,10 +837,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
         $createdBy = $this->callerProfileId($request) ?? 0;
 
         return (new ProjectsApiHandler($pdo))
-            ->create($tenantId, $this->callerOuId($pdo, $request, $tenantId), $createdBy, $request->getBody());
+            ->create($tenantId, $callerOu['ouId'], $createdBy, $request->getBody());
     }
 
     /**
@@ -843,9 +860,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
 
         return (new ProjectsApiHandler($pdo))
-            ->update($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0), $request->getBody());
+            ->update($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0), $request->getBody());
     }
 
     /**
@@ -861,9 +882,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
 
         return (new ProjectsApiHandler($pdo))
-            ->delete($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
+            ->delete($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
     }
 
     /**
@@ -878,7 +903,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new SectionsApiHandler($this->resolvePdo()))->list($tenantId, (int) ($params['projectId'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new SectionsApiHandler($pdo))->list($tenantId, $callerOu['ouId'], (int) ($params['projectId'] ?? 0));
     }
 
     /**
@@ -893,8 +924,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new SectionsApiHandler($this->resolvePdo()))
-            ->create($tenantId, (int) ($params['projectId'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new SectionsApiHandler($pdo))
+            ->create($tenantId, $callerOu['ouId'], (int) ($params['projectId'] ?? 0), $request->getBody());
     }
 
     /**
@@ -940,7 +977,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new GroupsApiHandler($this->resolvePdo()))->list($tenantId, (int) ($params['sectionId'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new GroupsApiHandler($pdo))->list($tenantId, $callerOu['ouId'], (int) ($params['sectionId'] ?? 0));
     }
 
     /**
@@ -955,8 +998,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new GroupsApiHandler($this->resolvePdo()))
-            ->create($tenantId, (int) ($params['sectionId'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new GroupsApiHandler($pdo))
+            ->create($tenantId, $callerOu['ouId'], (int) ($params['sectionId'] ?? 0), $request->getBody());
     }
 
     /**
@@ -1017,10 +1066,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
         $createdBy = $this->callerProfileId($request) ?? 0;
 
-        return (new TasksApiHandler($this->resolvePdo()))
-            ->create($tenantId, (int) ($params['sectionId'] ?? 0), $createdBy, $request->getBody());
+        return (new TasksApiHandler($pdo))
+            ->create($tenantId, $callerOu['ouId'], (int) ($params['sectionId'] ?? 0), $createdBy, $request->getBody());
     }
 
     /**
@@ -1158,9 +1212,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
 
         return (new TasksApiHandler($pdo))
-            ->readyWork($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
+            ->readyWork($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
     }
 
     /**
@@ -1176,9 +1234,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
 
         return (new BoardApiHandler($pdo))
-            ->get($tenantId, $this->callerOuId($pdo, $request, $tenantId), (int) ($params['id'] ?? 0));
+            ->get($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
     }
 
     /**
@@ -1208,8 +1270,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new MilestonesApiHandler($this->resolvePdo()))
-            ->create($tenantId, (int) ($params['taskId'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new MilestonesApiHandler($pdo))
+            ->create($tenantId, $callerOu['ouId'], (int) ($params['taskId'] ?? 0), $request->getBody());
     }
 
     /**
@@ -1270,7 +1338,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TaskDiscussionsApiHandler($this->resolvePdo()))->get($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TaskDiscussionsApiHandler($pdo))->get($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
     }
 
     /**
@@ -1285,8 +1359,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TaskDiscussionsApiHandler($this->resolvePdo()))
-            ->put($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        return (new TaskDiscussionsApiHandler($pdo))
+            ->put($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0), $request->getBody());
     }
 
     /**
@@ -1319,8 +1399,21 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * The caller's own OU for the active tenant (nullable — null means
-     * tenant-root/unrestricted).
+     * Resolves the caller's OU for the active tenant, distinguishing three
+     * outcomes that a bare `?int` cannot tell apart:
+     *
+     *   - resolved, unrestricted (tenant-root): {resolved: true, ouId: null}
+     *   - resolved, restricted to OU X:          {resolved: true, ouId: X}
+     *   - could not resolve the caller at all:   {resolved: false, ouId: null}
+     *
+     * REGRESSION FIX (whole-branch review finding I4): the previous
+     * `callerOuId(): ?int` returned null — which OuScopeResolver treats as
+     * unrestricted — for BOTH "no membership row exists for this tenant" AND
+     * "membership row exists with ou_id IS NULL" (genuine tenant-root). Those
+     * are different situations that must not produce the same (unrestricted)
+     * result: an actor whose identity/membership cannot be established must
+     * fail closed (403), never silently proceed as tenant-root. Only a
+     * membership row that genuinely HAS ou_id IS NULL is unrestricted.
      *
      * NOTE ON A BRIEF DEVIATION: the plan sketched this as
      * `TenantContext::getOuId()`, which does not exist (see
@@ -1333,22 +1426,24 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * MembershipRepository (the same repository AuthHandler itself uses to
      * resolve a membership's OU at login) rather than a static accessor.
      *
-     * A caller with no membership row for this tenant (should not happen —
-     * RBAC already required a role/permission scoped to this tenant to reach
-     * here) is treated as unrestricted rather than failing closed, matching
-     * OuScopeResolver's own documented stance that a null OU means
-     * tenant-root visibility, not "see nothing".
+     * @return array{resolved: bool, ouId: ?int}
      */
-    private function callerOuId(\PDO $pdo, Request $request, int $tenantId): ?int
+    private function resolveCallerOu(\PDO $pdo, Request $request, int $tenantId): array
     {
         $profileId = $this->callerProfileId($request);
         if ($profileId === null) {
-            return null;
+            return ['resolved' => false, 'ouId' => null];
         }
 
         $membership = (new \Whity\Core\Identity\MembershipRepository($pdo))->findByProfile($profileId, $tenantId);
+        if ($membership === null) {
+            // A profile with RBAC access to this route but NO membership row
+            // for this tenant — should not normally happen, but must fail
+            // closed rather than silently widen to tenant-root visibility.
+            return ['resolved' => false, 'ouId' => null];
+        }
 
-        return $membership['ou_id'] ?? null;
+        return ['resolved' => true, 'ouId' => $membership['ou_id'] ?? null];
     }
 
     /**
