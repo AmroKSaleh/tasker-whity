@@ -69,7 +69,14 @@ jobs:
 
       - name: PHPUnit
         working-directory: plugin
-        run: php vendor/bin/phpunit
+        # --fail-on-skipped is CI-only, deliberately not in phpunit.xml: the
+        # Postgres service above guarantees TenantIsolationOuTest can connect,
+        # so a skip here means the service, the DSN, or pdo_pgsql regressed —
+        # which would otherwise silently drop every OU-boundary,
+        # ProjectsApiHandler and BoardApiHandler test while the build stayed
+        # green. Locally the same skip is legitimate (host may be down), so
+        # the config file stays permissive.
+        run: php vendor/bin/phpunit --fail-on-skipped
 
       - name: PHPStan
         working-directory: plugin

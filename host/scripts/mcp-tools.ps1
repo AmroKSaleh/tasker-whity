@@ -29,7 +29,23 @@ $hostDir  = Split-Path -Parent $PSScriptRoot
 $repoRoot = Split-Path -Parent $hostDir
 $base     = 'http://localhost:8010'
 
-$password = if ($env:INITIAL_ADMIN_PASSWORD) { $env:INITIAL_ADMIN_PASSWORD } else { 'admin123' }
+# Prefer an explicit env var, then host/.env (the file that actually seeded the
+# running host), then the original seed default. Reading host/.env matters: the
+# admin password gets rotated there, and the seeder's ON CONFLICT DO NOTHING
+# means a re-seed never updates an existing hash — so a stale 'admin123'
+# fallback fails with a 401 that reads like a broken MCP surface rather than
+# the credential problem it is.
+$password = if ($env:INITIAL_ADMIN_PASSWORD) {
+    $env:INITIAL_ADMIN_PASSWORD
+} else {
+    $envFile = Join-Path $hostDir '.env'
+    $fromFile = if (Test-Path $envFile) {
+        (Get-Content $envFile |
+            Where-Object { $_ -match '^\s*INITIAL_ADMIN_PASSWORD\s*=' } |
+            Select-Object -First 1) -replace '^\s*INITIAL_ADMIN_PASSWORD\s*=\s*', ''
+    }
+    if ($fromFile) { $fromFile.Trim() } else { 'admin123' }
+}
 
 # CsrfGuard rejects mutating requests without this header.
 $csrf = @{ 'X-Requested-With' = 'XMLHttpRequest' }
