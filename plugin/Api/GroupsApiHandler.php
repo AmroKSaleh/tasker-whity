@@ -5,12 +5,28 @@ declare(strict_types=1);
 namespace Tasker\Api;
 
 use PDO;
+use Tasker\Access\OuScopeResolver;
 use Whity\Sdk\Http\Response;
 
 /**
- * Tenant-scoped CRUD for tasker_groups. Section-scoped, no OU logic at all
- * (groups don't carry a project_id — see CreateTaskerGroupsTable's own
- * note on why that column is deliberately absent).
+ * Tenant-scoped CRUD for tasker_groups. Section-scoped; tasker_groups itself
+ * carries no ou_id column (see CreateTaskerGroupsTable's own note on why
+ * project_id is deliberately absent too).
+ *
+ * REGRESSION FIX (whole-branch review finding C1): list()/create() used to
+ * check only that {sectionId} (a path parameter, not a discovered value)
+ * belonged to the caller's tenant. Since tasker_sections.id is also a plain
+ * sequential id, an OU-restricted caller could iterate section ids directly
+ * to list/create groups under a section that belongs to a project outside
+ * their OU scope. sectionVisible() (below) now joins through to the
+ * section's OWN project and applies OuScopeResolver on the project's ou_id —
+ * the same static-SQL-template pattern used throughout this fix. update()/
+ * delete() are unaffected: they take the GROUP's own id directly, explicitly
+ * out of this fix's scope.
+ *
+ * Postgres-only for list()/create() specifically — see
+ * {@see SectionsApiHandler}'s identical note; update()/delete() remain plain
+ * tenant-scoped queries and keep their SQLite-backed unit test coverage.
  *
  * DELETE never touches tasker_tasks: a group's tasks are un-grouped (their
  * group_id becomes NULL via the FK's ON DELETE SET NULL), not deleted,
@@ -27,9 +43,9 @@ final class GroupsApiHandler
         $this->db = $db;
     }
 
-    public function list(int $tenantId, int $sectionId): Response
+    public function list(int $tenantId, ?int $callerOuId, int $sectionId): Response
     {
-        if (!$this->sectionExists($tenantId, $sectionId)) {
+        if (!$this->sectionVisible($tenantId, $callerOuId, $sectionId)) {
             return Response::error('Section not found', 404);
         }
 
@@ -52,7 +68,7 @@ final class GroupsApiHandler
         }
     }
 
-    public function create(int $tenantId, int $sectionId, string $body): Response
+    public function create(int $tenantId, ?int $callerOuId, int $sectionId, string $body): Response
     {
         $decoded = json_decode($body, true);
         $name = is_array($decoded) ? trim((string) ($decoded['name'] ?? '')) : '';
@@ -60,7 +76,7 @@ final class GroupsApiHandler
             return Response::error('name must be a non-empty string of at most ' . self::MAX_NAME_LENGTH . ' characters', 400);
         }
 
-        if (!$this->sectionExists($tenantId, $sectionId)) {
+        if (!$this->sectionVisible($tenantId, $callerOuId, $sectionId)) {
             return Response::error('Section not found', 404);
         }
 
@@ -92,7 +108,11 @@ final class GroupsApiHandler
             }
 
             return Response::json(['data' => $this->toPublicGroup($row)], 201);
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            if (self::isUniqueViolation($e)) {
+                return Response::error('A group with this name already exists', 409);
+            }
+
             return Response::error('Failed to create group', 500);
         }
     }
@@ -168,24 +188,48 @@ final class GroupsApiHandler
     }
 
     /**
-     * Whether $sectionId exists and belongs to the caller's tenant.
+     * Whether $sectionId exists, belongs to $tenantId, AND its OWN PROJECT is
+     * within $callerOuId's OU-descendant scope.
      *
-     * Mirrors {@see \Tasker\Api\SectionsApiHandler::projectExists()}: list()
-     * and create() both need to distinguish "the parent has zero children"
-     * from "the parent itself isn't visible to this caller" before running
-     * their own tenant_id + section_id-scoped query, since a plain
-     * `WHERE tenant_id = :t AND section_id = :s` query on tasker_groups
-     * alone can't tell those two cases apart — a nonexistent or
-     * cross-tenant sectionId simply matches zero group rows either way,
-     * which without this check would return 200 with an empty list rather
-     * than 404.
+     * list() and create() both need to distinguish "the parent has zero
+     * children" from "the parent itself isn't visible to this caller" before
+     * running their own tenant_id + section_id-scoped query, since a plain
+     * `WHERE tenant_id = :t AND section_id = :s` query on tasker_groups alone
+     * can't tell those two cases apart. tasker_sections itself carries no
+     * ou_id column, so this joins up to tasker_projects (the only table that
+     * does) and applies {@see OuScopeResolver::whereFragment()} there — the
+     * same static-SQL-template pattern used throughout this fix. See this
+     * class's own docblock for why this confines list()/create() to a real
+     * PostgreSQL connection.
      */
-    private function sectionExists(int $tenantId, int $sectionId): bool
+    private function sectionVisible(int $tenantId, ?int $callerOuId, int $sectionId): bool
     {
-        $stmt = $this->db->prepare('SELECT id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id');
-        $stmt->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT 1 FROM tasker_sections s
+             JOIN tasker_projects p ON p.id = s.project_id
+             WHERE s.id = :id AND s.tenant_id = :tenant_id AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $sectionId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
 
         return $stmt->fetch() !== false;
+    }
+
+    /**
+     * Whether $e was thrown for a unique-constraint violation (PostgreSQL
+     * SQLSTATE 23505) — e.g. a duplicate (section_id, slug). Duplicated per
+     * handler rather than shared — see
+     * {@see ProjectsApiHandler::isUniqueViolation()}'s own doc for why.
+     */
+    private static function isUniqueViolation(\Throwable $e): bool
+    {
+        return $e instanceof \PDOException && $e->getCode() === '23505';
     }
 
     /**

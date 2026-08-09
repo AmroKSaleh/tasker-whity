@@ -5,11 +5,33 @@ declare(strict_types=1);
 namespace Tasker\Api;
 
 use PDO;
+use Tasker\Access\OuScopeResolver;
 use Whity\Sdk\Http\Response;
 
 /**
- * Tenant-scoped CRUD for tasker_sections. No OU check — see this plan's
- * Global Constraints note on where the OU boundary actually lives.
+ * Tenant-scoped CRUD for tasker_sections.
+ *
+ * REGRESSION FIX (whole-branch review finding C1): list()/create() used to be
+ * tenant-scoped only, on the theory that a caller can only ever learn a
+ * project id by first reaching it through an OU-visible project list. That
+ * reasoning is false here specifically: {projectId} is a PATH PARAMETER, not
+ * something the caller had to discover, and tasker_projects.id is a plain
+ * sequential BIGSERIAL — an OU-restricted caller holding tasker_structure:manage
+ * could iterate project ids directly and list/create sections under ANY
+ * project in the tenant. list()/create()'s parent-existence check is now
+ * OU-aware (projectVisible(), below), joining straight to tasker_projects and
+ * applying OuScopeResolver — the exact same static-SQL-template pattern
+ * {@see ProjectsApiHandler::findScoped()} already uses. update()/delete() are
+ * unaffected: they take the SECTION's own id directly (not a project id path
+ * parameter), which is explicitly out of this fix's scope (a separate,
+ * not-yet-decided question — see the plan's fix-wave notes).
+ *
+ * Postgres-only for list()/create() specifically, same reasoning as
+ * ProjectsApiHandler: OuScopeResolver::whereFragment()'s `= ANY(:scope)` is
+ * PostgreSQL-only syntax that SQLite's PDO::prepare() rejects outright, so
+ * those two methods are exercised only against a real PostgreSQL connection
+ * (see TenantIsolationOuTest). update()/delete() remain plain tenant-scoped
+ * queries and keep their SQLite-backed unit test coverage.
  *
  * delete() refuses to remove a project's last remaining section — every
  * project must always have at least one, the invariant ProjectsApiHandler's
@@ -31,9 +53,9 @@ final class SectionsApiHandler
         $this->db = $db;
     }
 
-    public function list(int $tenantId, int $projectId): Response
+    public function list(int $tenantId, ?int $callerOuId, int $projectId): Response
     {
-        if (!$this->projectExists($tenantId, $projectId)) {
+        if (!$this->projectVisible($tenantId, $callerOuId, $projectId)) {
             return Response::error('Project not found', 404);
         }
 
@@ -51,7 +73,7 @@ final class SectionsApiHandler
         return Response::json(['data' => array_map([$this, 'toPublicSection'], $rows)], 200);
     }
 
-    public function create(int $tenantId, int $projectId, string $body): Response
+    public function create(int $tenantId, ?int $callerOuId, int $projectId, string $body): Response
     {
         $decoded = json_decode($body, true);
         $name = is_array($decoded) ? trim((string) ($decoded['name'] ?? '')) : '';
@@ -59,7 +81,7 @@ final class SectionsApiHandler
             return Response::error('name must be a non-empty string of at most ' . self::MAX_NAME_LENGTH . ' characters', 400);
         }
 
-        if (!$this->projectExists($tenantId, $projectId)) {
+        if (!$this->projectVisible($tenantId, $callerOuId, $projectId)) {
             return Response::error('Project not found', 404);
         }
 
@@ -90,7 +112,11 @@ final class SectionsApiHandler
             }
 
             return Response::json(['data' => $this->toPublicSection($row)], 201);
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
+            if (self::isUniqueViolation($e)) {
+                return Response::error('A section with this name already exists', 409);
+            }
+
             return Response::error('Failed to create section', 500);
         }
     }
@@ -177,12 +203,41 @@ final class SectionsApiHandler
         }
     }
 
-    private function projectExists(int $tenantId, int $projectId): bool
+    /**
+     * Whether $projectId exists, belongs to $tenantId, AND is within
+     * $callerOuId's OU-descendant scope — byte-for-byte the same query shape
+     * as {@see ProjectsApiHandler::findScoped()}: one static SQL template via
+     * {@see OuScopeResolver::whereFragment()}, called unconditionally (never a
+     * runtime-branched query). See this class's own docblock for why this
+     * confines list()/create() to a real PostgreSQL connection.
+     */
+    private function projectVisible(int $tenantId, ?int $callerOuId, int $projectId): bool
     {
-        $stmt = $this->db->prepare('SELECT id FROM tasker_projects WHERE id = :id AND tenant_id = :tenant_id');
-        $stmt->execute([':id' => $projectId, ':tenant_id' => $tenantId]);
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT 1 FROM tasker_projects WHERE id = :id AND tenant_id = :tenant_id AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $projectId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
 
         return $stmt->fetch() !== false;
+    }
+
+    /**
+     * Whether $e was thrown for a unique-constraint violation (PostgreSQL
+     * SQLSTATE 23505) — e.g. a duplicate (project_id, slug), the
+     * always-reproducible "Backlog" auto-collision case. Duplicated per
+     * handler rather than shared — see
+     * {@see ProjectsApiHandler::isUniqueViolation()}'s own doc for why.
+     */
+    private static function isUniqueViolation(\Throwable $e): bool
+    {
+        return $e instanceof \PDOException && $e->getCode() === '23505';
     }
 
     /**

@@ -5,8 +5,18 @@ declare(strict_types=1);
 namespace Tasker\Api;
 
 use PDO;
+use Tasker\Access\OuScopeResolver;
 use Whity\Sdk\Http\Response;
 
+/**
+ * REGRESSION FIX (whole-branch review finding C1): get()/put()'s
+ * task-existence check used to be tenant-scoped only, even though {id}=task
+ * is a path parameter, not a discovered value. It is now OU-aware, joining
+ * through tasker_tasks to tasker_projects (the only table with an ou_id
+ * column) and applying OuScopeResolver there — the same static-SQL-template
+ * pattern used throughout this fix. Confines both methods to a real
+ * PostgreSQL connection (see TenantIsolationOuTest).
+ */
 final class TaskDiscussionsApiHandler
 {
     private PDO $db;
@@ -23,11 +33,9 @@ final class TaskDiscussionsApiHandler
      * app's lazy-creation-on-first-use semantics without needing a row to
      * pre-exist for every task.
      */
-    public function get(int $tenantId, int $taskId): Response
+    public function get(int $tenantId, ?int $callerOuId, int $taskId): Response
     {
-        $task = $this->db->prepare('SELECT id FROM tasker_tasks WHERE id = :id AND tenant_id = :tenant_id');
-        $task->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
-        if ($task->fetch() === false) {
+        if (!$this->taskVisible($tenantId, $callerOuId, $taskId)) {
             return Response::error('Task not found', 404);
         }
 
@@ -59,7 +67,7 @@ final class TaskDiscussionsApiHandler
      * if unusual, payload) is what actually catches a JSON-array body like
      * `[1,2,3]` that `is_array()` alone would let through as if it were `{}`.
      */
-    public function put(int $tenantId, int $taskId, string $body): Response
+    public function put(int $tenantId, ?int $callerOuId, int $taskId, string $body): Response
     {
         $decoded = json_decode($body, true);
         if (!is_array($decoded) || ($decoded !== [] && array_is_list($decoded))) {
@@ -70,14 +78,23 @@ final class TaskDiscussionsApiHandler
             return Response::error('reason must be a string', 400);
         }
 
+        // REGRESSION FIX (whole-branch review data-loss guard finding): a
+        // structurally-valid body whose `messages` field was present but the
+        // WRONG TYPE (e.g. a string) used to silently fall back to `[]` and
+        // overwrite an existing conversation's real messages with an empty
+        // array. Mirrors the `reason` guard immediately above: 400 BEFORE
+        // touching the database, rather than coercing to a safe-looking
+        // default that quietly destroys data.
+        if (isset($decoded['messages']) && !is_array($decoded['messages'])) {
+            return Response::error('messages must be an array', 400);
+        }
+
         $messages = isset($decoded['messages']) && is_array($decoded['messages'])
             ? $decoded['messages']
             : [];
         $reason = isset($decoded['reason']) ? (string) $decoded['reason'] : null;
 
-        $task = $this->db->prepare('SELECT id FROM tasker_tasks WHERE id = :id AND tenant_id = :tenant_id');
-        $task->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
-        if ($task->fetch() === false) {
+        if (!$this->taskVisible($tenantId, $callerOuId, $taskId)) {
             return Response::error('Task not found', 404);
         }
 
@@ -100,10 +117,36 @@ final class TaskDiscussionsApiHandler
                 ':reason' => $reason,
             ]);
 
-            return $this->get($tenantId, $taskId);
+            return $this->get($tenantId, $callerOuId, $taskId);
         } catch (\Throwable) {
             return Response::error('Failed to save discussion', 500);
         }
+    }
+
+    /**
+     * Whether $taskId exists, belongs to $tenantId, AND its OWN PROJECT is
+     * within $callerOuId's OU-descendant scope. tasker_tasks itself carries
+     * no ou_id column, so this joins up to tasker_projects (the only table
+     * that does) and applies {@see OuScopeResolver::whereFragment()} there —
+     * the same static-SQL-template pattern used throughout this fix.
+     */
+    private function taskVisible(int $tenantId, ?int $callerOuId, int $taskId): bool
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT 1 FROM tasker_tasks t
+             JOIN tasker_projects p ON p.id = t.project_id
+             WHERE t.id = :id AND t.tenant_id = :tenant_id AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        return $stmt->fetch() !== false;
     }
 
     private static function generateUuidV4(): string

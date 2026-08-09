@@ -5,8 +5,26 @@ declare(strict_types=1);
 namespace Tasker\Api;
 
 use PDO;
+use Tasker\Access\OuScopeResolver;
 use Whity\Sdk\Http\Response;
 
+/**
+ * REGRESSION FIX (whole-branch review finding I7): listForTask() used to have
+ * NO existence check on its parent {taskId} at all — a nonexistent or
+ * cross-tenant task returned `200 []` instead of 404, unlike
+ * SectionsApiHandler::list()/GroupsApiHandler::list(). It now 404s for a
+ * missing/cross-tenant parent, tenant-scoped only (list_milestones by task id
+ * is explicitly NOT part of finding C1's OU-scoping fix — only its sibling
+ * add_milestone route is; see create()'s own doc).
+ *
+ * REGRESSION FIX (whole-branch review finding C1): create()'s task-existence
+ * check used to be tenant-scoped only, even though {taskId} is a path
+ * parameter. It is now OU-aware, joining through tasker_tasks to
+ * tasker_projects (the only table with an ou_id column) and applying
+ * OuScopeResolver there — confines create() to a real PostgreSQL connection
+ * (see TenantIsolationOuTest). listForTask() deliberately stays tenant-only
+ * per I7's own note above.
+ */
 final class MilestonesApiHandler
 {
     private const MAX_SUMMARY_LENGTH = 1000;
@@ -20,6 +38,10 @@ final class MilestonesApiHandler
 
     public function listForTask(int $tenantId, int $taskId): Response
     {
+        if (!$this->taskExistsInTenant($tenantId, $taskId)) {
+            return Response::error('Task not found', 404);
+        }
+
         try {
             $idCol = $this->idColumn();
             $stmt = $this->db->prepare(
@@ -39,7 +61,7 @@ final class MilestonesApiHandler
         }
     }
 
-    public function create(int $tenantId, int $taskId, string $body): Response
+    public function create(int $tenantId, ?int $callerOuId, int $taskId, string $body): Response
     {
         $decoded = json_decode($body, true);
         $summary = is_array($decoded) ? trim((string) ($decoded['summary'] ?? '')) : '';
@@ -48,9 +70,7 @@ final class MilestonesApiHandler
         }
         $sortOrder = is_array($decoded) && isset($decoded['sort_order']) ? (int) $decoded['sort_order'] : 0;
 
-        $task = $this->db->prepare('SELECT id FROM tasker_tasks WHERE id = :id AND tenant_id = :tenant_id');
-        $task->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
-        if ($task->fetch() === false) {
+        if (!$this->taskVisible($tenantId, $callerOuId, $taskId)) {
             return Response::error('Task not found', 404);
         }
 
@@ -180,6 +200,45 @@ final class MilestonesApiHandler
         } catch (\Throwable) {
             return Response::error('Failed to toggle milestone', 500);
         }
+    }
+
+    /**
+     * Whether $taskId exists and belongs to $tenantId — tenant-scoped only,
+     * per I7's own note (listForTask() is explicitly not part of C1's
+     * OU-scoping fix).
+     */
+    private function taskExistsInTenant(int $tenantId, int $taskId): bool
+    {
+        $stmt = $this->db->prepare('SELECT 1 FROM tasker_tasks WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
+
+        return $stmt->fetch() !== false;
+    }
+
+    /**
+     * Whether $taskId exists, belongs to $tenantId, AND its OWN PROJECT is
+     * within $callerOuId's OU-descendant scope. tasker_tasks itself carries
+     * no ou_id column, so this joins up to tasker_projects (the only table
+     * that does) and applies {@see OuScopeResolver::whereFragment()} there —
+     * the same static-SQL-template pattern used throughout this fix.
+     */
+    private function taskVisible(int $tenantId, ?int $callerOuId, int $taskId): bool
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT 1 FROM tasker_tasks t
+             JOIN tasker_projects p ON p.id = t.project_id
+             WHERE t.id = :id AND t.tenant_id = :tenant_id AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        return $stmt->fetch() !== false;
     }
 
     private static function generateUuidV4(): string

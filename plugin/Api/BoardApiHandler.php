@@ -55,6 +55,19 @@ final class BoardApiHandler
         $taskIds = array_map(static fn (array $t): int => (int) $t['id'], $tasks);
         $milestonesByTask = $this->fetchMilestonesGroupedByTask($tenantId, $taskIds);
 
+        // The set of group ids actually present in $groups (fetched above,
+        // scoped to this project's own sections) — used below as a defensive
+        // fallback (whole-branch review finding I1) for a task whose group_id
+        // does not resolve to any group in that set. This should not happen
+        // going forward (move()'s own I1 fix keeps group_id/section_id
+        // consistent at write time), but a task carrying a dangling/foreign
+        // group_id must still render somewhere sane rather than being
+        // silently dropped from the response entirely.
+        $validGroupIds = [];
+        foreach ($groups as $group) {
+            $validGroupIds[(int) $group['id']] = true;
+        }
+
         $tasksBySection = [];
         $tasksByGroup = [];
         foreach ($tasks as $task) {
@@ -62,9 +75,12 @@ final class BoardApiHandler
             $sectionId = (int) $task['section_id'];
             $groupId = $task['group_id'] !== null ? (int) $task['group_id'] : null;
 
-            if ($groupId !== null) {
+            if ($groupId !== null && isset($validGroupIds[$groupId])) {
                 $tasksByGroup[$groupId][] = $task;
             } else {
+                // Either genuinely ungrouped, OR group_id doesn't resolve to
+                // any group in this project (dangling/invalid) — either way,
+                // surface it under its OWN section rather than dropping it.
                 $tasksBySection[$sectionId][] = $task;
             }
         }

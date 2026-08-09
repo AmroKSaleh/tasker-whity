@@ -22,6 +22,14 @@ use Whity\Sdk\Http\Response;
  * would be redundant. readyWork() is the one exception: it is reached
  * directly by project id, not through a task the caller already holds, so
  * it re-derives and checks OU visibility itself, exactly like get_board.
+ *
+ * create()'s section-existence check is ALSO OU-aware (whole-branch review
+ * finding C1): {sectionId} is a path parameter, not a discovered value, so
+ * that one check (unlike the single-task-id mutations above) must confirm
+ * the section's own project is within the caller's OU scope, not merely
+ * their tenant — see create()'s own inline comment. listForSection() by
+ * contrast stays tenant-scoped only (finding I7): it is explicitly out of
+ * C1's approved scope.
  */
 final class TasksApiHandler
 {
@@ -39,8 +47,21 @@ final class TasksApiHandler
         $this->db = $db;
     }
 
+    /**
+     * REGRESSION FIX (whole-branch review finding I7): this used to have NO
+     * existence check on its parent {sectionId} at all — a nonexistent or
+     * cross-tenant section returned `200 []` instead of 404, unlike
+     * SectionsApiHandler::list()/GroupsApiHandler::list(). Tenant-scoped
+     * only, matching the established parent-existence-check pattern
+     * (list_tasks by section id is explicitly NOT part of finding C1's
+     * OU-scoping fix — only its sibling create_task route is).
+     */
     public function listForSection(int $tenantId, int $sectionId): Response
     {
+        if (!$this->sectionExistsInTenant($tenantId, $sectionId)) {
+            return Response::error('Section not found', 404);
+        }
+
         try {
             $idCol = $this->idColumn();
             $stmt = $this->db->prepare(
@@ -61,7 +82,7 @@ final class TasksApiHandler
         }
     }
 
-    public function create(int $tenantId, int $sectionId, int $createdBy, string $body): Response
+    public function create(int $tenantId, ?int $callerOuId, int $sectionId, int $createdBy, string $body): Response
     {
         $decoded = json_decode($body, true);
         $text = is_array($decoded) ? trim((string) ($decoded['text'] ?? '')) : '';
@@ -86,8 +107,26 @@ final class TasksApiHandler
             }
         }
 
-        $section = $this->db->prepare('SELECT id, project_id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id');
-        $section->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+        // REGRESSION FIX (whole-branch review finding C1): {sectionId} is a
+        // path parameter, not a discovered value, and tasker_sections.id is a
+        // plain sequential id — so this existence check must be OU-aware, not
+        // merely tenant-scoped, exactly like SectionsApiHandler/
+        // GroupsApiHandler's own list()/create() fixes. tasker_sections
+        // carries no ou_id column, so this joins up to tasker_projects (the
+        // only table that does) and applies OuScopeResolver there. Confines
+        // create() to a real PostgreSQL connection — see TenantIsolationOuTest.
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+        $section = $this->db->prepare(
+            "SELECT s.id, s.project_id FROM tasker_sections s
+             JOIN tasker_projects p ON p.id = s.project_id
+             WHERE s.id = :id AND s.tenant_id = :tenant_id AND {$ouClause}"
+        );
+        $section->bindValue(':id', $sectionId, PDO::PARAM_INT);
+        $section->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $section->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $section->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $section->execute();
         $sectionRow = $section->fetch(PDO::FETCH_ASSOC);
         if (!is_array($sectionRow)) {
             return Response::error('Section not found', 404);
@@ -213,6 +252,22 @@ final class TasksApiHandler
      * groups within the SAME project only; there is no cross-project move in
      * this plan (moving a task's project_id would need to reconcile it
      * against a different OU/project scope entirely, out of D1's scope).
+     *
+     * REGRESSION FIX (whole-branch review finding I1): section_id and
+     * group_id used to be validated INDEPENDENTLY of each other — group_id
+     * only had to belong to the task's own PROJECT, never to its (possibly
+     * newly-changed) section_id. Moving a task to a different section while
+     * a group_id from the OLD section was left in place made
+     * BoardApiHandler::get() render it under the OLD section (it places a
+     * task by its group's section, not the task's own section_id) while
+     * listForSection() for the NEW section returned it — the two read paths
+     * disagreed. Now: when section_id changes and group_id is NOT supplied
+     * in the SAME request, group_id is cleared to null (the task becomes
+     * ungrouped in its new section — the old group has no relationship to
+     * the new one). When group_id IS supplied, it is validated against the
+     * TARGET section (the new section_id if this same request is also
+     * changing it, otherwise the task's current section_id) — 422 if it
+     * doesn't belong there.
      */
     public function move(int $tenantId, int $taskId, string $body): Response
     {
@@ -230,7 +285,14 @@ final class TasksApiHandler
         $fields = [];
         $params = [':id' => $taskId, ':tenant_id' => $tenantId];
 
-        if (array_key_exists('section_id', $decoded)) {
+        $sectionChanging = array_key_exists('section_id', $decoded);
+        $groupProvided = array_key_exists('group_id', $decoded);
+        // The section a supplied group_id must belong to: the NEW section_id
+        // if this same request is also changing it, otherwise the task's
+        // current (unchanged) section_id.
+        $targetSectionId = (int) $row['section_id'];
+
+        if ($sectionChanging) {
             $sectionId = (int) $decoded['section_id'];
             $section = $this->db->prepare(
                 'SELECT id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id AND project_id = :project_id'
@@ -241,23 +303,35 @@ final class TasksApiHandler
             }
             $fields[] = 'section_id = :section_id';
             $params[':section_id'] = $sectionId;
+            $targetSectionId = $sectionId;
         }
-        if (array_key_exists('group_id', $decoded)) {
+
+        if ($groupProvided) {
             $groupId = $decoded['group_id'] !== null ? (int) $decoded['group_id'] : null;
             if ($groupId !== null) {
+                // Validated against the TARGET section directly (tasker_groups
+                // already stores section_id) — not merely the task's project —
+                // so a group_id from a different section can never be attached,
+                // even if that section belongs to the same project.
                 $group = $this->db->prepare(
-                    'SELECT g.id FROM tasker_groups g
-                     JOIN tasker_sections s ON s.id = g.section_id
-                     WHERE g.id = :id AND g.tenant_id = :tenant_id AND s.project_id = :project_id'
+                    'SELECT id FROM tasker_groups WHERE id = :id AND tenant_id = :tenant_id AND section_id = :section_id'
                 );
-                $group->execute([':id' => $groupId, ':tenant_id' => $tenantId, ':project_id' => $projectId]);
+                $group->execute([':id' => $groupId, ':tenant_id' => $tenantId, ':section_id' => $targetSectionId]);
                 if ($group->fetch() === false) {
-                    return Response::error('group_id must belong to the task\'s own project', 422);
+                    return Response::error('group_id must belong to the target section', 422);
                 }
             }
             $fields[] = 'group_id = :group_id';
             $params[':group_id'] = $groupId;
+        } elseif ($sectionChanging) {
+            // section_id changed but group_id was not supplied in the same
+            // request: the task's old group has no relationship to the new
+            // section, so it becomes ungrouped rather than silently keeping a
+            // stale, cross-section group_id.
+            $fields[] = 'group_id = :group_id';
+            $params[':group_id'] = null;
         }
+
         if (array_key_exists('sort_order', $decoded)) {
             $fields[] = 'sort_order = :sort_order';
             $params[':sort_order'] = (int) $decoded['sort_order'];
@@ -534,6 +608,19 @@ final class TasksApiHandler
         } catch (\Throwable) {
             return Response::error('Failed to fetch ready work', 500);
         }
+    }
+
+    /**
+     * Whether $sectionId exists and belongs to $tenantId — tenant-scoped
+     * only, per this method's own I7 note (listForSection() is explicitly
+     * not part of C1's OU-scoping fix).
+     */
+    private function sectionExistsInTenant(int $tenantId, int $sectionId): bool
+    {
+        $stmt = $this->db->prepare('SELECT 1 FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id');
+        $stmt->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+
+        return $stmt->fetch() !== false;
     }
 
     private function isProjectVisible(int $tenantId, ?int $callerOuId, int $projectId): bool

@@ -124,8 +124,12 @@ final class ProjectsApiHandler
             ]);
 
             $this->db->commit();
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
             $this->db->rollBack();
+            if (self::isUniqueViolation($e)) {
+                return Response::error('A project with this name already exists', 409);
+            }
+
             return Response::error('Failed to create project', 500);
         }
 
@@ -259,11 +263,27 @@ final class ProjectsApiHandler
      * tenant) — a null ou_id is strictly WIDER than any non-null OU scope,
      * so it must be treated as its own case, not skipped as "no OU to
      * check".
+     *
+     * REGRESSION FIX (whole-branch review finding I5): a tenant-root caller
+     * ($callerOuId === null) used to short-circuit straight to `true` for
+     * ANY concrete $ouId, with no check that it actually exists — let alone
+     * that it belongs to the caller's own tenant. Since tasker_projects.ou_id
+     * carries no FK to organizational_units, a tenant-root caller could
+     * silently assign a nonexistent or foreign-tenant ou_id, orphaning the
+     * project (invisible to every OU-restricted caller, visible only via
+     * tenant-root) with no diagnostic at all. A concrete $ouId is now always
+     * existence-checked against the caller's OWN tenant, even on this
+     * branch; only a null $ouId (tenant-root leaving/setting the project
+     * tenant-wide) skips the check, since there is no OU row to validate.
      */
     private function ouIsInCallersScope(int $tenantId, ?int $callerOuId, ?int $ouId): bool
     {
         if ($callerOuId === null) {
-            return true; // unrestricted (tenant-root) caller may assign anywhere, including null.
+            if ($ouId === null) {
+                return true; // unrestricted (tenant-root) caller may leave/set the project tenant-wide.
+            }
+
+            return $this->ouExistsInTenant($tenantId, $ouId);
         }
 
         // An OU-restricted caller can never produce a null ou_id: that would
@@ -273,6 +293,36 @@ final class ProjectsApiHandler
         }
 
         return in_array($ouId, OuScopeResolver::descendantIds($this->db, $tenantId, $callerOuId), true);
+    }
+
+    /**
+     * Whether $ouId exists at all, and belongs to $tenantId — the tenant-root
+     * caller's own scope-check, tenant-only (an OU either exists in the
+     * tenant or it doesn't; no OuScopeResolver/descendant traversal is
+     * meaningful here), so this is portable and needs no Postgres-only
+     * syntax.
+     */
+    private function ouExistsInTenant(int $tenantId, int $ouId): bool
+    {
+        $stmt = $this->db->prepare('SELECT 1 FROM organizational_units WHERE id = :ou_id AND tenant_id = :tenant_id');
+        $stmt->execute([':ou_id' => $ouId, ':tenant_id' => $tenantId]);
+
+        return $stmt->fetch() !== false;
+    }
+
+    /**
+     * Whether $e was thrown for a unique-constraint violation (PostgreSQL
+     * SQLSTATE 23505) — e.g. a duplicate (tenant_id, slug). Confirmed
+     * empirically against a real pdo_pgsql connection: PDOException::getCode()
+     * returns the SQLSTATE string directly for a failed statement, so no
+     * errorInfo[] lookup is needed. Duplicated per handler (ProjectsApiHandler/
+     * SectionsApiHandler/GroupsApiHandler) rather than shared, matching this
+     * codebase's existing convention for small driver-specific helpers (see
+     * idColumn()/generateUuidV4()/dbTruthy() elsewhere in this plugin).
+     */
+    private static function isUniqueViolation(\Throwable $e): bool
+    {
+        return $e instanceof \PDOException && $e->getCode() === '23505';
     }
 
     /**
