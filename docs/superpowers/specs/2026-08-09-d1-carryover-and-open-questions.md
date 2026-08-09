@@ -58,11 +58,15 @@ D1's acceptance criterion was satisfied literally — 34 tools exist and the dri
 
 3. **New response codes undocumented in route schemas.** `create_project`/`create_section`/`create_group` now return 409 but declare only 201/400/404/422; `set_task_discussion` gained a 400 path it doesn't declare. Separately, several 404 descriptions still read "not found in the caller's tenant" when the OU fix made them tenant-*or*-OU — `list_groups` was updated to say "tenant or OU scope" but its siblings weren't.
 
-4. **`phpunit.xml` lacks `failOnSkipped="true"`.** If the CI Postgres service, DSN, or `pdo_pgsql` step ever regresses, the 62 OU tests fall back to `markTestSkipped()` and the build stays green — the exact silent-coverage-loss failure mode that made the CI gap a Critical finding in the first place. Adding this flag makes that fix self-enforcing.
+4. ~~**`phpunit.xml` lacks `failOnSkipped="true"`.**~~ **FIXED** (`07a9fdf`). CI's PHPUnit invocation now passes `--fail-on-skipped`, deliberately at the invocation rather than in `phpunit.xml`: CI guarantees the Postgres service, so a skip there means the service/DSN/`pdo_pgsql` regressed, while locally the same skip is legitimate (host may be down).
 
 5. **Two test micro-weakenings from the SQLite→Postgres migration.** A `COUNT(*) === 1` assertion was dropped from the discussion malformed-body test (the no-duplicate property is covered by an adjacent test), and the cross-*project* group rejection is now only logically subsumed by the cross-*section* test rather than directly asserted.
 
-6. **Local `TenantIsolationOuTest` runs silently skip on a fresh machine.** The DSN now defaults to `dbname=tasker_test`, which doesn't exist until someone runs `createdb tasker_test`. CI creates it; local developers get 62 silent skips with no signal. A README line or an npm script would close the loop.
+6. ~~**Local `TenantIsolationOuTest` runs silently skip on a fresh machine.**~~ **FIXED** (`07a9fdf`). This one bit for real during the core bump: `npm run plugin:test` reported `OK (128 tests)` while silently skipping 62 of them, because `tasker_test` didn't exist. `host/scripts/plugin-test.ps1` now creates it when the Postgres container is up.
+
+7. ~~**`npm run mcp:check` fails with a bare 401 unless `INITIAL_ADMIN_PASSWORD` is exported.**~~ **FIXED** (`07a9fdf`). `mcp-tools.ps1` read the password only from the shell environment and fell back to a stale `admin123`, never reading `host/.env` where it actually lives and gets rotated — producing a 401 that reads like a broken MCP surface rather than a credential problem. It now falls back to that file before the seed default.
+
+8. **Deleting a tagged task or ping leaves an orphaned `entity_tags` row.** Pre-existing (not a bump regression), but the bumped core now offers `EntityTagRepository::detachAll(int $tenantId, string $entityType, int $entityId): int` as an opt-in cleanup. The plugin's delete handlers should call it. Small, self-contained.
 
 ---
 
@@ -74,8 +78,14 @@ D1's acceptance criterion was satisfied literally — 34 tools exist and the dri
 
 ---
 
-## 5. Next immediate task (not part of D2)
+## 5. whity-core pin bump — DONE
 
-**Bump the whity-core pin.** `host/core.version` is at `d4c74cd`; upstream is 60 commits ahead, SDK 1.14.0 → 1.16.0. Changes that touch Tasker's surface: WC-712 (plugin-accessible permission resolution), WC-714 (entity-tag cleanup on taxonomy deletes — interacts with Tasker's own cascade deletes), atomic entity-deletion hooks, plus new i18n and error-tracking subsystems.
+Completed `2026-08-09` in commits `026d59d` (the pin) and `07a9fdf` (tooling reliability). `host/core.version` moved `d4c74cd` → `cc126f6` — 60 upstream commits, SDK 1.14.0 → 1.16.0.
 
-Verified already: `EntityTagRepository::attach()` and `TagRepository::find()` — the only two core APIs Tasker calls directly — have unchanged signatures, and the SDK moved by minor versions (additive under semver). So the bump is expected to be low-risk, but it should be done as its own focused change with the core version as the only variable, so any breakage is unambiguously attributable.
+**Outcome: zero plugin-side code changes required.** Full suite stayed at 128 tests / 242 assertions, PHPStan clean at level 6, and the MCP tool surface showed **zero drift** (34 tools, byte-identical to the committed snapshot). A live HTTP board flow — login → project → auto-created Backlog section → task → tag → complete → milestone → toggle → board composition — passed end to end on the bumped core, and core's 13 new migrations ran cleanly alongside Tasker's 9.
+
+Worth knowing about the new core even though nothing broke:
+
+- `profiles` no longer has an `email` column — addresses moved to a `profile_emails` table (with `is_primary`), and `profiles` gained `status` and `language_code` from the user-status and i18n work. Tasker never touched those columns, which is why the bump was invisible to it, but anything querying profiles directly in a later slice needs the new shape.
+- `EntityTagRepository::attach()`, `TagRepository::find()`, `AuditLogger`, and `MembershipRepository::findByProfile()` — every core API Tasker actually calls — are unchanged across the entire 60-commit range.
+- WC-714's new entity-tag cleanup is **opt-in**, so it did not silently alter Tasker's cascade deletes. See item 8 above for the cleanup opportunity it opens up.
