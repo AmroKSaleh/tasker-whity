@@ -232,7 +232,7 @@ export default function TaskItem({
                     {onPin && (
                       <button
                         onClick={() => onPin(task.id)}
-                        title={task.pinned ? 'Remove top priority' : 'Set as top priority'}
+                        title={task.pinned ? 'Remove critical' : 'Mark as critical'}
                         className={`w-7 h-7 flex items-center justify-center rounded text-[13px] transition-colors ${
                           task.pinned ? 'text-star' : 'text-mute hover:text-star'
                         }`}

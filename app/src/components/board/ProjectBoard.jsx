@@ -172,7 +172,7 @@ function BoardCard({ task, prefix, onOpen, onToggle, onToggleIP, onFocus, onPin,
         <div className="flex items-center gap-0.5 shrink-0 -mt-0.5 -mr-0.5">
           <button
             onClick={e => { e.stopPropagation(); onPin(task.id) }}
-            title={task.pinned ? 'Unpin' : 'Pin to top'}
+            title={task.pinned ? 'Remove critical' : 'Mark as critical'}
             className={clsx('w-5 h-5 inline-flex items-center justify-center transition-opacity', task.pinned ? 'text-star' : 'opacity-0 group-hover:opacity-100 text-mute-2 hover:text-star')}
           >
             <Star size={12} fill={task.pinned ? 'currentColor' : 'none'} />

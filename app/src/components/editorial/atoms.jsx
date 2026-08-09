@@ -121,7 +121,7 @@ export function TaskRow({ task, onToggle, onToggleInProgress, onOpen, onStar, de
       )}
       <button
         onClick={e => { e.stopPropagation(); onStar?.(task) }}
-        title={task.pinned ? 'Unpin' : 'Pin to top'}
+        title={task.pinned ? 'Remove critical' : 'Mark as critical'}
         className={clsx(
           'w-[22px] h-[22px] inline-flex items-center justify-center transition-opacity',
           task.pinned ? 'opacity-100 text-star' : 'opacity-0 group-hover:opacity-100 text-mute-2 hover:text-star',
