@@ -3,10 +3,15 @@ import { supabase } from '../lib/supabase'
 import { restoreOrganization } from '../lib/organizations'
 import { restoreEnvironment } from '../lib/environments'
 import AppShell from '../components/editorial/AppShell'
+import { Kicker } from '../components/editorial/atoms'
+
+const itemKey = item => `${item.type}-${item.id}`
 
 export default function RecycleBinPage() {
   const [deletedItems, setDeletedItems] = useState([])
   const [loading, setLoading] = useState(true)
+  const [selected, setSelected] = useState(() => new Set())
+  const [busy, setBusy] = useState(false)
 
   async function fetchDeletedItems() {
     setLoading(true)
@@ -36,18 +41,61 @@ export default function RecycleBinPage() {
     // Sort by deleted_at descending
     items.sort((a, b) => new Date(b.deleted_at) - new Date(a.deleted_at))
     setDeletedItems(items)
+    // Drop selections whose rows are gone, so a stale key cannot survive a refetch and make the
+    // select-all state disagree with what is on screen.
+    setSelected(prev => {
+      const live = new Set(items.map(itemKey))
+      const next = new Set([...prev].filter(k => live.has(k)))
+      return next.size === prev.size ? prev : next
+    })
     setLoading(false)
+  }
+
+  function toggleOne(item) {
+    setSelected(prev => {
+      const next = new Set(prev)
+      const k = itemKey(item)
+      next.has(k) ? next.delete(k) : next.add(k)
+      return next
+    })
+  }
+
+  const allSelected = deletedItems.length > 0 && selected.size === deletedItems.length
+  function toggleAll() {
+    setSelected(allSelected ? new Set() : new Set(deletedItems.map(itemKey)))
+  }
+
+  const selectedItems = deletedItems.filter(i => selected.has(itemKey(i)))
+
+  async function restoreSelected() {
+    setBusy(true)
+    try { for (const item of selectedItems) await restoreOne(item) }
+    finally { setBusy(false); setSelected(new Set()); fetchDeletedItems() }
+  }
+
+  async function hardDeleteSelected() {
+    const n = selectedItems.length
+    if (!window.confirm(`Permanently delete ${n} item${n === 1 ? '' : 's'}? This cannot be undone.`)) return
+    setBusy(true)
+    // Containers last: purging an organization cascades its environments away, which would null
+    // environment_id on any project in the same selection that has not been purged yet.
+    const order = { task: 0, flow: 1, project: 2, environment: 3, organization: 4 }
+    const ordered = [...selectedItems].sort((a, b) => (order[a.type] ?? 9) - (order[b.type] ?? 9))
+    try { for (const item of ordered) await hardDeleteOne(item) }
+    finally { setBusy(false); setSelected(new Set()); fetchDeletedItems() }
   }
 
   useEffect(() => {
     fetchDeletedItems()
   }, [])
 
-  async function restoreItem(item) {
+  // The *One helpers do the work WITHOUT refetching, so a bulk action can run many of them and
+  // refresh once at the end instead of once per item.
+  async function restoreOne(item) {
     // Containers restore their whole cascade AND any still-deleted ancestor, so a restored row
     // is never left pointing at an invisible parent.
-    if (item.type === 'organization') { await restoreOrganization(item.id); fetchDeletedItems(); return }
-    if (item.type === 'environment') { await restoreEnvironment(item.id); fetchDeletedItems(); return }
+    if (item.type === 'organization') return restoreOrganization(item.id)
+    if (item.type === 'environment') return restoreEnvironment(item.id)
 
     let table = ''
     if (item.type === 'task') table = 'tasks'
@@ -61,6 +109,10 @@ export default function RecycleBinPage() {
       await supabase.from('environments').update({ is_deleted: false, deleted_at: null, deleted_cascade_id: null })
         .eq('id', item.environment_id).eq('is_deleted', true)
     }
+  }
+
+  async function restoreItem(item) {
+    await restoreOne(item)
     fetchDeletedItems()
   }
 
@@ -68,7 +120,11 @@ export default function RecycleBinPage() {
     if (!window.confirm(`Are you sure you want to permanently delete this ${item.type}? This cannot be undone.`)) {
       return
     }
-    
+    await hardDeleteOne(item)
+    fetchDeletedItems()
+  }
+
+  async function hardDeleteOne(item) {
     if (item.type === 'task') {
       await Promise.all([
         supabase.from('task_discussions').delete().eq('task_id', item.id),
@@ -103,8 +159,6 @@ export default function RecycleBinPage() {
       if (item.type === 'environment') await supabase.from('environments').delete().eq('id', item.id)
       else await supabase.from('organizations').delete().eq('id', item.id)
     }
-
-    fetchDeletedItems()
   }
 
   async function hardDeleteProject(projectId) {
@@ -130,48 +184,78 @@ export default function RecycleBinPage() {
 
   return (
     <AppShell active="recycle-bin">
-      <div className="flex-1 min-h-0 flex flex-col p-8 overflow-y-auto">
-        <div className="max-w-4xl w-full mx-auto">
-          <h1 className="text-3xl font-light text-slate-100 tracking-tight mb-2">Recycle Bin</h1>
-          <p className="text-slate-400 mb-8 font-light">Items here will be permanently deleted after 7 days.</p>
+      <div className="max-w-4xl mx-auto px-7 pt-8 pb-16">
+        <header className="mb-7">
+          <Kicker count={deletedItems.length} className="mb-2">RECYCLE BIN</Kicker>
+          <h1 className="text-h1 m-0">Recycle Bin.</h1>
+          <p className="text-[13px] text-mute mt-2">Anything here is permanently deleted after 7 days. Restoring a container brings its contents back with it.</p>
+        </header>
 
-          {loading ? (
-            <div className="text-slate-400 font-light">Loading deleted items...</div>
-          ) : deletedItems.length === 0 ? (
-            <div className="text-slate-400 font-light">The recycle bin is empty.</div>
-          ) : (
-            <div className="space-y-2">
-              {deletedItems.map((item) => (
-                <div key={`${item.type}-${item.id}`} className="bg-slate-800/40 rounded-lg p-4 flex items-center justify-between border border-slate-700/50">
-                  <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
-                      <span className="text-xs font-medium text-slate-500 uppercase tracking-wider">{item.type}</span>
-                      <span className="text-xs text-orange-400/80 bg-orange-400/10 px-2 py-0.5 rounded-full">
-                        {getDaysRemaining(item.deleted_at)} days left
-                      </span>
-                    </div>
-                    <div className="text-slate-200 truncate pr-4">{item.label}</div>
-                  </div>
-                  
-                  <div className="flex items-center gap-3 shrink-0">
-                    <button 
-                      onClick={() => restoreItem(item)}
-                      className="text-sm font-medium text-blue-400 hover:text-blue-300 transition-colors"
-                    >
-                      Restore
-                    </button>
-                    <button 
-                      onClick={() => hardDeleteItem(item)}
-                      className="text-sm font-medium text-red-400 hover:text-red-300 transition-colors"
-                    >
-                      Delete Forever
-                    </button>
-                  </div>
+        {loading ? (
+          <p className="text-[13px] text-mute">Loading deleted items…</p>
+        ) : deletedItems.length === 0 ? (
+          <div className="flex flex-col items-center justify-center py-24 text-center">
+            <p className="text-[32px] mb-3 opacity-30">🗑</p>
+            <p className="text-[15px] font-semibold text-ink mb-1">The recycle bin is empty</p>
+            <p className="text-[13px] text-mute">Deleted items land here and stay recoverable for 7 days.</p>
+          </div>
+        ) : (
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-3 px-4 py-2.5 rounded-lg bg-surf-2 border border-line-2">
+              <label className="flex items-center gap-2.5 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={allSelected}
+                  ref={el => { if (el) el.indeterminate = selected.size > 0 && !allSelected }}
+                  onChange={toggleAll}
+                  className="w-4 h-4 accent-accent cursor-pointer"
+                />
+                <span className="text-[13px] text-ink-2">
+                  {selected.size > 0 ? `${selected.size} selected` : `Select all (${deletedItems.length})`}
+                </span>
+              </label>
+
+              {selected.size > 0 && (
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={restoreSelected} disabled={busy} className="btn btn-sm disabled:opacity-40">
+                    {busy ? 'Working…' : `Restore ${selected.size}`}
+                  </button>
+                  <button onClick={hardDeleteSelected} disabled={busy} className="btn-delete btn-sm disabled:opacity-40">
+                    Delete {selected.size} permanently
+                  </button>
                 </div>
-              ))}
+              )}
             </div>
-          )}
-        </div>
+
+            {deletedItems.map((item) => (
+              <div key={itemKey(item)} className={`rounded-lg p-4 flex items-center gap-4 border transition-colors ${
+                selected.has(itemKey(item)) ? 'bg-accent-soft border-accent-edge' : 'bg-paper border-line-2'
+              }`}>
+                <input
+                  type="checkbox"
+                  checked={selected.has(itemKey(item))}
+                  onChange={() => toggleOne(item)}
+                  aria-label={`Select ${item.label}`}
+                  className="w-4 h-4 shrink-0 accent-accent cursor-pointer"
+                />
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2 mb-1">
+                    <span className="kicker">{item.type}</span>
+                    <span className="font-mono text-[9.5px] tracking-[0.1em] uppercase text-accent border border-accent-edge rounded-full px-2 py-0.5">
+                      {getDaysRemaining(item.deleted_at)} days left
+                    </span>
+                  </div>
+                  <div className="text-[13px] text-ink truncate pr-4">{item.label}</div>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  <button onClick={() => restoreItem(item)} className="btn btn-sm">Restore</button>
+                  <button onClick={() => hardDeleteItem(item)} className="btn-delete btn-sm">Delete Forever</button>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     </AppShell>
   )
