@@ -29,19 +29,61 @@ export default function OAuthAuthorizePage() {
   const [loading, setLoading] = useState(true)
   const [working, setWorking] = useState(false)
   const [error, setError] = useState('')
+  const [clientName, setClientName] = useState('')
 
   useEffect(() => {
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session)
-      setLoading(false)
-      if (!session) {
+    let active = true
+    async function init() {
+      const { data: { session: currentSession } } = await supabase.auth.getSession()
+      if (!active) return
+      setSession(currentSession)
+      if (!currentSession) {
         navigate(`/login?next=${encodeURIComponent(location.pathname + location.search)}`, { replace: true })
+        return
       }
-    })
+
+      // Security validation: client_id and redirect_uri must both be present
+      if (!clientId || !redirectUri) {
+        setError('Missing client_id or redirect_uri')
+        setLoading(false)
+        return
+      }
+
+      try {
+        const { data: client, error: clientErr } = await supabase
+          .from('oauth_clients')
+          .select('*')
+          .eq('client_id', clientId)
+          .maybeSingle()
+
+        if (!active) return
+        if (clientErr) throw clientErr
+        if (!client) {
+          setError('Unregistered or invalid client_id')
+          setLoading(false)
+          return
+        }
+
+        const allowedUris = client.redirect_uris || []
+        if (!allowedUris.includes(redirectUri)) {
+          setError('redirect_uri is not registered for this client')
+          setLoading(false)
+          return
+        }
+
+        setClientName(client.client_name || '')
+      } catch (err) {
+        if (active) setError(`Validation error: ${err.message}`)
+      } finally {
+        if (active) setLoading(false)
+      }
+    }
+    init()
+    return () => { active = false }
   }, [])
 
   async function handleApprove() {
-    if (!redirectUri) { setError('Missing redirect_uri'); return }
+    if (error || !redirectUri) { setError('Cannot complete request: validation failed'); return }
     setWorking(true)
     try {
       const bytes = new Uint8Array(32)
@@ -71,7 +113,7 @@ export default function OAuthAuthorizePage() {
   }
 
   function handleDeny() {
-    if (!redirectUri) { navigate('/home'); return }
+    if (error || !redirectUri) { navigate('/home'); return }
     const url = new URL(redirectUri)
     url.searchParams.set('error', 'access_denied')
     if (state) url.searchParams.set('state', state)
@@ -81,7 +123,7 @@ export default function OAuthAuthorizePage() {
   if (loading) return null
   if (!session) return null
 
-  const appName = clientLabel(clientId)
+  const appName = clientName || clientLabel(clientId)
 
   return (
     <div className="min-h-screen bg-paper flex flex-col items-center justify-center p-6">
@@ -125,14 +167,14 @@ export default function OAuthAuthorizePage() {
           <div className="px-6 py-4 flex gap-3">
             <button
               onClick={handleDeny}
-              disabled={working}
+              disabled={working || !!error}
               className="flex-1 h-9 border border-line rounded-lg text-[13px] font-semibold text-mute hover:text-ink hover:border-ink-2 transition-colors disabled:opacity-40"
             >
               Deny
             </button>
             <button
               onClick={handleApprove}
-              disabled={working}
+              disabled={working || !!error}
               className="flex-1 h-9 bg-ink text-paper rounded-lg text-[13px] font-semibold hover:bg-ink-2 transition-colors disabled:opacity-40"
             >
               {working ? 'Connecting…' : 'Allow'}

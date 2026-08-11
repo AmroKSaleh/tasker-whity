@@ -11,7 +11,18 @@ const TABS = [
 export default function LoginPage() {
   const navigate = useNavigate()
   const location = useLocation()
-  const nextUrl = new URLSearchParams(location.search).get('next') || '/home'
+  // `next` is attacker-controllable — anyone can hand out a /login?next=… link. Only same-site
+  // paths are followed, so it cannot be used to bounce a freshly-authenticated user off-site.
+  // Rejected: protocol-relative (//evil.com) and backslash (\\evil.com) forms, which browsers
+  // resolve as absolute, plus anything carrying a scheme.
+  const safeNext = (url) => {
+    const trimmed = (url || '').trim()
+    if (!trimmed.startsWith('/')) return '/home'
+    if (trimmed.startsWith('//') || trimmed.startsWith('/\\')) return '/home'
+    if (trimmed.includes('://') || /^\/*(?:javascript|data):/i.test(trimmed)) return '/home'
+    return trimmed
+  }
+  const nextUrl = safeNext(new URLSearchParams(location.search).get('next'))
   const [tab, setTab] = useState('signin')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
