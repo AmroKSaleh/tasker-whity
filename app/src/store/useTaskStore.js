@@ -31,16 +31,18 @@ export const useTaskStore = create(set => ({
     sections: state.sections.map(s => s.id === id ? { ...s, ...updates } : s),
   })),
 
+  // TDE-886: only the toggled task changes. This used to clear `pinned` on every other task to
+  // mirror the old one-per-project rule, which meant the optimistic view and the database
+  // disagreed the moment a second task was marked from the Today page.
   pinTaskInStore: (taskId, pinnedAt = null) => set(state => {
     const task = state.tasks.find(t => t.id === taskId)
     const nowPinned = !task?.pinned
     return {
-      tasks: state.tasks.map(t => {
-        if (t.id === taskId) {
-          return { ...t, pinned: nowPinned, pinned_at: nowPinned ? pinnedAt : t.pinned_at, pin_snoozed: false }
-        }
-        return { ...t, pinned: false }
-      }),
+      tasks: state.tasks.map(t =>
+        t.id === taskId
+          ? { ...t, pinned: nowPinned, pinned_at: nowPinned ? pinnedAt : null, pin_snoozed: false }
+          : t
+      ),
     }
   }),
 

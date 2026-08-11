@@ -4,8 +4,12 @@ title: Add GitHub OAuth login to the sign-in flow
 status: done
 priority: high
 section: core-app
-order: 10
-updated_at: 2026-07-14T23:09:51.590Z
+order: 14
+updated_at: 2026-07-25T07:41:59.616Z
+milestones:
+  - { "text": "Create GitHub OAuth App and copy client ID + secret", "done": true }
+  - { "text": "Enable GitHub provider in Supabase Auth (paste client ID + secret)", "done": true }
+  - { "text": "Add \"Continue with GitHub\" button to LoginPage mirroring the Google handler", "done": true }
 ---
 
 Add a "Continue with GitHub" button on the LoginPage alongside the existing Google OAuth. Same Supabase pattern: supabase.auth.signInWithOAuth({ provider: 'github' }).

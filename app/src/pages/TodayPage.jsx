@@ -322,7 +322,7 @@ export default function TodayPage() {
               <Bucket kicker="CARRIED FROM YESTERDAY" tasks={pf(carriedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
               <Bucket kicker="DUE TODAY" tasks={pf(dueTodayTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
               <Bucket kicker="IN PROGRESS" tasks={pf(inProgressTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
-              <Bucket kicker="PINNED" tasks={pf(pinnedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
+              <Bucket kicker="CRITICAL" tasks={pf(pinnedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
               <Bucket kicker="ADDED TO TODAY" tasks={pf(addedTodayTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
               <Bucket kicker="QUEUED" tasks={pf(queuedTasks)} onToggleDone={handleToggleDone} onToggleInProgress={toggleInProgress} onOpenTask={openTask} onStar={setPinned} getEnvBadge={getEnvBadge} />
 

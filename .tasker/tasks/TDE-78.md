@@ -5,7 +5,7 @@ status: done
 priority: low
 section: research-planning
 order: 2
-updated_at: 2026-07-14T23:09:51.590Z
+updated_at: 2026-07-25T07:41:59.616Z
 ---
 
 Captured 2026-05-26 from a discussion about MCP call cost vs local memory cost. Open question: where should each kind of data live, and is there a layer between "MCP only" and "agent local memory" that's worth building?

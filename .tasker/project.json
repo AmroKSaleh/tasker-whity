@@ -2,11 +2,11 @@
   "version": 1,
   "name": "Tasker Development",
   "prefix": "TDE",
-  "next_short_id": 414,
+  "next_short_id": 887,
   "sections": [
     {
       "id": "core-app",
-      "name": "Core App",
+      "name": "Web App",
       "order": 0
     },
     {
@@ -16,7 +16,7 @@
     },
     {
       "id": "mcp-integrations",
-      "name": "MCP & Integrations",
+      "name": "Agent and MCP Layer",
       "order": 2
     },
     {
@@ -25,49 +25,24 @@
       "order": 3
     },
     {
-      "id": "qol",
-      "name": "QoL",
-      "order": 7
-    },
-    {
-      "id": "backlog",
-      "name": "Backlog",
-      "order": 8
-    },
-    {
-      "id": "flows-optimization",
-      "name": "Flows Optimization",
-      "order": 14
-    },
-    {
-      "id": "security",
-      "name": "Security",
-      "order": 15
-    },
-    {
       "id": "3rd-party-integrations",
-      "name": "3rd Party Integrations",
+      "name": "Integrations",
       "order": 18
     },
     {
       "id": "research-planning",
-      "name": "Research & Planning",
+      "name": "Decisions and Research",
       "order": 19
     },
     {
-      "id": "confirmation-test",
-      "name": "Confirmation Test",
-      "order": 20
-    },
-    {
-      "id": "agent-native-layer",
-      "name": "Agent-Native Layer",
-      "order": 21
-    },
-    {
-      "id": "tags-system",
-      "name": "Tags System",
+      "id": "azure-boards-mined-ideas",
+      "name": "Idea Shelf",
       "order": 22
+    },
+    {
+      "id": "docs-and-doctrine",
+      "name": "Docs and Doctrine",
+      "order": 24
     },
     {
       "id": "unfiled",
@@ -77,10 +52,40 @@
   ],
   "groups": [
     {
+      "id": "flows-definition-from-the-ground-up",
+      "name": "Flows — Definition from the ground up",
+      "section": "flows",
+      "order": 1
+    },
+    {
       "id": "google-integrations",
       "name": "Google Integrations",
       "section": "mcp-integrations",
       "order": 1
+    },
+    {
+      "id": "linear-mined-features",
+      "name": "Linear-Mined Features",
+      "section": "core-app",
+      "order": 1
+    },
+    {
+      "id": "positioning-messaging",
+      "name": "Positioning & Messaging",
+      "section": "core-app",
+      "order": 2
+    },
+    {
+      "id": "environments-org",
+      "name": "Environments & Org",
+      "section": "core-app",
+      "order": 3
+    },
+    {
+      "id": "session-cross-device-continuity",
+      "name": "Session & Cross-Device Continuity",
+      "section": "core-app",
+      "order": 4
     }
   ],
   "flows": {}

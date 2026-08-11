@@ -4,6 +4,6 @@ title: Add a button to the UI of a project page that was created via a github re
 status: done
 priority: medium
 section: core-app
-order: 22
-updated_at: 2026-07-14T23:09:51.590Z
+order: 24
+updated_at: 2026-08-06T20:05:11.033Z
 ---

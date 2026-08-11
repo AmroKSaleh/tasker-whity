@@ -1,0 +1,84 @@
+{
+  "_README": "Edit name/order to rename/reorder; delete a line to delete (group→its tasks ungroup; section must be empty). NEVER change slug — it is the stable id task files reference. Regenerated shape on pull; your edits to name/order/deletions are applied on flush.",
+  "updated_at": null,
+  "sections": [
+    {
+      "slug": "core-app",
+      "name": "Web App",
+      "order": 0
+    },
+    {
+      "slug": "flows",
+      "name": "Flows",
+      "order": 1
+    },
+    {
+      "slug": "mcp-integrations",
+      "name": "Agent and MCP Layer",
+      "order": 2
+    },
+    {
+      "slug": "bugs",
+      "name": "Bugs",
+      "order": 3
+    },
+    {
+      "slug": "3rd-party-integrations",
+      "name": "Integrations",
+      "order": 18
+    },
+    {
+      "slug": "research-planning",
+      "name": "Decisions and Research",
+      "order": 19
+    },
+    {
+      "slug": "azure-boards-mined-ideas",
+      "name": "Idea Shelf",
+      "order": 22
+    },
+    {
+      "slug": "docs-and-doctrine",
+      "name": "Docs and Doctrine",
+      "order": 24
+    }
+  ],
+  "groups": [
+    {
+      "slug": "flows-definition-from-the-ground-up",
+      "name": "Flows — Definition from the ground up",
+      "section": "flows",
+      "order": 1
+    },
+    {
+      "slug": "google-integrations",
+      "name": "Google Integrations",
+      "section": "mcp-integrations",
+      "order": 1
+    },
+    {
+      "slug": "linear-mined-features",
+      "name": "Linear-Mined Features",
+      "section": "core-app",
+      "order": 1
+    },
+    {
+      "slug": "positioning-messaging",
+      "name": "Positioning & Messaging",
+      "section": "core-app",
+      "order": 2
+    },
+    {
+      "slug": "environments-org",
+      "name": "Environments & Org",
+      "section": "core-app",
+      "order": 3
+    },
+    {
+      "slug": "session-cross-device-continuity",
+      "name": "Session & Cross-Device Continuity",
+      "section": "core-app",
+      "order": 4
+    }
+  ]
+}

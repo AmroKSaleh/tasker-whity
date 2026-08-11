@@ -4,8 +4,8 @@ title: Decide + wire the Focus mode session timer (or remove it)
 status: done
 priority: low
 section: core-app
-order: 21
-updated_at: 2026-07-14T23:09:51.590Z
+order: 23
+updated_at: 2026-07-25T07:41:59.616Z
 ---
 
 The Focus overlay's top-right clock + "0:00" is currently non-functional chrome. It came from the Claude Design prototype (focus-safe), which showed the timer's look without behavior. DESIGN_DECISIONS § "Decisions I deliberately did NOT make" explicitly left Focus-timer behavior open (auto vs manual start? persisted across sessions?), so it was rendered to match the design but never wired.

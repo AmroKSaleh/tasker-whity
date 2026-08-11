@@ -4,8 +4,8 @@ title: Use GitHub OAuth token for native GitHub functionality (replace separate 
 status: done
 priority: medium
 section: core-app
-order: 11
-updated_at: 2026-07-14T23:09:51.590Z
+order: 15
+updated_at: 2026-07-25T07:41:59.616Z
 ---
 
 When a user signs in via GitHub OAuth, capture the provider token from Supabase auth (session.provider_token) and use it as the source of truth for GitHub access — eliminating the need for the user to separately paste a Personal Access Token.

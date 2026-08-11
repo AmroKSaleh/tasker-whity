@@ -300,15 +300,18 @@ export function useTasks(projectId) {
     ])
   }
 
+  // TDE-886: critical is a multi-select marker. This used to clear every pin in the project
+  // before setting one, so marking a second task silently unmarked the first.
   async function pinTask(taskId) {
     const currentTask = tasks.find(t => t.id === taskId)
     const nowPinned = !currentTask?.pinned
     const now = new Date().toISOString()
     pinTaskInStore(taskId, nowPinned ? now : null)
-    await supabase.from('tasks').update({ pinned: false, pin_snoozed: false }).eq('project_id', projectId)
-    if (nowPinned) {
-      await supabase.from('tasks').update({ pinned: true, pinned_at: now, pin_snoozed: false }).eq('id', taskId)
-    }
+    await supabase.from('tasks').update({
+      pinned: nowPinned,
+      pinned_at: nowPinned ? now : null,
+      pin_snoozed: false,
+    }).eq('id', taskId)
   }
 
   async function reorderTasks(orderedTasks) {

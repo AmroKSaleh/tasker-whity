@@ -2200,7 +2200,7 @@ const TOOLS = [
         due_date:   { type: 'string' },
         section_id:     { type: 'string', description: 'Move task to a different section (use section UUID)' },
         group_id:       { type: 'string', description: 'Move task to a different group (use group UUID), or null to remove from group' },
-        pinned:         { type: 'boolean', description: 'Pin or unpin the task' },
+        pinned:         { type: 'boolean', description: 'Mark the task CRITICAL (must-not-slip), or clear the mark. Any number of tasks can be critical; they are listed first by get_my_attention and counted at session start.' },
         executor:       { type: 'string', enum: ['agent', 'user', 'external'], description: 'Who executes this step. agent = AI; user = human (AI coaches); external = third party.' },
         human_guidance: { type: 'string', description: 'Human-facing step instructions for guide mode (user/external steps). Replaces existing.' },
         relay_context:  { type: 'string', description: 'Set/replace the relay rationale layer on an EXISTING task. Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump.' },
@@ -4318,20 +4318,51 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         sb.from('sections').select('id, name').eq('project_id', project.id).order('sort_order'),
         sb.from('tasks').select('section_id, status, flow_id').eq('project_id', project.id).is('is_deleted', false),
       ])
-      if (!data?.length) return `No sections in "${project.name}".`
       // Per-section task tallies (default behaviour): open = not done, matching the app's hide-done convention.
       // TDE-320: flow steps are not tasks — they leave the section tally (matches list_tasks + the board).
+      // A task that reaches neither bucket used to be dropped in silence, which is why this
+      // tool's sum could sit below list_phases / get_project on the SAME query. Two ways to
+      // fall out: no section_id at all, or a section_id this project's section query does not
+      // return (RLS-hidden or stale row — the phantom rows that block section deletion). Both
+      // are now counted and reported, so the tallies reconcile and the residue is nameable.
+      const known = new Set(((data ?? []) as any[]).map((s) => s.id))
       const counts: Record<string, { open: number; total: number }> = {}
+      const unsectioned = { open: 0, total: 0 }
+      const unreachable = { open: 0, total: 0 }
+      const unreachableIds = new Set<string>()
       for (const t of ((tasks ?? []) as any[])) {
-        if (!t.section_id || t.flow_id) continue
-        const c = counts[t.section_id] ?? (counts[t.section_id] = { open: 0, total: 0 })
-        c.total++
-        if (t.status !== 'done') c.open++
+        if (t.flow_id) continue
+        let bucket: { open: number; total: number }
+        if (!t.section_id) {
+          bucket = unsectioned
+        } else if (!known.has(t.section_id)) {
+          bucket = unreachable
+          unreachableIds.add(t.section_id)
+        } else {
+          bucket = counts[t.section_id] ?? (counts[t.section_id] = { open: 0, total: 0 })
+        }
+        bucket.total++
+        if (t.status !== 'done') bucket.open++
       }
-      return data.map((s: any) => {
+      const residue: string[] = []
+      if (unsectioned.total) residue.push(
+        `[no section] — ${unsectioned.open} open / ${unsectioned.total} total`
+        + `\n    These tasks belong to no section row. They are real and counted by list_phases / get_project, but they appear in no section column.`
+      )
+      if (unreachable.total) residue.push(
+        `[unreachable section] — ${unreachable.open} open / ${unreachable.total} total`
+        + `\n    ⚠ section_id points at ${unreachableIds.size} row${unreachableIds.size !== 1 ? 's' : ''} this project does not return: ${[...unreachableIds].join(', ')}`
+        + `\n    Move these tasks to a live section (move_task) — an unreachable section also blocks delete_section.`
+      )
+      if (!data?.length) {
+        return `No sections in "${project.name}".`
+          + (residue.length ? `\n\n${residue.join('\n')}` : '')
+      }
+      const lines = (data as any[]).map((s: any) => {
         const c = counts[s.id] ?? { open: 0, total: 0 }
         return `[id: ${s.id}] ${s.name} — ${c.open} open / ${c.total} total`
-      }).join('\n')
+      })
+      return [...lines, ...residue].join('\n')
     }
 
     case 'create_section': {
@@ -4898,11 +4929,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         patch.completed_at = null
       }
 
+      // TDE-886: `pinned` is a multi-select CRITICAL marker, not a single top-priority slot.
+      // This previously cleared every other pin in the project before setting this one, which made
+      // it impossible to mark more than one task critical — the exact thing the marker is for.
       if (patch.pinned === true) {
-        const { data: fullTask } = await sb.from('tasks').select('project_id').eq('id', task.id).maybeSingle()
-        if (fullTask?.project_id) {
-          await sb.from('tasks').update({ pinned: false, pin_snoozed: false }).eq('project_id', fullTask.project_id)
-        }
         patch.pinned_at = new Date().toISOString()
         patch.pin_snoozed = false
       } else if (patch.pinned === false) {
@@ -5098,7 +5128,7 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const ranked = rankTasks(data)
       return ranked.map((t: any, i: number) => {
         const shortRef = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : null
-        const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.project?.name, t.pinned ? '⭐ pinned' : null].filter(Boolean).join(', ')
+        const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.project?.name, t.pinned ? '★ critical' : null].filter(Boolean).join(', ')
         return `${i + 1}. [${shortRef ?? t.id}] ${t.text}  (${badges})  score: ${t._score}`
       }).join('\n')
     }
@@ -6008,7 +6038,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         projectFilter = p.id
       }
       let tq = sb.from('tasks')
-        .select('id, text, short_id, status, priority, due_date, review_verdict, agent_ready, project_id, project:projects(prefix)')
+        .select('id, text, short_id, status, priority, due_date, review_verdict, agent_ready, pinned, project_id, project:projects(prefix)')
+        // TDE-882 class: this read never filtered the recycle bin, so soft-deleted tasks could be
+        // reported as needing attention. Found while adding the critical marker below.
+        .is('is_deleted', false)
         .eq('user_id', userId).neq('status', 'done')
       if (projectFilter) tq = tq.eq('project_id', projectFilter)
       const { data: tasksData } = await tq
@@ -6043,18 +6076,22 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       const needsReview = taskList.filter((t: any) => t.review_verdict?.escalated)
       const readyForAgent = taskList.filter((t: any) => t.agent_ready && t.status === 'pending')
+      // TDE-886: the human's own must-not-slip marker. Listed first because it is the only signal
+      // here that a person set deliberately — everything else is derived from state.
+      const critical = taskList.filter((t: any) => t.pinned)
       const today = new Date().toISOString().slice(0, 10)
       const overdue = taskList.filter((t: any) => t.due_date && t.due_date < today)
 
       const lines: string[] = ['# What needs you']
       const section = (title: string, items: string[]) => { if (items.length) { lines.push(`\n${title} (${items.length}):`); items.forEach(i => lines.push(`  ${i}`)) } }
+      section('★ CRITICAL — the human marked these must-not-slip', critical.map((t: any) => `${ref(t)} — ${t.text}${t.status === 'in_progress' ? ' (in progress)' : ''}`))
       section('▶ READY FOR AGENT — a human queued these for autonomous work (see get_ready_work)', readyForAgent.map((t: any) => `${ref(t)} — ${t.text}`))
       section('◆ AWAITING YOUR REVIEW — judge escalated', needsReview.map((t: any) => `${ref(t)} — ${t.text}`))
       section('✎ PENDING GUIDANCE — a human left a steering note', guidance.map((g: any) => `${ref(byId.get(g.task_id))} — "${g.body}"`))
       section('⏳ AWAITING INPUT — an agent asked a question and is blocked', [...awaitingInput].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
       section('⋯ STALE IN-PROGRESS — quiet for 2+ days', [...stale].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
       section('⚠ OVERDUE', overdue.map((t: any) => `${ref(t)} — ${t.text} (due ${t.due_date})`))
-      if (lines.length === 1) return 'Nothing needs your attention right now — no ready-for-agent work, escalated reviews, pending guidance, blocked agents, stale work, or overdue tasks.'
+      if (lines.length === 1) return 'Nothing needs your attention right now — nothing marked critical, no ready-for-agent work, escalated reviews, pending guidance, blocked agents, stale work, or overdue tasks.'
       return lines.join('\n')
     }
 
@@ -6766,6 +6803,13 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const environments = (envRows ?? []).map((e: any) => ({ id: e.id, name: e.name }))
       const active_environment_id = settings?.active_environment_id ?? null
 
+      // TDE-886: surface the critical marker at session start. Deliberately a COUNT, not a task
+      // list — the tasks themselves live in get_my_attention, so this costs ~15 tokens and only
+      // when something is actually marked. Growing the init payload would work against TDE-881.
+      const { count: criticalCount } = await sb.from('tasks')
+        .select('id', { count: 'exact', head: true })
+        .eq('user_id', userId).eq('pinned', true).neq('status', 'done').is('is_deleted', false)
+
       if (instructions && !show_questionnaire) {
         const settings_summary = {
           task_list_format: instructions.task_list_format === 'plain_text' ? 'plain text' :
@@ -6787,6 +6831,9 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
           // open it — and the server cannot infer a timezone from an HTTP request.
           timezone_note: instructions.timezone ? undefined
             : 'No timezone saved, so task timestamps render in UTC. If you can read this machine\'s timezone (e.g. a shell command), call update_ai_instructions(timezone: "<IANA name, e.g. Asia/Amman>") once. If you cannot, ask the user rather than guessing.',
+          critical_note: criticalCount
+            ? `★ ${criticalCount} open task${criticalCount === 1 ? '' : 's'} marked CRITICAL by the user. Call get_my_attention to read them, and name them in your first response before moving on to whatever was asked.`
+            : undefined,
           environment_note: environments.length
             ? 'Environments partition the user\'s projects (single-user; Personal / Work / Learning …). The active one is the DEFAULT for create_project when environment_id is omitted — you may still pass environment_id explicitly. Do NOT silently scope reads to it: list_projects shows every Environment unless the caller filters. The web app owns switching the active Environment (MCP only reads it).'
             : undefined,

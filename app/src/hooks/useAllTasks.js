@@ -90,8 +90,16 @@ export function useAllTasks() {
     await supabase.from('tasks').update(updates).eq('id', task.id)
   }
 
+  // TDE-886: writes pinned_at/pin_snoozed like the other two paths, which it previously skipped —
+  // so a task marked critical from Today had a null pinned_at while the same action on the board
+  // set one.
   async function setPinned(task) {
-    const updates = { pinned: !task.pinned }
+    const nowPinned = !task.pinned
+    const updates = {
+      pinned: nowPinned,
+      pinned_at: nowPinned ? new Date().toISOString() : null,
+      pin_snoozed: false,
+    }
     setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...updates } : t))
     syncStore(task.id, updates)
     await supabase.from('tasks').update(updates).eq('id', task.id)
