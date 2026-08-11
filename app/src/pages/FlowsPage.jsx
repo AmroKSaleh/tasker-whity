@@ -7,6 +7,7 @@ import AppShell from '../components/editorial/AppShell'
 import { Kicker, Pill } from '../components/editorial/atoms'
 import FlowGraph from '../components/flows/FlowGraph'
 import FlowStepList from '../components/flows/FlowStepList'
+import FlowExceptions from '../components/flows/FlowExceptions'
 import FlowTaskPanel from '../components/flows/FlowTaskPanel'
 
 const STATUS_LABEL = { done: 'DONE', in_progress: 'IN PROGRESS', pending: 'PENDING' }
@@ -63,49 +64,56 @@ function GateBadge({ flow, size = 'sm' }) {
   )
 }
 
+// TDE-811: with an open step list the total is not knowable, so the progress readout
+// carries no denominator rather than a made-up one, and "every known step is done" is
+// reported as its own state — it is not the same as finished.
+function progressLine(flow) {
+  return flow.stepListOpen
+    ? `${flow.doneCount} DONE · ${flow.stepCount} STEP${flow.stepCount !== 1 ? 'S' : ''} SO FAR`
+    : `${flow.doneCount}/${flow.stepCount} DONE`
+}
+
+// How far through the operation am I, and is it moving. The other cockpit question —
+// where does it need me — is answered by FlowExceptions, so this no longer duplicates it
+// by naming unblessed contracts (the header's GateBadge already carries that count).
 function LiveStatusBanner({ flow }) {
-  // Determine if the flow is blocked, running, or done.
   const activeSteps = flow.steps.filter(s => s.task.status === 'in_progress')
-  const isDone = flow.status === 'done'
   const isRunning = activeSteps.length > 0
-  
-  if (isDone) {
-    return (
-      <div className="flex flex-col gap-0.5">
-        <span className="font-mono text-[10px] font-bold text-[#3a9d57] tracking-wider">✓ FLOW COMPLETE</span>
-        <span className="text-[12px] text-mute-2 leading-snug">All {flow.stepCount} steps have been executed and verified.</span>
-      </div>
-    )
+  const allKnownDone = flow.doneCount === flow.stepCount
+
+  let tone, head, body
+  if (flow.status === 'done') {
+    tone = 'text-[#3a9d57]'
+    head = '✓ FLOW COMPLETE'
+    body = <span className="text-mute-2">All {flow.stepCount} steps have been executed and verified.</span>
+  } else if (flow.stepListOpen && allKnownDone) {
+    tone = 'text-mute'
+    head = '◷ MORE STEPS TO COME'
+    body = <span className="text-mute-2">Every known step is done, but the step list is still open — this operation is not finished until it closes.</span>
+  } else if (isRunning) {
+    tone = 'text-accent'
+    head = 'OPERATION IN PROGRESS'
+    body = <span className="text-ink">Currently executing step{activeSteps.length !== 1 ? 's' : ''}: {activeSteps.map(s => String(s.step).padStart(2, '0')).join(', ')}</span>
+  } else {
+    tone = 'text-mute'
+    head = '⏸ WAITING FOR EXECUTION'
+    body = <span className="text-mute-2">Flow is ready. Start the agent in Claude Code to continue.</span>
   }
 
-  if (isRunning) {
-    return (
-      <div className="flex flex-col gap-1">
-        <span className="font-mono text-[10px] font-bold text-accent tracking-wider flex items-center gap-1.5">
+  return (
+    <div className="flex flex-col gap-0.5">
+      <span className={clsx('font-mono text-[10px] font-bold tracking-wider flex items-center gap-1.5', tone)}>
+        {isRunning && flow.status !== 'done' && (
           <span className="relative flex h-2 w-2">
             <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-accent opacity-75"></span>
             <span className="relative inline-flex rounded-full h-2 w-2 bg-accent"></span>
           </span>
-          OPERATION IN PROGRESS
-        </span>
-        <span className="text-[12px] text-ink leading-snug">
-          Currently executing step{activeSteps.length !== 1 ? 's' : ''}: {activeSteps.map(s => String(s.step).padStart(2, '0')).join(', ')}
-        </span>
-      </div>
-    )
-  }
-
-  // Not running, not done -> it's pending / waiting. Check for blockers.
-  const hasUnblessed = flow.gate?.unblessed > 0 || flow.gate?.weak > 0
-  
-  return (
-    <div className="flex flex-col gap-0.5">
-      <span className="font-mono text-[10px] font-bold text-mute tracking-wider">⏸ WAITING FOR EXECUTION</span>
-      {hasUnblessed ? (
-        <span className="text-[12px] text-accent leading-snug">Contracts need blessing before the agent can safely proceed.</span>
-      ) : (
-        <span className="text-[12px] text-mute-2 leading-snug">Flow is ready. Start the agent in Claude Code to continue.</span>
-      )}
+        )}
+        {head}
+        <span className="flex-1" />
+        <span className="text-mute-2 font-semibold tracking-[0.06em]">{progressLine(flow)}</span>
+      </span>
+      <span className="text-[12px] leading-snug">{body}</span>
     </div>
   )
 }
@@ -128,9 +136,11 @@ function FlowCard({ flow, active, onClick }) {
         }
       </div>
       <div className="flex items-center gap-2 font-mono text-[10px] text-mute-2 tracking-[0.04em] pl-3.5">
-        <span>{flow.stepCount} STEPS</span>
+        <span>{flow.stepCount} STEPS{flow.stepListOpen ? ' SO FAR' : ''}</span>
         <span>·</span>
-        <span>{flow.doneCount}/{flow.stepCount} DONE</span>
+        <span title={flow.stepListOpen ? 'The step list is open — more steps may still be added, so there is no total to count against.' : undefined}>
+          {flow.stepListOpen ? `${flow.doneCount} DONE` : `${flow.doneCount}/${flow.stepCount} DONE`}
+        </span>
         <span className="flex-1" />
         <GateBadge flow={flow} />
       </div>
@@ -322,6 +332,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
   }, [flow.flowRecordId, flow.id])
 
   const panelEntries = panel === 'is' ? flowIs : panel === 'kb' ? flowKb : null
+  const hasGraph = (flow.gate?.edgeCount ?? 0) > 0
 
   function startResizeX(e) {
     e.preventDefault()
@@ -371,7 +382,7 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
         )}
         <div className="flex items-center gap-2.5 mt-1">
           <span className="font-mono text-[10px] text-mute-2 tracking-[0.06em]">
-            {flow.stepCount} STEPS · {flow.doneCount}/{flow.stepCount} DONE · {STATUS_LABEL[flow.status]}
+            {flow.stepCount} STEPS{flow.stepListOpen ? ' SO FAR' : ''} · {progressLine(flow)} · {STATUS_LABEL[flow.status]}
           </span>
           <GateBadge flow={flow} size="lg" />
         </div>
@@ -500,58 +511,76 @@ function FlowDetail({ flow, onBack, listOpen, onToggleList, onChanged, onDeleted
           </div>
         )}
       </div>
-      <div className="flex-1 flex min-h-0 relative">
-        {/* Left Pane: Map / Graph */}
-        <div className="flex-1 flex flex-col min-w-0 bg-surf relative">
-          {panel && (
-            <div className="shrink-0 border-b border-line-2 bg-surf-2 max-h-[38vh] overflow-auto px-6 py-3 no-scrollbar z-10 shadow-md">
-              <Kicker>{panel === 'is' ? 'Flow Instruction Set' : 'Flow Knowledge Base'}</Kicker>
-              {!flow.flowRecordId ? (
-                <p className="text-[12px] text-mute mt-2 leading-relaxed">
-                  This flow isn’t named yet, so it has no {panel === 'is' ? 'Instruction Set' : 'Knowledge Base'}.
-                  Name it via the MCP (<span className="font-mono">name_flow</span>) to attach one.
-                </p>
-              ) : panelEntries == null ? (
-                <p className="text-[12px] text-mute mt-2">Loading…</p>
-              ) : panelEntries.length === 0 ? (
-                <p className="text-[12px] text-mute mt-2 leading-relaxed">
-                  {panel === 'is'
-                    ? 'No flow IS — tasks in this flow use the project Instruction Set.'
-                    : 'No flow Knowledge Base entries.'}
-                </p>
-              ) : (
-                <div className="flex flex-col gap-3 mt-2">
-                  {panelEntries.map(e => (
-                    <div key={e.id}>
-                      <p className="text-[12.5px] font-semibold text-ink">{e.title}</p>
-                      <p className="text-[12px] text-ink-2 whitespace-pre-wrap leading-relaxed mt-0.5">{e.content}</p>
-                    </div>
-                  ))}
+      {/* IS / KB drawer — full width, because the pane it used to live in is conditional now. */}
+      {panel && (
+        <div className="shrink-0 border-b border-line-2 bg-surf-2 max-h-[38vh] overflow-auto px-6 py-3 no-scrollbar z-10 shadow-md">
+          <Kicker>{panel === 'is' ? 'Flow Instruction Set' : 'Flow Knowledge Base'}</Kicker>
+          {!flow.flowRecordId ? (
+            <p className="text-[12px] text-mute mt-2 leading-relaxed">
+              This flow isn’t named yet, so it has no {panel === 'is' ? 'Instruction Set' : 'Knowledge Base'}.
+              Name it via the MCP (<span className="font-mono">name_flow</span>) to attach one.
+            </p>
+          ) : panelEntries == null ? (
+            <p className="text-[12px] text-mute mt-2">Loading…</p>
+          ) : panelEntries.length === 0 ? (
+            <p className="text-[12px] text-mute mt-2 leading-relaxed">
+              {panel === 'is'
+                ? 'No flow IS — tasks in this flow use the project Instruction Set.'
+                : 'No flow Knowledge Base entries.'}
+            </p>
+          ) : (
+            <div className="flex flex-col gap-3 mt-2">
+              {panelEntries.map(e => (
+                <div key={e.id}>
+                  <p className="text-[12.5px] font-semibold text-ink">{e.title}</p>
+                  <p className="text-[12px] text-ink-2 whitespace-pre-wrap leading-relaxed mt-0.5">{e.content}</p>
                 </div>
-              )}
+              ))}
             </div>
           )}
-          <div className="flex-1 relative min-h-0">
-            <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
-          </div>
         </div>
+      )}
 
-        {/* Resizer */}
+      <div className="flex-1 flex min-h-0 relative">
+        {/* The graph draws the I/O DAG, so it earns the larger pane only when there are
+            edges to draw. Contracts are optional (TDE-792) — a gateless flow rendered a
+            scatter of disconnected nodes over a third of the screen, saying nothing. When
+            there is no DAG the cockpit is not demoted to a sidebar; it IS the page. */}
+        {hasGraph && (
+          <>
+            <div className="flex-1 flex flex-col min-w-0 bg-surf relative">
+              <div className="flex-1 relative min-h-0">
+                <FlowGraph steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
+              </div>
+            </div>
+            <div
+              onPointerDown={startResizeX}
+              title="Drag to resize"
+              className="group shrink-0 w-1.5 flex flex-col items-center justify-center cursor-col-resize border-l border-line-2 bg-surf-2 hover:bg-surf transition-colors z-20"
+            >
+              <span className="w-0.5 h-8 rounded-full bg-line group-hover:bg-mute-2 transition-colors" />
+            </div>
+          </>
+        )}
+
+        {/* Cockpit: what needs me, then how far through am I. */}
         <div
-          onPointerDown={startResizeX}
-          title="Drag to resize"
-          className="group shrink-0 w-1.5 flex flex-col items-center justify-center cursor-col-resize border-l border-line-2 bg-surf-2 hover:bg-surf transition-colors z-20"
+          className={clsx('flex flex-col min-w-0 bg-paper z-10', hasGraph ? 'shrink-0' : 'flex-1')}
+          style={hasGraph ? { width: listWidth } : undefined}
         >
-          <span className="w-0.5 h-8 rounded-full bg-line group-hover:bg-mute-2 transition-colors" />
-        </div>
-
-        {/* Right Pane: Action Center / Cockpit */}
-        <div className="shrink-0 flex flex-col min-w-0 bg-paper z-10" style={{ width: listWidth }}>
           <div className="shrink-0 border-b border-line-2 bg-surf-2 px-5 py-3">
-            <LiveStatusBanner flow={flow} />
+            <div className={clsx(!hasGraph && 'max-w-[860px] mx-auto w-full')}>
+              <LiveStatusBanner flow={flow} />
+            </div>
           </div>
           <div className="flex-1 overflow-y-auto px-3 py-3 no-scrollbar relative">
-            <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
+            <div className={clsx('flex flex-col gap-5', !hasGraph && 'max-w-[860px] mx-auto w-full')}>
+              <FlowExceptions flow={flow} onTaskClick={setSelectedTaskId} />
+              <div>
+                <Kicker className="mb-1 px-2">STEPS</Kicker>
+                <FlowStepList steps={flow.steps} prefix={flow.projectPrefix} onTaskClick={setSelectedTaskId} />
+              </div>
+            </div>
           </div>
         </div>
       </div>
