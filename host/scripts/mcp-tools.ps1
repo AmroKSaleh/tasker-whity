@@ -116,6 +116,7 @@ try {
     $taskerToolNames = @(
         '__init_tasker_session', 'set_default_project',
         'list_pings', 'create_ping', 'tag_ping',
+        'list_environments', 'create_environment', 'rename_environment', 'delete_environment',
         'list_projects', 'create_project', 'update_project', 'delete_project', 'get_project',
         'list_sections', 'create_section', 'update_section', 'rename_section', 'delete_section',
         'list_groups', 'create_group', 'update_group', 'rename_group', 'delete_group',

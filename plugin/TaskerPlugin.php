@@ -160,6 +160,124 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
+                'path' => '/api/tasker/environments',
+                'handler' => [$this, 'listEnvironments'],
+                // requiredRole 'admin', requiredPermission null — deliberately
+                // NOT a tasker_*:manage permission. Verified by reading core's
+                // own OU route registrations (host/.core/public/index.php,
+                // `$router->register('GET', '/api/ous', [$ousHandler, 'list'], 'admin')`
+                // et al.): core gates ALL FOUR of its own OU mutation endpoints
+                // on the requiredRole 'admin' and declares NO requiredPermission
+                // at all — there is no OU permission slug to "reuse verbatim"
+                // because core does not have one. Mirroring core's role gate
+                // exactly (rather than inventing a tasker_environment:manage
+                // permission) is what keeps a caller holding ordinary Tasker
+                // board permissions from mutating platform-wide OUs without
+                // ever holding admin — see task-10-report.md for the full
+                // verification trail.
+                'requiredRole' => 'admin',
+                'requiredPermission' => null,
+                'schema' => [
+                    'operationId' => 'list_environments',
+                    'summary' => 'List the tenant\'s Environments (organizational units) — alias of core\'s OU list',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'The Environment list'],
+                        403 => ['description' => 'Missing the admin role or unresolved tenant context'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/environments',
+                'handler' => [$this, 'createEnvironment'],
+                'requiredRole' => 'admin',
+                'requiredPermission' => null,
+                'schema' => [
+                    'operationId' => 'create_environment',
+                    'summary' => 'Create an Environment (organizational unit) — alias of core\'s OU create',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['name'],
+                        'properties' => [
+                            'name' => ['type' => 'string', 'description' => 'Environment name'],
+                            'parent_id' => ['type' => ['integer', 'null'], 'description' => 'Optional parent Environment id.'],
+                            'description' => ['type' => 'string'],
+                        ],
+                    ],
+                    'responses' => [
+                        201 => ['description' => 'The created Environment'],
+                        400 => ['description' => 'name missing/empty, or a field exceeds its length limit'],
+                        403 => [
+                            'description' => 'Missing the admin role, unresolved tenant context, or parent_id outside the tenant '
+                                . '(core reports this as 403, not 404 — this alias passes core\'s own response through unchanged)',
+                        ],
+                        409 => ['description' => 'An Environment with this name or slug already exists in the tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/environments',
+                'handler' => [$this, 'renameEnvironment'],
+                'requiredRole' => 'admin',
+                'requiredPermission' => null,
+                'schema' => [
+                    'operationId' => 'rename_environment',
+                    'summary' => 'Rename or reparent an Environment (organizational unit) — alias of core\'s OU update',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['environment_id'],
+                        'properties' => [
+                            'environment_id' => ['type' => ['string', 'integer'], 'description' => 'The Environment id to rename.'],
+                            'name' => ['type' => 'string'],
+                            'description' => ['type' => 'string'],
+                            'parent_id' => ['type' => ['integer', 'null'], 'description' => 'New parent Environment id, or null to move to root.'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The updated Environment'],
+                        400 => ['description' => 'environment_id missing, or a field exceeds its length limit'],
+                        403 => [
+                            'description' => 'Missing the admin role, unresolved tenant context, or the Environment does not exist in the '
+                                . 'caller\'s tenant (core reports a not-found OU as 403, not 404 — this alias passes core\'s own response through unchanged)',
+                        ],
+                        422 => ['description' => 'Setting parent_id would create a cycle in the hierarchy'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/environments',
+                'handler' => [$this, 'deleteEnvironment'],
+                'requiredRole' => 'admin',
+                'requiredPermission' => null,
+                'schema' => [
+                    'operationId' => 'delete_environment',
+                    'summary' => 'Delete an Environment (organizational unit) — alias of core\'s OU delete',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['environment_id'],
+                        'properties' => [
+                            'environment_id' => ['type' => ['string', 'integer'], 'description' => 'The Environment id to delete.'],
+                        ],
+                    ],
+                    'responses' => [
+                        204 => ['description' => 'Deleted'],
+                        400 => ['description' => 'environment_id missing'],
+                        403 => [
+                            'description' => 'Missing the admin role, unresolved tenant context, or the Environment does not exist in the '
+                                . 'caller\'s tenant (core reports a not-found OU as 403, not 404 — this alias passes core\'s own response through unchanged)',
+                        ],
+                        409 => ['description' => 'The Environment has child Environments or active members and cannot be deleted'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
                 'path' => '/api/tasker/projects',
                 'handler' => [$this, 'listProjects'],
                 'requiredRole' => null,
@@ -1281,6 +1399,181 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $pingId = (int) ($params['id'] ?? 0);
 
         return (new PingApiHandler($this->resolvePdo()))->tag($tenantId, $pingId, $request->getBody());
+    }
+
+    /**
+     * GET /api/tasker/environments — alias of core's OU list (D1b Task 10).
+     *
+     * Delegates rather than querying organizational_units directly: core
+     * dispatches ou.* hooks on every OU mutation and its own AuditLogger
+     * subscribes to them, so writing directly would silently drop OU changes
+     * out of the platform audit trail (see {@see self::ousHandler()}'s own
+     * docblock for the full verification trail on that claim).
+     *
+     * No OU-scope narrowing is applied here (unlike listProjects()'s
+     * resolveCallerOu() call): Environments ARE the organizational units
+     * themselves, and core's own OU admin surface lists every OU in the
+     * tenant for an 'admin'-role caller with no OU-subtree restriction —
+     * mirrored here rather than invented, per this task's ruling against
+     * building Tasker-side OU resolution.
+     *
+     * @param array<string, string> $params
+     */
+    public function listEnvironments(Request $request, array $params = []): Response
+    {
+        if ($this->requireTenantId() === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        if (!$request instanceof \Whity\Core\Request) {
+            return Response::error('Unexpected request type', 500);
+        }
+
+        try {
+            return $this->ousHandler()->list($request);
+        } catch (\Throwable $e) {
+            // Ruling #4: an uncaught throw is an uncontrolled error path this
+            // slice's error discipline does not allow anywhere else. The one
+            // concrete case this guards today is ousHandler() failing to
+            // resolve a live HookManager/Database from the container.
+            return Response::error('Environments are temporarily unavailable', 500);
+        }
+    }
+
+    /**
+     * POST /api/tasker/environments — alias of core's OU create (D1b Task 10).
+     *
+     * The body is forwarded to core's OusApiHandler::create() UNCHANGED: it
+     * reads 'name' (required), 'parent_id' and 'description' straight off the
+     * JSON body itself (verified by reading OusApiHandler::create()'s source
+     * — see task-10-report.md), so this alias performs no field renaming or
+     * translation, consistent with the brief's "thin alias, no new handler"
+     * framing. Only rename_environment/delete_environment need a translation
+     * step, because THEIR target handlers (update()/delete()) read the OU id
+     * out of a route `{id}` path parameter that this flat, path-parameter-free
+     * alias does not have.
+     *
+     * @param array<string, string> $params
+     */
+    public function createEnvironment(Request $request, array $params = []): Response
+    {
+        if ($this->requireTenantId() === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        if (!$request instanceof \Whity\Core\Request) {
+            return Response::error('Unexpected request type', 500);
+        }
+
+        try {
+            return $this->ousHandler()->create($request);
+        } catch (\Throwable $e) {
+            return Response::error('Environments are temporarily unavailable', 500);
+        }
+    }
+
+    /**
+     * PATCH /api/tasker/environments — alias of core's OU update (D1b Task 10).
+     *
+     * core's OusApiHandler::update(Request $request, array $params) reads the
+     * target OU id from `$params['id']` (its own routing supplies it via a
+     * `{id:\d+}` path segment — host/.core/public/index.php registers
+     * `PATCH /api/ous/{id:\d+}` against this exact method). This alias is
+     * flat and carries no path parameters at all (ruling #3), so
+     * environment_id travels in the body like every other Tasker identifier
+     * and is translated into the one key OusApiHandler::update() actually
+     * reads — the only identifier mapping this task performs, and the OU id
+     * is used completely opaquely (never resolved, classified, or otherwise
+     * interpreted by Tasker) per ruling #2.
+     *
+     * @param array<string, string> $params
+     */
+    public function renameEnvironment(Request $request, array $params = []): Response
+    {
+        if ($this->requireTenantId() === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        if (!$request instanceof \Whity\Core\Request) {
+            return Response::error('Unexpected request type', 500);
+        }
+
+        $environmentId = $this->identifierFromRequest($request, 'environment_id');
+        if ($environmentId === null) {
+            return Response::error('environment_id is required', 400);
+        }
+
+        try {
+            return $this->ousHandler()->update($request, ['id' => (string) $environmentId]);
+        } catch (\Throwable $e) {
+            return Response::error('Environments are temporarily unavailable', 500);
+        }
+    }
+
+    /**
+     * DELETE /api/tasker/environments — alias of core's OU delete (D1b Task 10).
+     *
+     * MUST read environment_id via identifierFromRequest(), never the body
+     * alone: core's MCP transport merges every remaining tool argument into
+     * the query string and empties the body for GET/DELETE/HEAD calls (see
+     * identifierFromRequest()'s own docblock), so a body-only read would 400
+     * on every real MCP delete_environment call — exactly the mistake that
+     * shipped once already in this slice for delete_project.
+     *
+     * @param array<string, string> $params
+     */
+    public function deleteEnvironment(Request $request, array $params = []): Response
+    {
+        if ($this->requireTenantId() === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        if (!$request instanceof \Whity\Core\Request) {
+            return Response::error('Unexpected request type', 500);
+        }
+
+        $environmentId = $this->identifierFromRequest($request, 'environment_id');
+        if ($environmentId === null) {
+            return Response::error('environment_id is required', 400);
+        }
+
+        try {
+            return $this->ousHandler()->delete($request, ['id' => (string) $environmentId]);
+        } catch (\Throwable $e) {
+            return Response::error('Environments are temporarily unavailable', 500);
+        }
+    }
+
+    /**
+     * Build a core OusApiHandler wired to the host's real, container-shared
+     * HookManager — never a Tasker-local instance — so create/update/delete
+     * dispatch the SAME `ou.*` hooks core's own admin routes do, keeping the
+     * host's audit trail and any other ou.* subscriber intact.
+     *
+     * VERIFIED NAMESPACE (D1b Task 10): the brief that sketched this method
+     * inferred `Whity\Core\HookManager` from the registration line alone and
+     * flagged it as unverified. Grepping host/.core/public/index.php's own
+     * `use` statement shows the real class is `Whity\Core\Hooks\HookManager`
+     * (note the extra `Hooks` segment) — confirmed at the registration site
+     * itself: `use Whity\Core\Hooks\HookManager;` then
+     * `\Whity\register_service(HookManager::class, $hookManager);`. The
+     * brief's guessed namespace would have made this method's own
+     * `instanceof` check always false and every environment alias 500 on
+     * every call.
+     *
+     * @throws \RuntimeException When the host has not registered the shared
+     *   HookManager (or Database — via resolvePdo()) service. Every caller
+     *   above catches \Throwable around this call (ruling #4): this method is
+     *   never allowed to let an exception escape a route method.
+     */
+    private function ousHandler(): \Whity\Api\OusApiHandler
+    {
+        $hooks = \Whity\app(\Whity\Core\Hooks\HookManager::class);
+        if (!$hooks instanceof \Whity\Core\Hooks\HookManager) {
+            throw new \RuntimeException('The host did not register the shared HookManager service');
+        }
+
+        return new \Whity\Api\OusApiHandler($this->resolvePdo(), $hooks);
     }
 
     /**

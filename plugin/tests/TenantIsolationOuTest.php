@@ -21,6 +21,7 @@ use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
+use Tasker\TaskerPlugin;
 
 /**
  * Proves the four OU-descendant visibility cases against a REAL PostgreSQL
@@ -116,12 +117,69 @@ final class TenantIsolationOuTest extends TestCase
                 parent_id INTEGER NULL REFERENCES organizational_units(id),
                 name VARCHAR(255) NOT NULL,
                 slug VARCHAR(255) NOT NULL,
+                description TEXT DEFAULT \'\',
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 CONSTRAINT tasker_test_ou_tenant_name_unique UNIQUE (tenant_id, name),
                 CONSTRAINT tasker_test_ou_tenant_slug_unique UNIQUE (tenant_id, slug)
             )
         ');
+        // D1b Task 10: added `description` above (missing from this fixture
+        // until now — a real gap against the live host schema, see
+        // host/.core/database/migrations/005_create_organizational_units.php
+        // — surfaced because OusApiHandler::create()/update() unconditionally
+        // write that column; every prior test in this file happened to only
+        // ever touch organizational_units via makeOu()'s own explicit INSERT,
+        // which never mentioned description, so the gap had no coverage to
+        // catch it before the Environment alias tests below started calling
+        // OusApiHandler for real.
+        //
+        // ADD COLUMN IF NOT EXISTS covers a table that already exists from a
+        // PRIOR run of this suite (CREATE TABLE IF NOT EXISTS above is a
+        // no-op against it) predating this fixture change.
+        $this->pdo->exec("ALTER TABLE organizational_units ADD COLUMN IF NOT EXISTS description TEXT DEFAULT ''");
         $this->pdo->exec('DELETE FROM organizational_units WHERE tenant_id IN (7, 9)');
+
+        // D1b Task 10: the append-only audit trail core's AuditLogger writes
+        // to (host/.core/database/migrations/016_create_audit_log.php),
+        // needed by the Environment alias tests below, which prove
+        // create/rename/delete_environment really do dispatch core's ou.*
+        // hooks by subscribing a real AuditLogger and reading this table
+        // back — not by asserting on the hook dispatch mechanism in isolation.
+        $this->pdo->exec("
+            CREATE TABLE IF NOT EXISTS audit_log (
+                id SERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                actor_user_id INTEGER NULL,
+                action VARCHAR(100) NOT NULL,
+                target_type VARCHAR(100) NULL,
+                target_id INTEGER NULL,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                ip_address VARCHAR(45) NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        ");
+        $this->pdo->exec('DELETE FROM audit_log WHERE tenant_id IN (7, 9)');
+
+        // D1b Task 10: OusApiHandler::delete() unconditionally counts active
+        // memberships::ou_id before allowing a delete (host/.core's real
+        // ADR-0005-§3 shape, host/.core/database/migrations/030_create_memberships.php).
+        // A minimal local shape (no profiles/roles FKs, matching this file's
+        // own "close enough to real schema" convention for tenants/
+        // organizational_units above) is enough: the environment alias tests
+        // below never insert a membership row, so the count is always 0 and
+        // the delete is always permitted -- but the table must EXIST or
+        // that COUNT query itself throws.
+        $this->pdo->exec('
+            CREATE TABLE IF NOT EXISTS memberships (
+                id SERIAL PRIMARY KEY,
+                profile_id INTEGER NOT NULL,
+                tenant_id INTEGER NOT NULL,
+                role_id INTEGER NOT NULL,
+                ou_id INTEGER NULL,
+                status VARCHAR(32) NOT NULL DEFAULT \'active\',
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        ');
 
         $this->ensureTestTenant(7);
         $this->ensureTestTenant(9);
@@ -149,6 +207,25 @@ final class TenantIsolationOuTest extends TestCase
         (new AddTaskerTaskShortIdUnique())->up($this->pdo);
         (new CreateTaskerMilestonesTable())->up($this->pdo);
         (new CreateTaskerTaskDiscussionsTable())->up($this->pdo);
+    }
+
+    /**
+     * D1b Task 10: unconditional cleanup for the two pieces of PROCESS-GLOBAL
+     * state the Environment alias tests below touch —
+     * \Whity\Core\Tenant\TenantContext's static tenant id (setTenantId()
+     * LOCKS after the first call; a second call anywhere else in this same
+     * PHPUnit process would throw) and the two \Whity\register_service()
+     * container entries they register. Runs after EVERY test in this class
+     * (not just the environment ones) so a leak can never depend on which
+     * tests happen to run before/after which — the same reason
+     * TaskerPluginTest::tearDown() unconditionally resets $_GET regardless of
+     * whether the specific test that ran touched it.
+     */
+    protected function tearDown(): void
+    {
+        \Whity\Core\Tenant\TenantContext::reset();
+        unset($GLOBALS['whity_services'][\Whity\Database\Database::class]);
+        unset($GLOBALS['whity_services'][\Whity\Core\Hooks\HookManager::class]);
     }
 
     /**
@@ -2038,5 +2115,237 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->moveToGroup(7, 2, $siblingTaskId, null, null);
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== Environment (OU) aliases (D1b Task 10) ====================
+    //
+    // WHY THIS IS A REAL, END-TO-END TEST (not the fallback ruling #5
+    // anticipated): the brief's Step 2 assumed core's AuditLogger subscriber
+    // is likely NOT reachable in this test tier, because index.php's
+    // bootstrap is the only place a HookManager is normally wired up and
+    // subscribed. Investigated directly before concluding that: it turns out
+    // to BE reachable, via a seam that has nothing to do with faking
+    // anything --
+    //
+    //   \Whity\Database\Database::withFactory(Closure $factory): self is a
+    //   PUBLIC, documented test seam ("Primarily a test seam (inject a
+    //   mock-PDO factory)" -- its own docblock) that wraps an arbitrary PDO,
+    //   including this test's own real $this->pdo. Combined with
+    //   \Whity\Core\Tenant\TenantContext::setTenantId()/reset() (both public)
+    //   and a REAL \Whity\Core\Hooks\HookManager + \Whity\Core\Audit\AuditLogger
+    //   pair wired via AuditLogger's own subscribe() method (exactly what
+    //   host/.core/public/index.php itself calls at boot), this reproduces
+    //   the production container wiring closely enough that
+    //   TaskerPlugin::createEnvironment()/renameEnvironment()/
+    //   deleteEnvironment() run FOR REAL, unmodified, through ousHandler(),
+    //   \Whity\app(), the real core OusApiHandler, and the real ou.* hook
+    //   dispatch -- landing on a real audit_log row. No fake subscriber, no
+    //   hand-dispatched hook: every collaborator below is the genuine core
+    //   class, and the ONLY thing this test constructs that index.php itself
+    //   doesn't is the Database wrapper (via its own documented test seam)
+    //   and the tenant id (which a real request would resolve from a JWT).
+    //
+    // This needed three supporting changes, made alongside these tests:
+    //   - plugin/composer.json: added host/.core's Core/Hooks, Core/Tenant,
+    //     Core/Request.php, Core/Response.php, Database/{Database,
+    //     ConnectionException}.php, Http/{InputLimits,JsonBody,PaginationParams}.php
+    //     and Api/OusApiHandler.php to the existing autoload-dev classmap
+    //     (which already carried Core/Audit, Core/Taxonomy, Core/Identity for
+    //     the exact same reason), plus a "files" entry for
+    //     host/.core/src/helpers.php so \Whity\app()/register_service() exist
+    //     at all -- neither is defined anywhere on this plugin's own
+    //     autoload path otherwise.
+    //   - This file's setUp(): organizational_units gained the `description`
+    //     column it was missing (a genuine drift from the real migration
+    //     schema -- see setUp()'s own comment) because OusApiHandler::create()/
+    //     update() write it unconditionally; and a matching audit_log table.
+    //   - tearDown() (new): unconditionally resets TenantContext and clears
+    //     the two container registrations these tests add, so this
+    //     process-global state can never leak into a later test in the same
+    //     PHPUnit run regardless of pass/fail/exception.
+    //
+    // What this does NOT prove: that host/.core/public/index.php's OWN
+    // bootstrap wires HookManager/AuditLogger together correctly at
+    // production boot (that file is never patched or executed by this
+    // suite) -- only that IF it does (which reading it, at
+    // host/.core/public/index.php:314-337, confirms it does), this plugin's
+    // route methods participate correctly. Confirming the former end-to-end
+    // against a live worker is what host/scripts/mcp-tools.ps1's sibling
+    // smoke-test path is for, and npm run host:up cannot currently reach
+    // that in this environment (known defect).
+
+    /**
+     * Wires the SAME container seam ousHandler()/resolvePdo() consume in
+     * production -- \Whity\app()-resolved Database + HookManager services --
+     * against this test's own $this->pdo, with a REAL AuditLogger subscribed
+     * to the REAL HookManager exactly as host/.core/public/index.php:336-337
+     * does. Every environment alias test below calls this once, then invokes
+     * the plugin's route method directly; tearDown() clears both
+     * registrations afterwards.
+     */
+    private function registerOusContainer(): void
+    {
+        \Whity\Core\Tenant\TenantContext::reset();
+        \Whity\Core\Tenant\TenantContext::setTenantId(7);
+
+        $hookManager = new \Whity\Core\Hooks\HookManager(null, null);
+        (new \Whity\Core\Audit\AuditLogger($this->pdo, new \Psr\Log\NullLogger()))->subscribe($hookManager);
+
+        \Whity\register_service(
+            \Whity\Database\Database::class,
+            \Whity\Database\Database::withFactory(fn (): PDO => $this->pdo)
+        );
+        \Whity\register_service(\Whity\Core\Hooks\HookManager::class, $hookManager);
+    }
+
+    private function hostRequest(string $method, string $path, string $body = ''): \Whity\Core\Request
+    {
+        return new \Whity\Core\Request($method, $path, ['content-type' => 'application/json'], $body);
+    }
+
+    /**
+     * @return array<int, array<string, mixed>>
+     */
+    private function auditRowsFor(int $tenantId): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT action, target_type, target_id FROM audit_log WHERE tenant_id = :tenant_id ORDER BY id'
+        );
+        $stmt->execute([':tenant_id' => $tenantId]);
+
+        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * The brief's Step 2, delivered as originally specified: create_environment
+     * really does dispatch core's ou.created hook, and core's real,
+     * subscribed AuditLogger really does turn it into an audit_log row --
+     * proving the hook path ran rather than a silent direct INSERT.
+     */
+    public function testCreateEnvironmentDispatchesTheOuCreatedHookAndAuditLogsIt(): void
+    {
+        $this->registerOusContainer();
+
+        $plugin = new TaskerPlugin();
+        $response = $plugin->createEnvironment($this->hostRequest(
+            'POST',
+            '/api/tasker/environments',
+            (string) json_encode(['name' => 'Engineering'])
+        ));
+
+        self::assertSame(201, $response->getStatusCode());
+        $created = json_decode($response->getBody(), true);
+        $ouId = (int) $created['data']['id'];
+
+        $rows = $this->auditRowsFor(7);
+        self::assertCount(1, $rows);
+        self::assertSame('ou.created', $rows[0]['action']);
+        self::assertSame('ou', $rows[0]['target_type']);
+        self::assertSame($ouId, (int) $rows[0]['target_id']);
+    }
+
+    /**
+     * rename_environment's identifier travels as `environment_id` in the
+     * body (this alias has no {id} path parameter); this proves BOTH that
+     * the translation into OusApiHandler::update()'s `$params['id']` shape
+     * actually works end to end (the OU is genuinely renamed in the
+     * database, not just left alone by a silently-ignored parameter) AND
+     * that the rename dispatches ou.updated into the audit trail.
+     */
+    public function testRenameEnvironmentUpdatesTheRowAndAuditLogsOuUpdated(): void
+    {
+        $this->registerOusContainer();
+        // makeOu()'s first argument IS the row's id (an explicit INSERT, not
+        // an autoincrement read-back) -- see makeOu()'s own definition above.
+        $ouId = 1;
+        $this->makeOu($ouId, 7, null);
+
+        $plugin = new TaskerPlugin();
+        $response = $plugin->renameEnvironment($this->hostRequest(
+            'PATCH',
+            '/api/tasker/environments',
+            (string) json_encode(['environment_id' => $ouId, 'name' => 'Renamed OU'])
+        ));
+
+        self::assertSame(200, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT name FROM organizational_units WHERE id = {$ouId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(
+            'Renamed OU',
+            $row['name'],
+            'the environment_id -> $params[\'id\'] translation must actually reach OusApiHandler::update(), '
+                . 'not be silently dropped'
+        );
+
+        $rows = $this->auditRowsFor(7);
+        self::assertCount(1, $rows);
+        self::assertSame('ou.updated', $rows[0]['action']);
+        self::assertSame($ouId, (int) $rows[0]['target_id']);
+    }
+
+    /**
+     * MUST read environment_id via identifierFromRequest(), never the body
+     * alone -- this test deliberately sends the identifier ONLY in the query
+     * string with an EMPTY body, mirroring exactly what core's MCP transport
+     * does for every DELETE call (see deleteEnvironment()'s own docblock). A
+     * body-only implementation would 400 here.
+     */
+    public function testDeleteEnvironmentReadsTheQueryStringIdentifierAndAuditLogsOuDeleted(): void
+    {
+        $this->registerOusContainer();
+        $ouId = 1;
+        $this->makeOu($ouId, 7, null);
+
+        $previousGet = $_GET;
+        $_GET = ['environment_id' => (string) $ouId];
+        try {
+            $plugin = new TaskerPlugin();
+            $response = $plugin->deleteEnvironment($this->hostRequest('DELETE', '/api/tasker/environments', ''));
+        } finally {
+            $_GET = $previousGet;
+        }
+
+        self::assertSame(204, $response->getStatusCode());
+
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM organizational_units WHERE id = {$ouId}")->fetchColumn();
+        self::assertSame(0, $count, 'the OU must actually be gone -- proving the query-string identifier reached OusApiHandler::delete()');
+
+        $rows = $this->auditRowsFor(7);
+        self::assertCount(1, $rows);
+        self::assertSame('ou.deleted', $rows[0]['action']);
+        self::assertSame($ouId, (int) $rows[0]['target_id']);
+    }
+
+    public function testListEnvironmentsReturnsTheTenantsOusWithNoAuditSideEffect(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+
+        $plugin = new TaskerPlugin();
+        $response = $plugin->listEnvironments($this->hostRequest('GET', '/api/tasker/environments'));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertCount(2, $payload['data']);
+
+        self::assertCount(0, $this->auditRowsFor(7), 'a read must never write an audit row');
+    }
+
+    /**
+     * Global constraint: caller identity or tenant context that cannot be
+     * resolved must fail closed with 403 -- exercised here by simply never
+     * calling registerOusContainer()/TenantContext::setTenantId(), so
+     * requireTenantId() sees the same unresolved state a request with no
+     * valid tenant claim would.
+     */
+    public function testEnvironmentRoutesFailClosedWithoutAResolvedTenant(): void
+    {
+        \Whity\Core\Tenant\TenantContext::reset();
+
+        $plugin = new TaskerPlugin();
+        $response = $plugin->listEnvironments($this->hostRequest('GET', '/api/tasker/environments'));
+
+        self::assertSame(403, $response->getStatusCode());
     }
 }
