@@ -1472,10 +1472,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      *
      * `replace` (this route's own body field) is the INVERSE of
      * ProjectsApiHandler::updateContext()'s `$merge` parameter (D1b Task 9
-     * brief resolution #5): `replace: true` -> `$merge = false`; an ABSENT
-     * `replace` -> `$merge = true`. Merge is the default because the
-     * original's tool is used to add Foundation keys incrementally, one call
-     * at a time, not to overwrite the whole document on every call.
+     * brief resolution #5) — the inversion itself is
+     * {@see self::mergeFromReplace()}, extracted (not inlined here) so it
+     * gets a direct unit test; see that method's own docblock for why.
      *
      * `context` must be a genuine JSON object (D1b Task 9 brief resolution
      * #8) — checked via the pure {@see self::isJsonObject()} BEFORE
@@ -1527,9 +1526,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Project not found', 404);
         }
 
-        $replace = $this->bodyParamBool($decoded, 'replace', false);
+        $merge = $this->mergeFromReplace($decoded);
 
-        return (new ProjectsApiHandler($pdo))->updateContext($tenantId, $ou['ouId'], $projectId, $context, !$replace);
+        return (new ProjectsApiHandler($pdo))->updateContext($tenantId, $ou['ouId'], $projectId, $context, $merge);
     }
 
     /**
@@ -3048,6 +3047,41 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (bool) $raw;
+    }
+
+    /**
+     * The `$merge` value {@see \Tasker\Api\ProjectsApiHandler::updateContext()}
+     * receives, computed from update_project_context's own `replace` body
+     * field (D1b Task 9 brief resolution #5): `replace` is the INVERSE of
+     * `$merge` — `replace: true` -> `$merge = false`; an ABSENT `replace` ->
+     * `$merge = true` (merge is the default, since the original's tool is
+     * used to add Foundation keys incrementally, one call at a time, not to
+     * overwrite the whole document on every call).
+     *
+     * REVIEW FIX (D1b Task 9 review): this inversion used to be an inline
+     * `!$this->bodyParamBool(...)` expression inside updateProjectContext()
+     * itself — the ONE line in that task's diff with no test at any layer,
+     * because updateProjectContext() calls resolvePdo() and is unreachable
+     * from PHPUnit. Both of the inversion's INPUTS were well tested
+     * (bodyParamBool()'s own string parsing; ProjectsApiHandler::updateContext()'s
+     * behaviour given an explicit `$merge` of `true`/`false`), but the
+     * inversion itself — the one line that actually implements "merge is the
+     * default, replace flips it" — was not: flipping `!$replace` to
+     * `$replace` would have flipped the DEFAULT to "replace on every call"
+     * and still passed every existing test, silently destroying a project's
+     * accumulated Foundation context on the very next partial update.
+     * Extracted here, matching the exact shape already used three times in
+     * this same file ({@see self::resolveGroupMembership()},
+     * {@see self::isJsonObject()}, {@see self::bodyParamBool()} itself) for
+     * composition logic a route method's own resolvePdo() call makes
+     * otherwise untestable — see TaskerPluginTest for direct coverage of
+     * all three cases (absent, `replace: true`, `replace: false`).
+     *
+     * @param array<string, mixed> $decoded
+     */
+    private function mergeFromReplace(array $decoded): bool
+    {
+        return !$this->bodyParamBool($decoded, 'replace', false);
     }
 
     /**

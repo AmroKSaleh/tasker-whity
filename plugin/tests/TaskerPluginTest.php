@@ -1207,4 +1207,50 @@ final class TaskerPluginTest extends TestCase
             self::assertTrue($this->invokeBodyParamBool(['replace' => $truthy], 'replace', false));
         }
     }
+
+    /**
+     * REVIEW FIX (D1b Task 9 review): the `replace` -> `$merge` inversion
+     * used to be an inline `!$this->bodyParamBool(...)` expression inside
+     * updateProjectContext() itself, the one line in that task's diff with
+     * no coverage at any layer — updateProjectContext() calls resolvePdo()
+     * and is unreachable from PHPUnit, so nothing exercised the inversion's
+     * DIRECTION, only its two inputs (bodyParamBool()'s own string parsing,
+     * and ProjectsApiHandler::updateContext()'s behaviour given an already-
+     * computed `$merge` of `true`/`false`). Flipping `!$replace` to
+     * `$replace` would have flipped the DEFAULT to "replace on every call"
+     * and still passed every test in the suite, silently destroying a
+     * project's accumulated Foundation context on the next partial update —
+     * exactly the failure mode D1b Task 9 brief resolution #5 named. These
+     * three tests close that gap directly, via Reflection, the same reason
+     * every other composition helper in this file is Reflection-tested.
+     */
+    private function invokeMergeFromReplace(array $decoded): bool
+    {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'mergeFromReplace');
+        $method->setAccessible(true);
+
+        /** @var bool $result */
+        $result = $method->invoke($plugin, $decoded);
+
+        return $result;
+    }
+
+    public function testMergeFromReplaceDefaultsToMergeWhenReplaceIsAbsent(): void
+    {
+        self::assertTrue(
+            $this->invokeMergeFromReplace(['context' => ['goal' => 'x']]),
+            'merge must be the default -- the original tool adds Foundation keys incrementally, not wholesale'
+        );
+    }
+
+    public function testMergeFromReplaceIsFalseWhenReplaceIsExplicitlyTrue(): void
+    {
+        self::assertFalse($this->invokeMergeFromReplace(['context' => ['goal' => 'x'], 'replace' => true]));
+    }
+
+    public function testMergeFromReplaceIsTrueWhenReplaceIsExplicitlyFalse(): void
+    {
+        self::assertTrue($this->invokeMergeFromReplace(['context' => ['goal' => 'x'], 'replace' => false]));
+    }
 }

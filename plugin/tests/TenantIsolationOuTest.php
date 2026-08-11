@@ -1850,11 +1850,18 @@ final class TenantIsolationOuTest extends TestCase
 
     /**
      * The brief's own Step 1 test (D1b Task 9), adapted to the real 5-arg
-     * handler signature — merge is the default (an absent `replace`), and
-     * preserves keys the write does not touch; `$merge = false` replaces the
-     * whole document instead.
+     * handler signature. NAMING NOTE (D1b Task 9 review): this asserts the
+     * handler's behaviour given an EXPLICIT `$merge` of `true` then `false`
+     * — it does not exercise any default, since both calls pass `$merge`
+     * outright. The "absent `replace` defaults to merge" claim belongs to
+     * {@see \Tasker\Tests\TaskerPluginTest::testMergeFromReplaceDefaultsToMergeWhenReplaceIsAbsent()}
+     * instead, which is what actually computes that default (see
+     * {@see \Tasker\TaskerPlugin::mergeFromReplace()}'s own docblock) — this
+     * test was originally named as if it covered the default too, before
+     * that extraction existed, which would have left both tests LOOKING
+     * like they covered the default while neither one actually did.
      */
-    public function testUpdateContextMergesByDefaultAndReplacesWhenAsked(): void
+    public function testUpdateContextMergesWhenToldToAndReplacesWhenToldTo(): void
     {
         $projectId = $this->makeProjectDirect(7, null, 'Context Project');
         $handler = new ProjectsApiHandler($this->pdo);
