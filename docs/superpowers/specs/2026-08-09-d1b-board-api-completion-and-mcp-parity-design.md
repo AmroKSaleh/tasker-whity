@@ -201,11 +201,33 @@ That accounts for all 95 (34 + 19 + 14 + 15 + 5 + 2 + 6).
 
 The roadmap (§6) specifies that `create_environment`/`list_environments` and friends become thin aliases over core's OU endpoints, because Tasker's "environment" concept was replaced by whity's Organizational Units.
 
-Core exposes `/api/ous` and `/api/ous/{id}` via `OusApiHandler`, but there is **no OU repository** to construct directly — unlike `TagRepository` or `AuditLogger`, which the plugin already reuses that way. Creating and deleting OUs also affects RBAC role inheritance, which makes writing to `organizational_units` from a plugin more invasive than the reads `OuScopeResolver` already performs.
+Core exposes `/api/ous` and `/api/ous/{id}` via `OusApiHandler`, but there is **no OU repository** to construct directly — unlike `TagRepository` or `AuditLogger`, which the plugin already reuses that way.
 
-**The plan must verify how to delegate before implementing**, choosing between constructing `OusApiHandler` directly (preferred if its constructor allows), or plugin-owned tenant-scoped SQL against `organizational_units` (acceptable for reads, to be justified explicitly for writes). Guessing here is exactly the failure mode that cost D1 several fix rounds.
+### Verified 2026-08-11: delegate to `OusApiHandler`, do not hand-roll SQL
 
-Whichever path: these four tools are aliases, not a reimplementation. Tasker owns no environment table.
+The plan-time verification this section demanded has been done. The answer is unambiguous, and it went the opposite way from the "plugin-owned SQL" fallback:
+
+**All four aliases must delegate to `OusApiHandler`, including the reads.** Writing to `organizational_units` directly would silently skip the hooks core fires on every OU mutation — `ou.creating`, `ou.created`, `ou.updating`, `ou.updated`, `ou.deleting`, `ou.deleted`, plus `.async` variants (`src/Api/OusApiHandler.php`). Core's own `AuditLogger` self-subscribes to exactly those `ou.*` hooks, so bypassing the handler means OU changes made through Tasker never reach the platform audit trail. That is a correctness defect, not a style preference.
+
+**Delegation is clean and needs no adapter**, contrary to what the Request/Response type split suggests:
+
+- **Construction:** `new OusApiHandler($this->resolvePdo(), \Whity\app(HookManager::class))`. Both dependencies are container-resolvable — `HookManager::class` is registered at `public/index.php:318` via `\Whity\register_service()`, the same mechanism `resolvePdo()` already uses for `Database::class`.
+- **Response:** `Whity\Core\Response` is an **empty subclass** of `Whity\Sdk\Http\Response` — its own docblock calls it "the host-side alias of the SDK response shape." A core Response therefore *is* an SDK Response and can be returned straight from an SDK-typed plugin route method. No conversion.
+- **Request:** `Whity\Core\Request` is likewise an empty subclass of the SDK's. Core's kernel constructs the subclass and passes it to SDK-typed plugin handlers ("every `Whity\Core\Request` IS an SDK request, so SDK-typed plugin handlers receive it transparently"), so at runtime the plugin already holds a core Request. Static analysis still sees the SDK parent type, so each alias route method narrows before delegating:
+
+```php
+if (!$request instanceof \Whity\Core\Request) {
+    return Response::error('Unexpected request type', 500);
+}
+
+return (new OusApiHandler($this->resolvePdo(), \Whity\app(HookManager::class)))->list($request);
+```
+
+The narrowing is honest rather than defensive theatre: it is always true at runtime, and it keeps PHPStan clean at level 6 without a cast.
+
+**Consequence for the plugin's dependency boundary:** this is the first time Tasker touches a core *HTTP handler* rather than a plain PDO-taking repository (`TagRepository`, `EntityTagRepository`, `AuditLogger`). That is a heavier coupling and should be called out in the plan, but it is the correct trade — the alternative loses the audit trail.
+
+These four tools are aliases, not a reimplementation. Tasker owns no environment table.
 
 ---
 
