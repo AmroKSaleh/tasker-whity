@@ -1374,4 +1374,105 @@ final class TenantIsolationOuTest extends TestCase
         // A caller in sibling OU 2 must not, because the PROJECT is out of scope.
         self::assertNull(IdentifierResolver::resolveTask($this->pdo, 7, 2, 'SIB-31'));
     }
+
+    // Task review finding #1: resolveSection()/resolveGroup() (via
+    // resolveStructural()) never referenced $callerOuId at all -- an
+    // OU-restricted caller passing a sibling OU's section/group id or UUID
+    // resolved it anyway. Fixed to join through to tasker_projects and apply
+    // OuScopeResolver::whereFragment('p.ou_id'), the same shape as
+    // taskByColumn(). These cases prove it, and finding #2 is the reason
+    // there was no test to catch the original gap in the first place.
+
+    public function testResolveSectionAcceptsIdAndUuidWithinScope(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section resolve project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_sections WHERE id = {$sectionId}")->fetchColumn();
+
+        self::assertSame($sectionId, IdentifierResolver::resolveSection($this->pdo, 7, null, $sectionId));
+        self::assertSame($sectionId, IdentifierResolver::resolveSection($this->pdo, 7, null, $publicId));
+    }
+
+    public function testResolveSectionRefusesIdAndUuidAcrossATenantBoundary(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_sections WHERE id = {$otherSectionId}")->fetchColumn();
+
+        self::assertNull(IdentifierResolver::resolveSection($this->pdo, 7, null, $otherSectionId));
+        self::assertNull(IdentifierResolver::resolveSection($this->pdo, 7, null, $publicId));
+    }
+
+    public function testResolveSectionRefusesIdAndUuidAcrossAnOuBoundary(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_sections WHERE id = {$siblingSectionId}")->fetchColumn();
+
+        // Caller restricted to OU 2 must not reach OU 3's section by id or UUID.
+        self::assertNull(IdentifierResolver::resolveSection($this->pdo, 7, 2, $siblingSectionId));
+        self::assertNull(IdentifierResolver::resolveSection($this->pdo, 7, 2, $publicId));
+    }
+
+    public function testResolveSectionBySlugRequiresTheParentAndRefusesAcrossAnOuBoundary(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $mineProjectId = $this->makeProjectDirect(7, 2, 'Mine slug project');
+        $mineSectionId = $this->makeSectionDirect(7, $mineProjectId); // slug 'backlog'
+
+        // Within scope, with the parent supplied, a slug resolves.
+        self::assertSame($mineSectionId, IdentifierResolver::resolveSection($this->pdo, 7, 2, 'backlog', $mineProjectId));
+
+        // Without a parent, a slug is genuinely ambiguous -- refuse rather than guess.
+        self::assertNull(IdentifierResolver::resolveSection($this->pdo, 7, 2, 'backlog', null));
+
+        // A sibling OU's project (also named 'backlog') must not resolve even
+        // though the parent id is supplied -- the OU join still applies.
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling slug project');
+        $this->makeSectionDirect(7, $siblingProjectId); // slug 'backlog' too, different project
+        self::assertNull(IdentifierResolver::resolveSection($this->pdo, 7, 2, 'backlog', $siblingProjectId));
+    }
+
+    public function testResolveGroupAcceptsIdAndUuidWithinScope(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Group resolve project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId = $this->makeGroupDirect(7, $sectionId, 'Backend');
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_groups WHERE id = {$groupId}")->fetchColumn();
+
+        self::assertSame($groupId, IdentifierResolver::resolveGroup($this->pdo, 7, null, $groupId));
+        self::assertSame($groupId, IdentifierResolver::resolveGroup($this->pdo, 7, null, $publicId));
+    }
+
+    public function testResolveGroupRefusesIdAndUuidAcrossATenantBoundary(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherGroupId = $this->makeGroupDirect(9, $otherSectionId, 'Other group');
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_groups WHERE id = {$otherGroupId}")->fetchColumn();
+
+        self::assertNull(IdentifierResolver::resolveGroup($this->pdo, 7, null, $otherGroupId));
+        self::assertNull(IdentifierResolver::resolveGroup($this->pdo, 7, null, $publicId));
+    }
+
+    public function testResolveGroupRefusesIdAndUuidAcrossAnOuBoundary(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingGroupId = $this->makeGroupDirect(7, $siblingSectionId, 'Sibling group');
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_groups WHERE id = {$siblingGroupId}")->fetchColumn();
+
+        // Caller restricted to OU 2 must not reach OU 3's group by id or UUID,
+        // via the two-hop join (group -> section -> project) either.
+        self::assertNull(IdentifierResolver::resolveGroup($this->pdo, 7, 2, $siblingGroupId));
+        self::assertNull(IdentifierResolver::resolveGroup($this->pdo, 7, 2, $publicId));
+    }
 }

@@ -264,7 +264,16 @@ final class IdentifierResolver
         string|int|null $raw,
         ?int $projectId = null
     ): ?int {
-        return self::resolveStructural($db, $tenantId, $callerOuId, $raw, 'tasker_sections', 'project_id', $projectId);
+        return self::resolveStructural(
+            $db,
+            $tenantId,
+            $callerOuId,
+            $raw,
+            'tasker_sections',
+            'project_id',
+            $projectId,
+            'JOIN tasker_projects p ON p.id = t.project_id'
+        );
     }
 
     public static function resolveGroup(
@@ -274,12 +283,35 @@ final class IdentifierResolver
         string|int|null $raw,
         ?int $sectionId = null
     ): ?int {
-        return self::resolveStructural($db, $tenantId, $callerOuId, $raw, 'tasker_groups', 'section_id', $sectionId);
+        return self::resolveStructural(
+            $db,
+            $tenantId,
+            $callerOuId,
+            $raw,
+            'tasker_groups',
+            'section_id',
+            $sectionId,
+            'JOIN tasker_sections s ON s.id = t.section_id JOIN tasker_projects p ON p.id = s.project_id'
+        );
     }
 
     /**
      * Sections and groups share a shape: id | public_id | slug, with slug
      * unique only within a parent, so a slug lookup needs that parent.
+     *
+     * Neither table carries its own ou_id — only tasker_projects does — so
+     * $projectJoin walks from $table (aliased "t") up to tasker_projects
+     * (aliased "p"): one hop for a section, two for a group. Every branch
+     * (id, UUID, AND slug) applies OuScopeResolver::whereFragment('p.ou_id')
+     * unconditionally, on the SAME static SQL template, exactly like
+     * taskByColumn() — a resolver that enforced this for tasks' short ids but
+     * not for sections/groups reached by id or UUID would be a boundary that
+     * tests clean and leaks in production.
+     *
+     * tenant_id is bound on BOTH $table and tasker_projects, under distinct
+     * placeholder names — pdo_pgsql rejects reusing one named placeholder
+     * twice under a native prepare, the same reason taskByColumn() binds
+     * :tenant_id and :tenant_id_p separately.
      */
     private static function resolveStructural(
         PDO $db,
@@ -288,7 +320,8 @@ final class IdentifierResolver
         string|int|null $raw,
         string $table,
         string $parentColumn,
-        ?int $parentId
+        ?int $parentId,
+        string $projectJoin
     ): ?int {
         $form  = self::classify($raw);
         $value = trim((string) ($raw ?? ''));
@@ -296,6 +329,9 @@ final class IdentifierResolver
         if ($form === 'empty' || $form === 'malformed_short_id' || $form === 'short_id') {
             return null;
         }
+
+        $scope    = OuScopeResolver::scopeParams($db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
 
         if ($form === 'slug' || $form === 'prefix') {
             // A slug is only unique within its parent; without one it is
@@ -305,15 +341,19 @@ final class IdentifierResolver
             }
 
             $stmt = $db->prepare(
-                "SELECT id FROM {$table}
-                 WHERE slug = :slug AND {$parentColumn} = :parent_id AND tenant_id = :tenant_id
+                "SELECT t.id FROM {$table} t
+                 {$projectJoin}
+                 WHERE t.slug = :slug AND t.{$parentColumn} = :parent_id
+                   AND t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
                  LIMIT 1"
             );
-            $stmt->execute([
-                ':slug'      => strtolower($value),
-                ':parent_id' => $parentId,
-                ':tenant_id' => $tenantId,
-            ]);
+            $stmt->bindValue(':slug', strtolower($value));
+            $stmt->bindValue(':parent_id', $parentId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+            $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+            $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+            $stmt->execute();
             $id = $stmt->fetchColumn();
 
             return $id === false ? null : (int) $id;
@@ -321,9 +361,18 @@ final class IdentifierResolver
 
         $column = $form === 'uuid' ? 'public_id' : 'id';
         $stmt = $db->prepare(
-            "SELECT id FROM {$table} WHERE {$column} = :value AND tenant_id = :tenant_id LIMIT 1"
+            "SELECT t.id FROM {$table} t
+             {$projectJoin}
+             WHERE t.{$column} = :value
+               AND t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
+             LIMIT 1"
         );
-        $stmt->execute([':value' => $value, ':tenant_id' => $tenantId]);
+        $stmt->bindValue(':value', $value);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
         $id = $stmt->fetchColumn();
 
         return $id === false ? null : (int) $id;
