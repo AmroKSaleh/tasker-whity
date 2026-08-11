@@ -362,6 +362,93 @@ final class TaskerPluginTest extends TestCase
     }
 
     /**
+     * REVIEW FIX (post-merge, item 2): delete_section's delete_tasks and
+     * delete_project's confirmed are both declared under `request` (a JSON
+     * BODY shape) in their route schemas, but were read via
+     * queryParamBool() alone — query-string only. A direct (non-MCP) HTTP
+     * DELETE with a genuine JSON body (`{"confirmed": true}`) therefore read
+     * as false: fail-safe, but disagreeing with the advertised shape.
+     * paramBool() fixes this with the SAME body-then-query precedence
+     * identifierFromRequest() already uses for every identifier field in
+     * this class — these tests are the boolean counterpart of
+     * testIdentifierFromRequestPrefersTheBodyOverTheQueryStringWhenBothArePresent
+     * (if that test exists elsewhere in this suite) and of
+     * queryParamBool()'s own falsy-string-set tests above, applied to the
+     * new body-first precedence.
+     */
+    private function invokeParamBool(Request $request, string $name, bool $default): bool
+    {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'paramBool');
+        $method->setAccessible(true);
+
+        /** @var bool $result */
+        $result = $method->invoke($plugin, $request, $name, $default);
+
+        return $result;
+    }
+
+    public function testParamBoolReadsAGenuineJsonBooleanFromTheBody(): void
+    {
+        $request = new Request('DELETE', '/api/tasker/projects', [], (string) json_encode(['confirmed' => true]));
+
+        self::assertTrue($this->invokeParamBool($request, 'confirmed', false));
+    }
+
+    public function testParamBoolReadsAFalseJsonBooleanFromTheBodyRatherThanTheDefault(): void
+    {
+        $request = new Request('DELETE', '/api/tasker/projects', [], (string) json_encode(['confirmed' => false]));
+
+        self::assertFalse($this->invokeParamBool($request, 'confirmed', true));
+    }
+
+    /**
+     * THE MCP TRANSPORT SHAPE: core empties the DELETE body and flattens
+     * every argument into the query string instead — this is what every
+     * real MCP delete_section/delete_project call actually looks like, and
+     * it must keep working exactly as queryParamBool() alone already proved.
+     */
+    public function testParamBoolFallsBackToTheQueryStringWhenTheBodyIsEmpty(): void
+    {
+        $request = new Request('DELETE', '/api/tasker/sections?delete_tasks=true', [], '');
+
+        self::assertTrue($this->invokeParamBool($request, 'delete_tasks', false));
+    }
+
+    public function testParamBoolPrefersTheBodyOverTheQueryStringWhenBothArePresent(): void
+    {
+        $request = new Request(
+            'DELETE',
+            '/api/tasker/projects?confirmed=false',
+            [],
+            (string) json_encode(['confirmed' => true])
+        );
+
+        self::assertTrue(
+            $this->invokeParamBool($request, 'confirmed', false),
+            'a genuine JSON body value must win over a conflicting query-string value, matching '
+                . 'identifierFromRequest()\'s own precedence'
+        );
+    }
+
+    public function testParamBoolTreatsAFalsyStringBodyValueAsFalse(): void
+    {
+        // A caller sending "false" as a STRING rather than a genuine JSON
+        // boolean — bodyParamBool()'s own defensive falsy-string handling.
+        $request = new Request('DELETE', '/api/tasker/projects', [], (string) json_encode(['confirmed' => 'false']));
+
+        self::assertFalse($this->invokeParamBool($request, 'confirmed', true));
+    }
+
+    public function testParamBoolUsesTheSuppliedDefaultWhenAbsentFromBothSources(): void
+    {
+        $request = new Request('DELETE', '/api/tasker/projects', [], '');
+
+        self::assertFalse($this->invokeParamBool($request, 'confirmed', false));
+        self::assertTrue($this->invokeParamBool($request, 'confirmed', true));
+    }
+
+    /**
      * Task 5 review finding: the new updateSection()/deleteSection()/
      * updateGroup()/deleteGroup() branch — classify an optional parent
      * identifier, 400 on malformed, resolve it only when non-empty, pass it
@@ -395,14 +482,15 @@ final class TaskerPluginTest extends TestCase
         int $tenantId,
         ?int $callerOuId,
         string $key,
-        callable $resolver
+        callable $resolver,
+        ?int $defaultValue = null
     ): array {
         $plugin = new TaskerPlugin();
         $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveOptionalParentId');
         $method->setAccessible(true);
 
         /** @var array{ok: bool, value: ?int} $result */
-        $result = $method->invoke($plugin, $request, $pdo, $tenantId, $callerOuId, $key, $resolver);
+        $result = $method->invoke($plugin, $request, $pdo, $tenantId, $callerOuId, $key, $resolver, $defaultValue);
 
         return $result;
     }
@@ -424,6 +512,80 @@ final class TaskerPluginTest extends TestCase
         self::assertTrue($result['ok']);
         self::assertNull($result['value']);
         self::assertFalse($called, 'an absent parent identifier must not trigger a resolver call at all');
+    }
+
+    /**
+     * REVIEW FIX (post-merge, items 3 and 4): $defaultValue is new —
+     * listGroups()/createGroup() are the only two callers that pass one
+     * (defaultProjectIdFor()'s result), and both route descriptions now
+     * advertise "Omit to use your default project", but nothing exercised
+     * the 'empty' branch WITH a non-null default before this test existed
+     * (item 3 — fix 4 in this same task existed precisely because a
+     * description advertised a path that could not execute, and leaving
+     * this one uncovered would be the same mistake). It also pins item 4's
+     * fix: the FIRST version of this behaviour returned $defaultValue
+     * directly, bypassing OU re-validation entirely — every other
+     * defaultProjectIdFor() consumer in this class instead RE-RESOLVES the
+     * stored default through the resolver's own OU-scoped 'empty' branch
+     * (see rankTasks()'s own docblock: "a default that has since moved out
+     * of OU scope must not be honoured"). The spy below proves the resolver
+     * IS now called, with $raw passed through untouched and $defaultValue as
+     * its own 5th argument — exactly the shape
+     * IdentifierResolver::resolveProject()'s real 5-argument signature
+     * expects.
+     */
+    public function testResolveOptionalParentIdRevalidatesTheSuppliedDefaultThroughTheResolverWhenAbsent(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('GET', '/api/tasker/groups', [], '');
+
+        $seen = null;
+        $resolver = function (PDO $calledPdo, int $tenantId, ?int $callerOuId, $raw, ?int $defaultValue = null) use (&$seen, $pdo): ?int {
+            $seen = [$calledPdo === $pdo, $tenantId, $callerOuId, $raw, $defaultValue];
+
+            return 55;
+        };
+
+        $result = $this->invokeResolveOptionalParentId($request, $pdo, 7, 3, 'project_id', $resolver, 55);
+
+        self::assertTrue($result['ok']);
+        self::assertSame(55, $result['value']);
+        self::assertSame(
+            [true, 7, 3, null, 55],
+            $seen,
+            'an absent parent identifier with a supplied default must be RE-VALIDATED through the resolver — '
+                . 'called with the untouched raw value and the default as its own 5th argument — not returned '
+                . 'directly, matching every other defaultProjectIdFor() call site\'s OU re-validation'
+        );
+    }
+
+    // NOTE: the "no default supplied" mirror image of the test above is
+    // already covered by testResolveOptionalParentIdReturnsNullWithoutCallingTheResolverWhenAbsent()
+    // near the top of this Reflection-test block — that test's own contract
+    // (resolver never called for the 'empty' form) is UNCHANGED by the
+    // $defaultValue === null short-circuit in resolveOptionalParentId().
+
+    /**
+     * The default must apply ONLY to the 'empty' form — a SUPPLIED (even if
+     * unresolvable) identifier must never be silently swapped for the
+     * default. Otherwise a caller who names a real but out-of-scope/
+     * non-existent project_id would get the WRONG project substituted in
+     * rather than the 404 they should see.
+     */
+    public function testResolveOptionalParentIdIgnoresTheDefaultWhenAnIdentifierIsSupplied(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('GET', '/api/tasker/groups?project_id=ZZZ', [], '');
+
+        $resolver = fn (PDO $pdo, int $tenantId, ?int $callerOuId, $raw): ?int => null;
+
+        $result = $this->invokeResolveOptionalParentId($request, $pdo, 7, null, 'project_id', $resolver, 55);
+
+        self::assertTrue($result['ok']);
+        self::assertNull(
+            $result['value'],
+            'a SUPPLIED identifier that fails to resolve must stay null, never silently fall back to the default'
+        );
     }
 
     public function testResolveOptionalParentIdRejectsAMalformedShortIdWithoutCallingTheResolver(): void

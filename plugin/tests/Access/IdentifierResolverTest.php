@@ -13,12 +13,14 @@ final class IdentifierResolverTest extends TestCase
     private PDO $pdo;
 
     /**
-     * resolveMilestone() makes no OuScopeResolver call at all -- milestones
-     * are addressed by (id|public_id, task_id, tenant_id) only, never by
-     * ou_id -- so unlike resolveProject()/resolveTask()/resolveSection()/
-     * resolveGroup() it is genuinely testable against SQLite. A minimal
-     * fixture table is enough; the real migration's BIGSERIAL/UUID column
-     * types are PostgreSQL-specific and irrelevant to what's under test here.
+     * resolveMilestoneById()/resolveMilestoneByIndex() (D1b Task 12b — split
+     * from the single, id-first resolveMilestone() that used to live here)
+     * make no OuScopeResolver call at all -- milestones are addressed by
+     * (id|public_id, task_id, tenant_id) only, never by ou_id -- so unlike
+     * resolveProject()/resolveTask()/resolveSection()/resolveGroup() they
+     * are genuinely testable against SQLite. A minimal fixture table is
+     * enough; the real migration's BIGSERIAL/UUID column types are
+     * PostgreSQL-specific and irrelevant to what's under test here.
      */
     protected function setUp(): void
     {

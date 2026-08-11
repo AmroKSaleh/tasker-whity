@@ -74,6 +74,35 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
+     * DESTRUCTIVE ROUTE SWEEP (D1b Task 12b review): a destructive route must
+     * never resolve its OWN target identifier from a caller default —
+     * confirming a request only means something if the caller also named
+     * what they confirmed. deleteProject() violated this (fixed in this same
+     * review round: an omitted project_id now 400s instead of falling back
+     * to defaultProjectIdFor(), even with confirmed:true). Checked every
+     * other DELETE route in this class for the same shape; none of the
+     * other five have it:
+     *   - deleteEnvironment(): explicit `if ($environmentId === null) return
+     *     Response::error('environment_id is required', 400);` — no default
+     *     path exists at all.
+     *   - deleteTask(): task_id resolves via IdentifierResolver::resolveTask(),
+     *     which returns null unconditionally for the 'empty' form (no
+     *     $defaultProjectId-shaped 5th argument exists on that method at all).
+     *   - deleteMilestone(): task_id resolves the same way (resolveTask());
+     *     milestone_id/index resolve via resolveMilestoneById()/
+     *     resolveMilestoneByIndex(), neither of which accepts a default.
+     *   - deleteSection()/deleteGroup(): section_id/group_id (the actual
+     *     delete TARGET) resolve via resolveSection()/resolveGroup(), which
+     *     return null unconditionally for the 'empty' form. project_id/
+     *     section_id on these two routes is only ever a disambiguating
+     *     PARENT for a slug — and both call resolveOptionalParentId() with
+     *     no 7th argument, so that parent defaults to null (never a caller
+     *     default), matching every other resolveOptionalParentId() call site
+     *     except listGroups()/createGroup() (a parent default is a
+     *     different, much narrower hazard than a PRIMARY target default: at
+     *     worst a slug fails to resolve and 404s, since resolveStructural()
+     *     never guesses a parent it wasn't given).
+     *
      * @return list<array<string, mixed>>
      */
     public function getRoutes(): array
@@ -381,7 +410,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
-                        400 => ['description' => 'confirmed was not true'],
+                        400 => ['description' => 'confirmed was not true, or project_id was empty (never guessed from your default project for a destructive call)'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
                     ],
                 ],
@@ -1911,11 +1940,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * confirm should not learn anything about whether the project exists
      * from a DIFFERENT failure mode.
      *
-     * Read via {@see self::queryParamBool()}, NOT a naive `(bool)` cast — see
+     * Read via {@see self::paramBool()}, NOT a naive `(bool)` cast — see
      * deleteSection()'s own docblock for why: core empties the body and
      * flattens every MCP argument into the query string for DELETE, so
      * `confirmed: false` sent by an agent MUST still read as false, never
-     * coerced truthy by a bare cast on the non-empty string "false".
+     * coerced truthy by a bare cast on the non-empty string "false". A direct
+     * (non-MCP) HTTP caller can send `confirmed` in the JSON body instead —
+     * both flags are declared under this route's `request` schema, so
+     * paramBool() checks the body FIRST, then the query string, the same
+     * precedence identifierFromRequest() already uses for every other field.
+     *
+     * REVIEW FIX (post-merge): project_id is now REQUIRED to be genuinely
+     * supplied — an EMPTY (omitted) project_id 400s instead of silently
+     * falling back to defaultProjectIdFor(). This route previously called
+     * IdentifierResolver::resolveProject() with the caller's default project
+     * as its 5th argument, the exact shape identifierFromRequest()'s own
+     * docblock warns against for a DELETE ("would silently fall through to
+     * the caller's DEFAULT project — a 204 against the wrong project"): a
+     * caller could send `confirmed: true` with NO project_id at all and
+     * permanently delete whatever project happened to be their default,
+     * having "confirmed" a target they never named. A destructive route must
+     * never guess its target from a default — see {@see self::getRoutes()}'s
+     * own "DESTRUCTIVE ROUTE SWEEP" note for the other five DELETE routes in
+     * this class, all of which were already safe. This also improves
+     * parity: the original REQUIRES project_id on delete_project (schema
+     * unchanged here — it already required project_id before this fix; only
+     * the resolution behaviour changes).
      *
      * @param array<string, string> $params
      */
@@ -1932,7 +1982,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
-        if (!$this->queryParamBool($request, 'confirmed', false)) {
+        if (!$this->paramBool($request, 'confirmed', false)) {
             return Response::error(
                 'confirmed must be true to permanently delete a project and everything under it',
                 400
@@ -1940,17 +1990,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $raw = $this->identifierFromRequest($request, 'project_id');
-        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+        $form = IdentifierResolver::classify($raw);
+        if ($form === 'malformed_short_id') {
             return Response::error('project_id looks like a short id but is malformed', 400);
         }
+        if ($form === 'empty') {
+            return Response::error('project_id is required', 400);
+        }
 
-        $projectId = IdentifierResolver::resolveProject(
-            $pdo,
-            $tenantId,
-            $ou['ouId'],
-            $raw,
-            $this->defaultProjectIdFor($request, $tenantId)
-        );
+        $projectId = IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $raw);
 
         if ($projectId === null) {
             return Response::error('Project not found', 404);
@@ -2225,14 +2273,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * {@see self::identifierFromRequest()}'s docblock for why a DELETE
      * request here may legitimately carry no body at all.
      *
-     * delete_tasks is read via {@see self::queryParamBool()}, NOT a naive
-     * `(bool)` cast — see that method's own docblock for why, and see the
-     * class-level global constraint this route exists to satisfy: DELETE
-     * arguments arrive as query-string parameters over the MCP transport
-     * (core empties the body and flattens every argument into the query
-     * string for GET/DELETE/HEAD), so `delete_tasks: false` sent by an agent
-     * MUST still be read as false, never coerced truthy by a bare cast on
-     * the non-empty string "false".
+     * delete_tasks is read via {@see self::paramBool()} (body-then-query),
+     * NOT a naive `(bool)` cast — see that method's own docblock for why
+     * both sources matter: DELETE arguments arrive as query-string
+     * parameters over the MCP transport (core empties the body and flattens
+     * every argument into the query string for GET/DELETE/HEAD), so
+     * `delete_tasks: false` sent by an agent MUST still be read as false,
+     * never coerced truthy by a bare cast on the non-empty string "false" —
+     * but the route's own schema declares delete_tasks under a JSON body
+     * shape too, for a direct (non-MCP) HTTP caller.
      *
      * @param array<string, string> $params
      */
@@ -2271,7 +2320,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Section not found', 404);
         }
 
-        $deleteTasks = $this->queryParamBool($request, 'delete_tasks', false);
+        $deleteTasks = $this->paramBool($request, 'delete_tasks', false);
 
         return (new SectionsApiHandler($pdo))->delete($tenantId, $sectionId, $deleteTasks);
     }
@@ -2295,10 +2344,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * section_id's slug form could never resolve here regardless of what a
      * caller supplied, and the route description was correctly amended to
      * stop advertising a path that could not execute. project_id is restored
-     * here — through resolveOptionalParentId()'s new $defaultValue
-     * parameter, falling back to the caller's default project exactly like
-     * listTasks()/createTask() already do — so slug resolution actually
-     * works, and the description above is restored to match.
+     * here — through resolveOptionalParentId()'s $defaultValue parameter,
+     * falling back to the caller's default project and RE-VALIDATING it
+     * through IdentifierResolver::resolveProject()'s own OU-scoped 'empty'
+     * branch (post-merge review fix — see resolveOptionalParentId()'s own
+     * docblock), exactly like listTasks()/createTask() and every other
+     * defaultProjectIdFor() consumer already do — so slug resolution
+     * actually works, and the description above is restored to match.
      *
      * @param array<string, string> $params
      */
@@ -3824,6 +3876,45 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
+     * Parse an OPTIONAL boolean, checking the JSON BODY first and falling
+     * back to the query string — the boolean counterpart of
+     * {@see self::identifierFromRequest()}, which already applies exactly
+     * this precedence for every identifier field in this class. delete_tasks
+     * (deleteSection()) and confirmed (deleteProject()) both need it: their
+     * route schemas declare both flags under `request` (a JSON body shape),
+     * which is what the MCP transport's tools/call path actually validates
+     * against — but MCP DELETE calls arrive with an EMPTY body and every
+     * argument flattened into the query string instead (see
+     * identifierFromRequest()'s own docblock), so {@see self::queryParamBool()}
+     * alone is correct for that transport. A direct, non-MCP HTTP DELETE
+     * with a genuine JSON body (`{"confirmed": true}`) is the shape the
+     * schema advertises, though, and {@see self::queryParamBool()} alone
+     * silently reads that as absent — REVIEW FIX (post-merge): confirmed
+     * empirically to read as `false` even when the body said `true`, which
+     * is fail-safe (a caller who somehow gets past core's own required-field
+     * check gets a refusal, never an un-confirmed delete) but disagrees with
+     * the advertised shape, and the D2 frontend (a genuine HTTP client, not
+     * MCP) would walk straight into it.
+     *
+     * Body-then-query, exactly like identifierFromRequest(): a genuine JSON
+     * body value wins when present; MCP's query-string-only shape resolves
+     * through {@see self::queryParamBool()} unchanged. The same accepted
+     * falsy-string set is used on both paths (via {@see self::bodyParamBool()}/
+     * {@see self::queryParamBool()}), so `"confirmed": "false"` (a STRING,
+     * not a genuine JSON boolean) is handled no differently than
+     * `confirmed=false` on the query string.
+     */
+    private function paramBool(Request $request, string $name, bool $default): bool
+    {
+        $decoded = json_decode($request->getBody(), true);
+        if (is_array($decoded) && array_key_exists($name, $decoded)) {
+            return $this->bodyParamBool($decoded, $name, $default);
+        }
+
+        return $this->queryParamBool($request, $name, $default);
+    }
+
+    /**
      * Parse an OPTIONAL BOOLEAN out of an already-decoded JSON BODY (D1b
      * Task 9: update_project_context's `replace`) — the body-field
      * counterpart to {@see self::queryParamBool()} above, not a duplicate of
@@ -3928,13 +4019,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * distinguishes its own three outcomes — a bare `?int` cannot tell
      * "not supplied" apart from "supplied but did not resolve":
      *
-     *   - not supplied at all ('empty' form): {ok: true, value: $defaultValue}.
-     *     The resolver is never called. $defaultValue is null for every
-     *     caller except listGroups()/createGroup() (D1b Task 12b — see
-     *     below); a slug lookup against a null parent legitimately fails to
-     *     resolve later (resolveSection()/resolveGroup() return null for a
+     *   - not supplied at all ('empty' form), $defaultValue null (every
+     *     caller except listGroups()/createGroup() — see $defaultValue
+     *     below): {ok: true, value: null}. The resolver is never called; a
+     *     slug lookup against a null parent legitimately fails to resolve
+     *     later (resolveSection()/resolveGroup() return null for a
      *     slug/prefix form with $parentId === null), which becomes the same
      *     404 as "not found", not a separate error here.
+     *   - not supplied at all ('empty' form), $defaultValue non-null:
+     *     {ok: true, value: $resolver($pdo, $tenantId, $callerOuId, $raw, $defaultValue)}.
+     *     REVIEW FIX (post-merge, item 4): the resolver IS called here, with
+     *     $raw (null/'') passed through untouched and $defaultValue as its
+     *     own 5th argument — this re-validates the caller's stored default
+     *     through the resolver's OWN 'empty'-form handling (e.g.
+     *     IdentifierResolver::resolveProject()'s `$defaultProjectId ===
+     *     null ? null : self::projectByColumn(...)`), the exact same
+     *     OU-scoped re-validation EVERY OTHER defaultProjectIdFor() call
+     *     site in this class applies (see rankTasks()'s own docblock: "a
+     *     default that has since moved out of OU scope must not be
+     *     honoured"). The first version of this fix passed $defaultValue
+     *     straight through as this method's own return value, bypassing
+     *     that re-validation entirely — not exploitable, since
+     *     resolveStructural() re-applies tenant/OU scoping on the SECTION
+     *     join regardless (a stale out-of-scope default still 404s), but it
+     *     meant listGroups()/createGroup() were the only default-project
+     *     consumers in this class NOT going through the shared re-validated
+     *     path, and the docblock claiming otherwise was wrong.
      *   - malformed (looks like a short id but is not one):
      *     {ok: false, value: null}. Callers must 400 on this, matching
      *     every other malformed-short-id check in this file.
@@ -3950,19 +4060,25 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * friends is otherwise unreachable from PHPUnit: every path through
      * those route methods calls resolvePdo(), which resolves the live host
      * container and has no test double. See TaskerPluginTest for coverage:
-     * the 'empty' and 'malformed_short_id' branches are exercised directly
-     * (pure — no database call happens on either path); the "supplied"
-     * branch is exercised with a spy $resolver, verifying the exact
-     * (pdo, tenantId, callerOuId, raw) tuple this method passes through,
-     * without requiring a real IdentifierResolver::resolveProject()/
-     * resolveSection() call — those need PostgreSQL (OuScopeResolver::
-     * whereFragment()'s `= ANY(:scope)` fails at PDO::prepare() under
-     * SQLite), which is exactly why this composition logic had no coverage
-     * before this extraction.
+     * the 'empty' (both with and without a default), 'malformed_short_id',
+     * and "supplied" branches are exercised with a spy $resolver, verifying
+     * the exact tuple this method passes through, without requiring a real
+     * IdentifierResolver::resolveProject()/resolveSection() call — those
+     * need PostgreSQL (OuScopeResolver::whereFragment()'s `= ANY(:scope)`
+     * fails at PDO::prepare() under SQLite), which is exactly why this
+     * composition logic had no coverage before this extraction.
      *
      * $resolver is IdentifierResolver::resolveProject() or ::resolveSection(),
      * passed as a first-class callable and invoked with no default/
-     * grandparent argument — this resolves exactly one level up, never two.
+     * grandparent argument for the "supplied" branch — that resolves exactly
+     * one level up, never two. For the 'empty'+$defaultValue branch it is
+     * invoked with a 5th argument instead; both production resolvers accept
+     * one optionally (resolveProject()'s own $defaultProjectId;
+     * resolveSection()'s own $projectId, which is simply null there since
+     * updateSection()/deleteSection()/updateGroup()/deleteGroup() never pass
+     * a $defaultValue) — a spy closure declaring only 4 parameters still
+     * receives the call cleanly, PHP does not error on extra positional
+     * arguments to a user-defined callable.
      *
      * $defaultValue (D1b Task 12b): listGroups()/createGroup() were the only
      * two section-consuming routes that passed NO parent to resolveSection()
@@ -3976,10 +4092,12 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * so a slug resolves even when the caller never named a project
      * explicitly — matching how "read my current project" already works
      * everywhere else in this class. Every other call site keeps passing no
-     * 7th argument, so $defaultValue stays null for them and this change is
+     * 7th argument, so $defaultValue stays null for them, the resolver is
+     * never called for the 'empty' form (short-circuits to {ok: true, value:
+     * null} exactly as before this parameter existed), and this change is
      * behaviourally invisible there.
      *
-     * @param callable(\PDO, int, ?int, string|int|null): ?int $resolver
+     * @param callable(\PDO, int, ?int, string|int|null, ?int=): ?int $resolver
      * @return array{ok: bool, value: ?int}
      */
     private function resolveOptionalParentId(
@@ -3999,7 +4117,11 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         if ($form === 'empty') {
-            return ['ok' => true, 'value' => $defaultValue];
+            if ($defaultValue === null) {
+                return ['ok' => true, 'value' => null];
+            }
+
+            return ['ok' => true, 'value' => $resolver($pdo, $tenantId, $callerOuId, $raw, $defaultValue)];
         }
 
         return ['ok' => true, 'value' => $resolver($pdo, $tenantId, $callerOuId, $raw)];

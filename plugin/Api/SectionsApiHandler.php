@@ -51,6 +51,21 @@ use Whity\Sdk\Http\Response;
  * still has tasks or groups; true proceeds and lets the FK cascade do its
  * work, exactly like deleting a whole project already implies deleting
  * everything under it.
+ *
+ * REVIEW FIX (post-merge): the delete_tasks:false guard's first version was
+ * check-then-act — COUNT tasks/groups, THEN a separate DELETE — leaving a
+ * window where a task created between the two statements would be silently
+ * destroyed by the FK cascade with no refusal at all, the exact bug this
+ * whole fix exists to prevent, reopened by its own two-step implementation.
+ * The guard and the delete are now ONE atomic statement (see delete()'s own
+ * comment): the DELETE's own WHERE clause carries the emptiness check via
+ * correlated NOT EXISTS subqueries, so a row it does not see as empty simply
+ * is not deleted — no separate round trip, no window. This codebase already
+ * avoids SELECT ... FOR UPDATE / advisory locks for Postgres/SQLite
+ * portability (see {@see \Tasker\Domain\ShortIdAllocator}'s own docblock);
+ * folding the check into the mutating statement itself is the same kind of
+ * portable, lock-free technique, applied to a DELETE-guard race instead of
+ * ShortIdAllocator's INSERT-race.
  */
 final class SectionsApiHandler
 {
@@ -208,28 +223,70 @@ final class SectionsApiHandler
             return Response::error('Cannot delete a project\'s last remaining section', 409);
         }
 
-        if (!$deleteTasks) {
+        try {
+            if ($deleteTasks) {
+                $stmt = $this->db->prepare("DELETE FROM tasker_sections WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id");
+                $stmt->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+
+                return Response::json(null, 204);
+            }
+
+            // ATOMIC GUARD (see this class's own docblock, "REVIEW FIX
+            // (post-merge)"): the emptiness check lives in THIS statement's
+            // own WHERE clause via correlated NOT EXISTS subqueries, not a
+            // separate SELECT COUNT(*) beforehand — a task/group created
+            // after such a count but before a separate DELETE would be
+            // silently destroyed by the FK cascade with no refusal, which is
+            // exactly the bug this whole guard exists to close. Every
+            // placeholder is bound under its OWN distinct name even though
+            // several share the same value ($sectionId three times,
+            // $tenantId three times) — pdo_pgsql rejects reusing one named
+            // placeholder twice under a native prepare (the same reason
+            // {@see \Tasker\Access\IdentifierResolver}'s taskByColumn()/
+            // resolveStructural() bind `:tenant_id`/`:tenant_id_p` separately
+            // rather than repeating one name).
+            $idCol = $this->idColumn();
+            $stmt = $this->db->prepare(
+                "DELETE FROM tasker_sections
+                 WHERE {$idCol} = :id AND tenant_id = :tenant_id
+                   AND NOT EXISTS (SELECT 1 FROM tasker_tasks WHERE section_id = :id_t AND tenant_id = :tenant_id_t)
+                   AND NOT EXISTS (SELECT 1 FROM tasker_groups WHERE section_id = :id_g AND tenant_id = :tenant_id_g)"
+            );
+            $stmt->execute([
+                ':id' => $sectionId,
+                ':tenant_id' => $tenantId,
+                ':id_t' => $sectionId,
+                ':tenant_id_t' => $tenantId,
+                ':id_g' => $sectionId,
+                ':tenant_id_g' => $tenantId,
+            ]);
+
+            if ($stmt->rowCount() > 0) {
+                return Response::json(null, 204);
+            }
+
+            // Zero rows affected: either the section is non-empty (the
+            // guard refused, the expected/common case) or it vanished
+            // between findScoped() above and this statement (a concurrent
+            // delete — rare, but distinguished here rather than reporting a
+            // misleading "has tasks" refusal for a section that is simply
+            // gone).
             $taskCount = $this->countIn('tasker_tasks', $sectionId, $tenantId);
             $groupCount = $this->countIn('tasker_groups', $sectionId, $tenantId);
-            if ($taskCount > 0 || $groupCount > 0) {
-                return Response::error(
-                    sprintf(
-                        'Refused: section has %d task(s) and %d group(s). Move them to another section first '
-                            . '(e.g. via update_task/move_task_to_group), or pass delete_tasks: true to delete the '
-                            . 'section together with all its tasks and groups.',
-                        $taskCount,
-                        $groupCount
-                    ),
-                    409
-                );
+            if ($taskCount === 0 && $groupCount === 0) {
+                return Response::error('Section not found', 404);
             }
-        }
 
-        try {
-            $stmt = $this->db->prepare("DELETE FROM tasker_sections WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id");
-            $stmt->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
-
-            return Response::json(null, 204);
+            return Response::error(
+                sprintf(
+                    'Refused: section has %d task(s) and %d group(s). Move them to another section first '
+                        . '(e.g. via update_task/move_task_to_group), or pass delete_tasks: true to delete the '
+                        . 'section together with all its tasks and groups.',
+                    $taskCount,
+                    $groupCount
+                ),
+                409
+            );
         } catch (\Throwable) {
             return Response::error('Failed to delete section', 500);
         }

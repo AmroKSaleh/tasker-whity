@@ -3075,8 +3075,10 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(409, $refuseResponse->getStatusCode());
         $refuseBody = json_decode($refuseResponse->getBody(), true);
         self::assertStringContainsString('delete_tasks', $refuseBody['error']);
-        self::assertStringContainsString('2', $refuseBody['error'], 'the refusal must report the task count');
-        self::assertStringContainsString('1', $refuseBody['error'], 'the refusal must report the group count');
+        // Pinned to the RENDERED PHRASE, not a bare digit — a bare '1'/'2'
+        // would pass on almost any message, including the status code.
+        self::assertStringContainsString('2 task(s)', $refuseBody['error'], 'the refusal must report the task count');
+        self::assertStringContainsString('1 group(s)', $refuseBody['error'], 'the refusal must report the group count');
 
         self::assertSame(2, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE section_id = {$nonEmptySectionId}")->fetchColumn(), 'the tasks must still exist after a refused delete');
         self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE section_id = {$nonEmptySectionId}")->fetchColumn(), 'the group must still exist after a refused delete');
@@ -3084,15 +3086,21 @@ final class TenantIsolationOuTest extends TestCase
 
         // delete_tasks EXPLICITLY false must refuse identically to absent —
         // proves the gate distinguishes "true" from everything else, not
-        // just "present vs absent".
-        $explicitFalseRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$nonEmptySectionId}&delete_tasks=false");
+        // just "present vs absent". Sent as `0`, not the string "false":
+        // `http_build_query(['delete_tasks' => false])` — the form core's
+        // real MCP transport actually puts on the wire — renders `0`, not
+        // the word "false"; queryParamBool()'s own falsy-string-set tests
+        // already cover "false"/"False"/etc, so this end-to-end test
+        // exercises the shape that actually arrives in production instead.
+        $explicitFalseRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$nonEmptySectionId}&delete_tasks=0");
         $explicitFalseRequest->user = (object) ['profile_id' => self::CALLER_ID];
         $explicitFalseResponse = $plugin->deleteSection($explicitFalseRequest);
         self::assertSame(409, $explicitFalseResponse->getStatusCode());
 
-        // delete_tasks:true, arriving as a QUERY PARAMETER, must proceed AND
-        // really cascade.
-        $forceRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$nonEmptySectionId}&delete_tasks=true");
+        // delete_tasks:true, arriving as a QUERY PARAMETER — rendered as `1`
+        // by http_build_query(), the real wire form, not the string "true" —
+        // must proceed AND really cascade.
+        $forceRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$nonEmptySectionId}&delete_tasks=1");
         $forceRequest->user = (object) ['profile_id' => self::CALLER_ID];
         $forceResponse = $plugin->deleteSection($forceRequest);
 
@@ -3121,8 +3129,10 @@ final class TenantIsolationOuTest extends TestCase
      * project and everything under it; this route previously had no gate at
      * all. Proves: confirmed absent refuses (project survives), confirmed
      * EXPLICITLY false refuses identically (not just "present vs absent"),
-     * and confirmed:true — arriving as a QUERY-STRING parameter, the real
-     * MCP transport shape for a DELETE — actually deletes.
+     * an omitted project_id refuses even WHEN confirmed — never guessing the
+     * caller's default project for a destructive target (post-merge review
+     * fix), and confirmed:true — arriving as a QUERY-STRING parameter, the
+     * real MCP transport shape for a DELETE — actually deletes.
      */
     public function testDeleteProjectRefusesWithoutConfirmedTrue(): void
     {
@@ -3142,13 +3152,37 @@ final class TenantIsolationOuTest extends TestCase
         self::assertStringContainsString('confirmed', $refuseBody['error']);
         self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(), 'the project must survive an unconfirmed delete');
 
-        $explicitFalseRequest = $this->hostRequest('DELETE', "/api/tasker/projects?project_id={$projectId}&confirmed=false");
+        // Sent as `0`, the real http_build_query() wire form for a PHP
+        // false, not the string "false" — queryParamBool()'s own
+        // falsy-string-set tests already cover "false" itself.
+        $explicitFalseRequest = $this->hostRequest('DELETE', "/api/tasker/projects?project_id={$projectId}&confirmed=0");
         $explicitFalseRequest->user = (object) ['profile_id' => self::CALLER_ID];
         $explicitFalseResponse = $plugin->deleteProject($explicitFalseRequest);
         self::assertSame(400, $explicitFalseResponse->getStatusCode());
         self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(), 'confirmed:false must refuse identically to absent, not be treated as truthy');
 
-        $confirmedRequest = $this->hostRequest('DELETE', "/api/tasker/projects?project_id={$projectId}&confirmed=true");
+        // REVIEW FIX (post-merge, item 1): confirmed:true with NO project_id
+        // at all must NOT silently fall back to the caller's default
+        // project and delete IT — a destructive route must never guess its
+        // target. Give the caller a real default first, so a bug here would
+        // actually destroy something observable rather than just 404ing for
+        // an unrelated reason.
+        $sessionHandler = new \Tasker\Api\SessionApiHandler($this->pdo);
+        $sessionHandler->setDefaultProject(7, self::CALLER_ID, $projectId);
+        $noProjectIdRequest = $this->hostRequest('DELETE', '/api/tasker/projects?confirmed=1');
+        $noProjectIdRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $noProjectIdResponse = $plugin->deleteProject($noProjectIdRequest);
+        self::assertSame(400, $noProjectIdResponse->getStatusCode());
+        $noProjectIdBody = json_decode($noProjectIdResponse->getBody(), true);
+        self::assertStringContainsString('project_id', $noProjectIdBody['error']);
+        self::assertSame(
+            1,
+            (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            'confirmed:true with NO project_id must refuse rather than guess the caller\'s default project and '
+                . 'delete it'
+        );
+
+        $confirmedRequest = $this->hostRequest('DELETE', "/api/tasker/projects?project_id={$projectId}&confirmed=1");
         $confirmedRequest->user = (object) ['profile_id' => self::CALLER_ID];
         $confirmedResponse = $plugin->deleteProject($confirmedRequest);
         self::assertSame(204, $confirmedResponse->getStatusCode());
@@ -3193,5 +3227,93 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(201, $createResponse->getStatusCode());
         $created = json_decode($createResponse->getBody(), true);
         self::assertSame($sectionId, $created['data']['sectionId'] ?? $created['data']['section_id'] ?? null);
+    }
+
+    /**
+     * REVIEW FIX (post-merge, item 3): both route descriptions advertise
+     * "Omit to use your default project", but the test above always
+     * supplied project_id explicitly — it never actually exercised the
+     * default-project path itself. This does: project_id is OMITTED
+     * entirely, and the slug only resolves because the caller's stored
+     * default project (set via SessionApiHandler, the same mechanism
+     * set_default_project uses) is honoured as resolveSection()'s parent.
+     */
+    public function testListGroupsAndCreateGroupUseTheCallersDefaultProjectWhenProjectIdIsOmitted(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'D12b default project');
+        $sectionId = $this->makeSectionDirect(7, $projectId); // slug is 'backlog'
+        $this->makeGroupDirect(7, $sectionId, 'Existing group');
+
+        (new \Tasker\Api\SessionApiHandler($this->pdo))->setDefaultProject(7, self::CALLER_ID, $projectId);
+
+        $plugin = new TaskerPlugin();
+
+        $listRequest = $this->hostRequest('GET', '/api/tasker/groups?section_id=backlog');
+        $listRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $listResponse = $plugin->listGroups($listRequest);
+
+        self::assertSame(200, $listResponse->getStatusCode());
+        $listPayload = json_decode($listResponse->getBody(), true);
+        self::assertCount(
+            1,
+            $listPayload['data'],
+            'omitting project_id entirely must still resolve the slug, via the caller\'s DEFAULT project'
+        );
+
+        $createRequest = $this->hostRequest(
+            'POST',
+            '/api/tasker/groups',
+            (string) json_encode(['section_id' => 'backlog', 'name' => 'New via default project'])
+        );
+        $createRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $createResponse = $plugin->createGroup($createRequest);
+
+        self::assertSame(201, $createResponse->getStatusCode());
+        $created = json_decode($createResponse->getBody(), true);
+        self::assertSame($sectionId, $created['data']['sectionId'] ?? $created['data']['section_id'] ?? null);
+    }
+
+    /**
+     * REVIEW FIX (post-merge, item 4): a stored default project that has
+     * since moved out of the caller's OU scope must NOT be honoured — the
+     * same rule rankTasks() already documents and applies for its own
+     * default-project fallback. resolveOptionalParentId() used to pass
+     * $defaultValue straight through as listGroups()'s/createGroup()'s
+     * resolved parent, skipping the OU re-validation every other
+     * defaultProjectIdFor() consumer applies; it now re-resolves the
+     * default through IdentifierResolver::resolveProject() (OU-scoped)
+     * instead. Not exploitable even before this fix — resolveSection()'s
+     * own tenant/OU-scoped section join would still 404 a stale default —
+     * but this proves the RIGHT layer now also refuses it, not just a
+     * downstream one.
+     */
+    public function testListGroupsDoesNotHonourADefaultProjectThatHasMovedOutOfTheCallersOuScope(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, null); // sibling of OU 1, not an ancestor/descendant
+
+        // Caller is restricted to OU 2.
+        $this->makeMembership(self::CALLER_ID, 7, 2);
+
+        // The stored default project lives in sibling OU 1 -- out of scope.
+        $projectId = $this->makeProjectDirect(7, 1, 'Out of scope default project');
+        $this->makeSectionDirect(7, $projectId); // slug 'backlog'
+
+        (new \Tasker\Api\SessionApiHandler($this->pdo))->setDefaultProject(7, self::CALLER_ID, $projectId);
+
+        $plugin = new TaskerPlugin();
+        $listRequest = $this->hostRequest('GET', '/api/tasker/groups?section_id=backlog');
+        $listRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $listResponse = $plugin->listGroups($listRequest);
+
+        self::assertSame(
+            404,
+            $listResponse->getStatusCode(),
+            'a default project outside the caller\'s OU scope must not be honoured for slug resolution'
+        );
     }
 }

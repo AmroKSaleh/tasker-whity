@@ -185,8 +185,12 @@ final class SectionsApiHandlerTest extends TestCase
 
         self::assertSame(409, $response->getStatusCode());
         $body = json_decode($response->getBody(), true);
-        self::assertStringContainsString('2', $body['error'], 'the refusal message must report how many tasks would be destroyed');
-        self::assertStringContainsString('1', $body['error'], 'the refusal message must report how many groups would be destroyed');
+        // REVIEW FIX (post-merge): assertStringContainsString('1', ...) would
+        // pass on almost any message (a status code, a stray digit, ...).
+        // Pin the RENDERED PHRASE the brief actually asked for, not just a
+        // bare digit that happens to appear somewhere.
+        self::assertStringContainsString('2 task(s)', $body['error'], 'the refusal message must report how many tasks would be destroyed');
+        self::assertStringContainsString('1 group(s)', $body['error'], 'the refusal message must report how many groups would be destroyed');
         self::assertStringContainsString('delete_tasks', $body['error']);
 
         self::assertSame(2, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE section_id = {$extraId}")->fetchColumn());
@@ -194,7 +198,17 @@ final class SectionsApiHandlerTest extends TestCase
         self::assertSame(2, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_sections')->fetchColumn(), 'the section itself must also survive a refused delete');
     }
 
-    public function testDeleteWithDeleteTasksTrueProceedsPastTheGuardForANonEmptySection(): void
+    /**
+     * NOT proof the FK cascade removed the tasks/group — SQLite does not
+     * enforce ON DELETE CASCADE the way this fixture is built (see
+     * insertTaskInSection()'s own docblock: `id`/rowid diverge here, so a
+     * REFERENCES constraint could never structurally match these rows
+     * anyway). This only proves the delete_tasks:true GUARD BYPASS itself —
+     * that the section row is gone once the flag is true. The real cascade
+     * proof is Postgres-only:
+     * TenantIsolationOuTest::testDeleteSectionRefusesANonEmptySectionUnlessDeleteTasksIsTrue().
+     */
+    public function testDeleteWithDeleteTasksTrueProceedsPastTheGuardForANonEmptySectionSqliteCannotProveTheCascade(): void
     {
         $extraId = $this->insertSection(7, 100, 'Has tasks');
         $this->insertTaskInSection(7, 100, $extraId);
