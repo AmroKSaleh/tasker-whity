@@ -261,7 +261,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
-                'path' => '/api/tasker/projects/{projectId:\d+}/sections',
+                'path' => '/api/tasker/sections',
                 'handler' => [$this, 'listSections'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
@@ -269,15 +269,24 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'list_sections',
                     'summary' => 'List a project\'s sections',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        [
+                            'name' => 'project_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.',
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The section list'],
-                        404 => ['description' => 'Project not found in the caller\'s tenant'],
+                        404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
                     ],
                 ],
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/projects/{projectId:\d+}/sections',
+                'path' => '/api/tasker/sections',
                 'handler' => [$this, 'createSection'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
@@ -285,40 +294,94 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'create_section',
                     'summary' => 'Create a section within a project',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['name'],
+                        'properties' => [
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix, slug, UUID or id. Omit to use your default project.'],
+                            'name' => ['type' => 'string'],
+                        ],
+                    ],
                     'responses' => [
                         201 => ['description' => 'The created section'],
-                        400 => ['description' => 'name missing, empty, or too long'],
-                        404 => ['description' => 'Project not found in the caller\'s tenant'],
+                        400 => ['description' => 'name missing, empty or too long'],
+                        404 => ['description' => 'Project not found or outside OU scope'],
+                        409 => ['description' => 'A section with this name already exists in the project'],
                     ],
                 ],
             ],
             [
                 'method' => 'PATCH',
-                'path' => '/api/tasker/sections/{id:\d+}',
+                'path' => '/api/tasker/sections',
                 'handler' => [$this, 'updateSection'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
                 'schema' => [
                     'operationId' => 'update_section',
-                    'summary' => 'Update a section\'s name, description, sort_order, or view_prefs',
+                    'summary' => 'Update a section\'s name, description, sort order or view preferences',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['section_id'],
+                        'properties' => [
+                            'section_id' => ['type' => 'string', 'description' => 'Section UUID, id, or slug (slug requires project_id).'],
+                            'project_id' => ['type' => 'string', 'description' => 'Needed only when section_id is a slug.'],
+                            'name' => ['type' => 'string'],
+                            'description' => ['type' => ['string', 'null']],
+                            'sort_order' => ['type' => 'integer'],
+                            'view_prefs' => ['type' => 'object'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The updated section'],
-                        400 => ['description' => 'name empty or too long'],
+                        400 => ['description' => 'A supplied field is invalid'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/sections/rename',
+                'handler' => [$this, 'updateSection'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'rename_section',
+                    'summary' => 'Rename a section (alias of update_section, preserved for existing agents)',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['section_id', 'name'],
+                        'properties' => [
+                            'section_id' => ['type' => 'string', 'description' => 'Section UUID, id, or slug (slug requires project_id).'],
+                            'project_id' => ['type' => 'string', 'description' => 'Needed only when section_id is a slug.'],
+                            'name' => ['type' => 'string'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The renamed section'],
                         404 => ['description' => 'Section not found in the caller\'s tenant'],
                     ],
                 ],
             ],
             [
                 'method' => 'DELETE',
-                'path' => '/api/tasker/sections/{id:\d+}',
+                'path' => '/api/tasker/sections',
                 'handler' => [$this, 'deleteSection'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
                 'schema' => [
                     'operationId' => 'delete_section',
-                    'summary' => 'Delete a section (and its groups/tasks)',
+                    'summary' => 'Delete a section and its groups and tasks',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['section_id'],
+                        'properties' => [
+                            'section_id' => ['type' => 'string'],
+                            'project_id' => ['type' => 'string', 'description' => 'Needed only when section_id is a slug.'],
+                        ],
+                    ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
                         404 => ['description' => 'Section not found in the caller\'s tenant'],
@@ -328,7 +391,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
-                'path' => '/api/tasker/sections/{sectionId:\d+}/groups',
+                'path' => '/api/tasker/groups',
                 'handler' => [$this, 'listGroups'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
@@ -336,15 +399,24 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'list_groups',
                     'summary' => 'List a section\'s groups',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        [
+                            'name' => 'section_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Section UUID, id, or slug (slug requires project_id).',
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The group list'],
-                        404 => ['description' => 'Section not found in the caller\'s tenant or OU scope'],
+                        404 => ['description' => 'Section not found or outside the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/sections/{sectionId:\d+}/groups',
+                'path' => '/api/tasker/groups',
                 'handler' => [$this, 'createGroup'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
@@ -352,33 +424,77 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'create_group',
                     'summary' => 'Create a group within a section',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['name'],
+                        'properties' => [
+                            'section_id' => ['type' => 'string', 'description' => 'Section UUID, id, or slug (slug requires project_id).'],
+                            'name' => ['type' => 'string'],
+                        ],
+                    ],
                     'responses' => [
                         201 => ['description' => 'The created group'],
-                        400 => ['description' => 'name missing, empty, or too long'],
-                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                        400 => ['description' => 'name missing, empty or too long'],
+                        404 => ['description' => 'Section not found or outside OU scope'],
+                        409 => ['description' => 'A group with this name already exists in the section'],
                     ],
                 ],
             ],
             [
                 'method' => 'PATCH',
-                'path' => '/api/tasker/groups/{id:\d+}',
+                'path' => '/api/tasker/groups',
                 'handler' => [$this, 'updateGroup'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
                 'schema' => [
                     'operationId' => 'update_group',
-                    'summary' => 'Update a group\'s name or sort_order',
+                    'summary' => 'Update a group\'s name or sort order',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['group_id'],
+                        'properties' => [
+                            'group_id' => ['type' => 'string', 'description' => 'Group UUID, id, or slug (slug requires section_id).'],
+                            'section_id' => ['type' => 'string', 'description' => 'Needed only when group_id is a slug.'],
+                            'name' => ['type' => 'string'],
+                            'sort_order' => ['type' => 'integer'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The updated group'],
-                        400 => ['description' => 'name empty or too long'],
+                        400 => ['description' => 'A supplied field is invalid'],
+                        404 => ['description' => 'Group not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/groups/rename',
+                'handler' => [$this, 'updateGroup'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'rename_group',
+                    'summary' => 'Rename a group (alias of update_group, preserved for existing agents)',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['group_id', 'name'],
+                        'properties' => [
+                            'group_id' => ['type' => 'string', 'description' => 'Group UUID, id, or slug (slug requires section_id).'],
+                            'section_id' => ['type' => 'string', 'description' => 'Needed only when group_id is a slug.'],
+                            'name' => ['type' => 'string'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The renamed group'],
                         404 => ['description' => 'Group not found in the caller\'s tenant'],
                     ],
                 ],
             ],
             [
                 'method' => 'DELETE',
-                'path' => '/api/tasker/groups/{id:\d+}',
+                'path' => '/api/tasker/groups',
                 'handler' => [$this, 'deleteGroup'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
@@ -386,6 +502,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'delete_group',
                     'summary' => 'Delete a group (its tasks are un-grouped, not deleted)',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['group_id'],
+                        'properties' => [
+                            'group_id' => ['type' => 'string'],
+                            'section_id' => ['type' => 'string', 'description' => 'Needed only when group_id is a slug.'],
+                        ],
+                    ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
                         404 => ['description' => 'Group not found in the caller\'s tenant'],
@@ -1018,7 +1142,12 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * GET /api/tasker/projects/{projectId}/sections
+     * GET /api/tasker/sections?project_id=
+     *
+     * project_id is optional and falls back to the caller's default project —
+     * mirrors listProjects()/updateProject()'s shape, but reads the
+     * identifier via queryParam() rather than identifierFromRequest() since a
+     * GET request carries no body to check first.
      *
      * @param array<string, string> $params
      */
@@ -1030,16 +1159,36 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new SectionsApiHandler($pdo))->list($tenantId, $callerOu['ouId'], (int) ($params['projectId'] ?? 0));
+        $raw = $this->queryParam($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        return (new SectionsApiHandler($pdo))->list($tenantId, $ou['ouId'], $projectId);
     }
 
     /**
-     * POST /api/tasker/projects/{projectId}/sections
+     * POST /api/tasker/sections
+     *
+     * project_id lives in the body (identifierFromRequest reads body then
+     * query) and is optional, falling back to the caller's default project.
      *
      * @param array<string, string> $params
      */
@@ -1051,17 +1200,41 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $raw = $this->identifierFromRequest($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
         }
 
         return (new SectionsApiHandler($pdo))
-            ->create($tenantId, $callerOu['ouId'], (int) ($params['projectId'] ?? 0), $request->getBody());
+            ->create($tenantId, $ou['ouId'], $projectId, $request->getBody());
     }
 
     /**
-     * PATCH /api/tasker/sections/{id}
+     * PATCH /api/tasker/sections
+     * POST /api/tasker/sections/rename (rename_section alias — same handler,
+     * different operationId/path; the router rejects two operationIds on one
+     * method+path)
+     *
+     * section_id is required; project_id is read only to resolve section_id
+     * when it is a slug (slugs are unique only within their project) — see
+     * IdentifierResolver::resolveSection()'s $projectId parameter.
      *
      * @param array<string, string> $params
      */
@@ -1072,12 +1245,46 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new SectionsApiHandler($this->resolvePdo()))
-            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        $rawSectionId = $this->identifierFromRequest($request, 'section_id');
+        if (IdentifierResolver::classify($rawSectionId) === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+
+        $rawProjectId = $this->identifierFromRequest($request, 'project_id');
+        $projectForm = IdentifierResolver::classify($rawProjectId);
+        if ($projectForm === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+        $parentProjectId = $projectForm === 'empty'
+            ? null
+            : IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $rawProjectId);
+
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId, $parentProjectId);
+        if ($sectionId === null) {
+            return Response::error('Section not found', 404);
+        }
+
+        return (new SectionsApiHandler($pdo))->update($tenantId, $sectionId, $request->getBody());
     }
 
     /**
-     * DELETE /api/tasker/sections/{id}
+     * DELETE /api/tasker/sections
+     *
+     * NOTE: deliberately does NOT require the body to decode as a JSON
+     * object the way updateSection() does — see
+     * {@see self::identifierFromRequest()}'s docblock for why a DELETE
+     * request here may legitimately carry no body at all.
      *
      * @param array<string, string> $params
      */
@@ -1088,11 +1295,43 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new SectionsApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawSectionId = $this->identifierFromRequest($request, 'section_id');
+        if (IdentifierResolver::classify($rawSectionId) === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+
+        $rawProjectId = $this->identifierFromRequest($request, 'project_id');
+        $projectForm = IdentifierResolver::classify($rawProjectId);
+        if ($projectForm === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+        $parentProjectId = $projectForm === 'empty'
+            ? null
+            : IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $rawProjectId);
+
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId, $parentProjectId);
+        if ($sectionId === null) {
+            return Response::error('Section not found', 404);
+        }
+
+        return (new SectionsApiHandler($pdo))->delete($tenantId, $sectionId);
     }
 
     /**
-     * GET /api/tasker/sections/{sectionId}/groups
+     * GET /api/tasker/groups?section_id=
+     *
+     * Unlike project_id on listSections(), section_id has no "default
+     * section" fallback to fall back to (tasker_user_prefs stores only a
+     * default PROJECT) — an omitted or unresolved section_id always 404s.
+     * The existence check this relies on (GroupsApiHandler::list() calling
+     * sectionVisible() before querying) is D1 Task 4 fix-round behaviour and
+     * is unchanged here.
      *
      * @param array<string, string> $params
      */
@@ -1104,16 +1343,29 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new GroupsApiHandler($pdo))->list($tenantId, $callerOu['ouId'], (int) ($params['sectionId'] ?? 0));
+        $raw = $this->queryParam($request, 'section_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $raw);
+        if ($sectionId === null) {
+            return Response::error('Section not found', 404);
+        }
+
+        return (new GroupsApiHandler($pdo))->list($tenantId, $ou['ouId'], $sectionId);
     }
 
     /**
-     * POST /api/tasker/sections/{sectionId}/groups
+     * POST /api/tasker/groups
+     *
+     * section_id lives in the body and is required (no default-section
+     * fallback exists — see listGroups()'s docblock).
      *
      * @param array<string, string> $params
      */
@@ -1125,17 +1377,36 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $raw = $this->identifierFromRequest($request, 'section_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $raw);
+        if ($sectionId === null) {
+            return Response::error('Section not found', 404);
         }
 
         return (new GroupsApiHandler($pdo))
-            ->create($tenantId, $callerOu['ouId'], (int) ($params['sectionId'] ?? 0), $request->getBody());
+            ->create($tenantId, $ou['ouId'], $sectionId, $request->getBody());
     }
 
     /**
-     * PATCH /api/tasker/groups/{id}
+     * PATCH /api/tasker/groups
+     * POST /api/tasker/groups/rename (rename_group alias — same handler,
+     * different operationId/path)
+     *
+     * group_id is required; section_id is read only to resolve group_id when
+     * it is a slug (slugs are unique only within their section) — see
+     * IdentifierResolver::resolveGroup()'s $sectionId parameter. The
+     * supplied section_id is itself resolved through resolveSection() (with
+     * no project parent) before being handed to resolveGroup() as an
+     * integer, per resolveGroup()'s own signature.
      *
      * @param array<string, string> $params
      */
@@ -1146,12 +1417,46 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new GroupsApiHandler($this->resolvePdo()))
-            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        $rawGroupId = $this->identifierFromRequest($request, 'group_id');
+        if (IdentifierResolver::classify($rawGroupId) === 'malformed_short_id') {
+            return Response::error('group_id looks like a short id but is malformed', 400);
+        }
+
+        $rawSectionId = $this->identifierFromRequest($request, 'section_id');
+        $sectionForm = IdentifierResolver::classify($rawSectionId);
+        if ($sectionForm === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+        $parentSectionId = $sectionForm === 'empty'
+            ? null
+            : IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId);
+
+        $groupId = IdentifierResolver::resolveGroup($pdo, $tenantId, $ou['ouId'], $rawGroupId, $parentSectionId);
+        if ($groupId === null) {
+            return Response::error('Group not found', 404);
+        }
+
+        return (new GroupsApiHandler($pdo))->update($tenantId, $groupId, $request->getBody());
     }
 
     /**
-     * DELETE /api/tasker/groups/{id}
+     * DELETE /api/tasker/groups
+     *
+     * NOTE: deliberately does NOT require the body to decode as a JSON
+     * object the way updateGroup() does — see
+     * {@see self::identifierFromRequest()}'s docblock for why a DELETE
+     * request here may legitimately carry no body at all.
      *
      * @param array<string, string> $params
      */
@@ -1162,7 +1467,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new GroupsApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawGroupId = $this->identifierFromRequest($request, 'group_id');
+        if (IdentifierResolver::classify($rawGroupId) === 'malformed_short_id') {
+            return Response::error('group_id looks like a short id but is malformed', 400);
+        }
+
+        $rawSectionId = $this->identifierFromRequest($request, 'section_id');
+        $sectionForm = IdentifierResolver::classify($rawSectionId);
+        if ($sectionForm === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+        $parentSectionId = $sectionForm === 'empty'
+            ? null
+            : IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId);
+
+        $groupId = IdentifierResolver::resolveGroup($pdo, $tenantId, $ou['ouId'], $rawGroupId, $parentSectionId);
+        if ($groupId === null) {
+            return Response::error('Group not found', 404);
+        }
+
+        return (new GroupsApiHandler($pdo))->delete($tenantId, $groupId);
     }
 
     /**

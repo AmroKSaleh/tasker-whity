@@ -166,9 +166,10 @@ final class GroupsApiHandler
     }
 
     /**
-     * DELETE /api/tasker/groups/{id} — tasks in this group are un-grouped,
-     * not deleted (tasker_tasks.group_id is ON DELETE SET NULL), so removing
-     * a group never loses work, unlike removing a section or a project.
+     * DELETE /api/tasker/groups (group_id resolved by TaskerPlugin::deleteGroup()
+     * before this is called) — tasks in this group are un-grouped, not
+     * deleted (tasker_tasks.group_id is ON DELETE SET NULL), so removing a
+     * group never loses work, unlike removing a section or a project.
      */
     public function delete(int $tenantId, int $groupId): Response
     {

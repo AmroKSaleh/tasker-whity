@@ -108,8 +108,8 @@ try {
     $taskerToolNames = @(
         'list_pings', 'create_ping', 'tag_ping',
         'list_projects', 'create_project', 'update_project', 'delete_project',
-        'list_sections', 'create_section', 'update_section', 'delete_section',
-        'list_groups', 'create_group', 'update_group', 'delete_group',
+        'list_sections', 'create_section', 'update_section', 'rename_section', 'delete_section',
+        'list_groups', 'create_group', 'update_group', 'rename_group', 'delete_group',
         'list_tasks', 'create_task', 'update_task', 'move_task', 'delete_task',
         'complete_task', 'uncomplete_task', 'pin_task', 'unpin_task', 'tag_task', 'get_ready_work',
         'list_milestones', 'add_milestone', 'complete_milestone', 'update_milestone', 'delete_milestone',
