@@ -16,28 +16,33 @@ use Whity\Sdk\Http\Response;
  * Tenant-scoped CRUD, move, pin/unpin, complete/uncomplete, and entity-tag
  * attachment for tasker_tasks, plus the OU-scoped readyWork() ranked query.
  *
- * create()/update()/move()/delete()/complete()/uncomplete()/pin()/unpin()/
- * tag() are ALL tenant-scoped only — a caller only ever reaches an
- * individual section or task id after already holding it from an OU-scoped
- * lookup upstream, so re-checking OU scope again down here would be
- * redundant. readyWork() is the one exception: it is reached directly by
- * project id, not through a value the caller already holds, so it
- * re-derives and checks OU visibility itself, exactly like get_board.
+ * update()/move()/delete()/complete()/uncomplete()/pin()/unpin()/tag() are
+ * tenant-scoped only — a caller only ever reaches an individual task's id
+ * after already holding it from an OU-scoped list (listForSection()/
+ * listFiltered() or get_board), so re-checking OU scope on every
+ * single-task mutation would be redundant. readyWork() is the one
+ * exception: it is reached directly by project id, not through a task the
+ * caller already holds, so it re-derives and checks OU visibility itself,
+ * exactly like get_board.
  *
- * HISTORICAL NOTE (whole-branch review finding C1, superseded by D1b Task 6):
- * create()'s section-existence check used to be OU-aware in its own right,
- * because {sectionId} arrived as a raw, un-checked path parameter
- * (/sections/{sectionId}/tasks) — a value the caller could iterate, not one
- * they had already been granted. D1b's route flattening removed that path
- * parameter: POST /api/tasker/tasks now resolves section_id via
- * {@see \Tasker\Access\IdentifierResolver::resolveSection()} in
- * TaskerPlugin::createTask() BEFORE this method ever runs, and that resolver
- * is itself OU-aware. $sectionId arriving here is therefore already a
- * discovered, OU-safe value — exactly like every other single-task method
- * above — so the redundant second check (and the $callerOuId parameter it
- * needed) was removed. listForSection()/listFiltered() were never part of
- * C1's scope to begin with (finding I7) and stay tenant-scoped only, as
- * always.
+ * create()'s section-existence check is ALSO OU-aware (whole-branch review
+ * finding C1): {sectionId} is a discovered value with its own separate
+ * existence, not one the caller already holds a task through, so that one
+ * check (unlike the single-task-id mutations above) must confirm the
+ * section's own project is within the caller's OU scope, not merely their
+ * tenant — see create()'s own inline comment.
+ *
+ * TASK REVIEW NOTE (D1b Task 6): TaskerPlugin::createTask() ALSO resolves
+ * section_id via IdentifierResolver::resolveSection() (itself OU-aware)
+ * before ever calling create() — so today this check is belt-and-braces,
+ * not the only barrier. It is kept anyway, deliberately, matching
+ * SectionsApiHandler::create()/GroupsApiHandler::create()'s own precedent of
+ * keeping their internal OU check even after their routes started
+ * pre-resolving the parent identifier: a handler that is safe only because
+ * every current caller happens to be careful is one future refactor (a new
+ * route, a test double, a slimmed-down call site) away from not being safe.
+ * listForSection()/listFiltered() were never part of C1's scope to begin
+ * with (finding I7) and stay tenant-scoped only, as always.
  */
 final class TasksApiHandler
 {
@@ -74,14 +79,27 @@ final class TasksApiHandler
      * happens to catch today, but is exactly the kind of gap this task's
      * other carry-over fixes exist to close.
      *
-     * @param 'pending'|'in_progress'|'done'|'all' $status
+     * TASK REVIEW FIX: $status = null (the default, meaning "not supplied")
+     * used to be treated identically to the literal string 'pending' — a
+     * literal `status = 'pending'` predicate that silently excluded
+     * `in_progress` tasks too. The original's own documented contract
+     * (quoted above) is "excluding DONE tasks", not "pending only" —
+     * in_progress is a live status the directive playbook tells agents to
+     * set — and readyWork() right below already implements the correct
+     * `status != 'done'` semantic, making the inconsistency visible within
+     * this same file. Now: null (not supplied) means `status != 'done'`;
+     * an explicit 'pending'/'in_progress'/'done' is a plain equality
+     * predicate (unchanged); 'all' removes the status predicate entirely
+     * (unchanged).
+     *
+     * @param 'pending'|'in_progress'|'done'|'all'|null $status
      */
     public function listFiltered(
         int $tenantId,
         ?int $projectId,
         ?int $sectionId,
         ?int $groupId,
-        string $status = 'pending'
+        ?string $status = null
     ): Response {
         $conditions = [];
         $params     = [':tenant_id' => $tenantId];
@@ -98,7 +116,9 @@ final class TasksApiHandler
             $conditions[] = 'group_id = :group_id';
             $params[':group_id'] = $groupId;
         }
-        if ($status !== 'all') {
+        if ($status === null) {
+            $conditions[] = "status != 'done'";
+        } elseif ($status !== 'all') {
             $conditions[] = 'status = :status';
             $params[':status'] = $status;
         }
@@ -148,7 +168,7 @@ final class TasksApiHandler
         return $this->listFiltered($tenantId, null, $sectionId, null, 'all');
     }
 
-    public function create(int $tenantId, int $sectionId, int $createdBy, string $body): Response
+    public function create(int $tenantId, ?int $callerOuId, int $sectionId, int $createdBy, string $body): Response
     {
         $decoded = json_decode($body, true);
         $text = is_array($decoded) ? trim((string) ($decoded['text'] ?? '')) : '';
@@ -183,14 +203,26 @@ final class TasksApiHandler
             ? (string) $decoded['due_date']
             : null;
 
-        // Tenant-scoped only — see this class's own docblock for why: by the
-        // time this runs, $sectionId has already been resolved (and its
-        // OU-visibility checked) by IdentifierResolver::resolveSection() in
-        // TaskerPlugin::createTask().
+        // REGRESSION FIX (whole-branch review finding C1): this existence
+        // check is OU-aware, not merely tenant-scoped — see this class's own
+        // docblock for why it stays that way even though
+        // TaskerPlugin::createTask() also resolves section_id (OU-aware)
+        // before ever calling create(). tasker_sections carries no ou_id
+        // column, so this joins up to tasker_projects (the only table that
+        // does) and applies OuScopeResolver there. Confines create() to a
+        // real PostgreSQL connection — see TenantIsolationOuTest.
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
         $section = $this->db->prepare(
-            'SELECT id, project_id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id'
+            "SELECT s.id, s.project_id FROM tasker_sections s
+             JOIN tasker_projects p ON p.id = s.project_id
+             WHERE s.id = :id AND s.tenant_id = :tenant_id AND {$ouClause}"
         );
-        $section->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+        $section->bindValue(':id', $sectionId, PDO::PARAM_INT);
+        $section->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $section->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $section->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $section->execute();
         $sectionRow = $section->fetch(PDO::FETCH_ASSOC);
         if (!is_array($sectionRow)) {
             return Response::error('Section not found', 404);

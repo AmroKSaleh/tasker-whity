@@ -424,4 +424,270 @@ final class TaskerPluginTest extends TestCase
         );
         self::assertNull($result['value']);
     }
+
+    /**
+     * Task review finding #2 (D1b Task 6): moveTask() used to pass
+     * section_id/group_id straight through to TasksApiHandler::move(),
+     * which only ever does a plain `(int)` cast on whatever it is handed —
+     * a UUID or slug destination silently cast to 0 and 422'd. Extracted
+     * into resolveMoveDestinationId() so this composition (unreachable from
+     * PHPUnit any other way — moveTask() itself calls resolvePdo(), which
+     * needs the live host container) gets a Reflection test seam, the same
+     * way resolveOptionalParentId() does above. Unlike resolveOptionalParentId(),
+     * this one needs to distinguish FIVE outcomes, not three, because
+     * group_id's explicit-null-means-un-group semantics (move()'s own
+     * docblock) collapse into the same value under a bare classify() call —
+     * "absent" and "explicit null" must not be treated the same way.
+     */
+    private function invokeResolveMoveDestinationId(
+        array $decoded,
+        string $key,
+        PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        callable $resolver
+    ): array {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveMoveDestinationId');
+        $method->setAccessible(true);
+
+        /** @var array{status: string, value: ?int} $result */
+        $result = $method->invoke($plugin, $decoded, $key, $pdo, $tenantId, $callerOuId, $resolver);
+
+        return $result;
+    }
+
+    public function testResolveMoveDestinationIdReportsAbsentWithoutCallingTheResolverWhenKeyIsMissing(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveMoveDestinationId(['sort_order' => 5], 'section_id', $pdo, 7, null, $resolver);
+
+        self::assertSame('absent', $result['status']);
+        self::assertNull($result['value']);
+        self::assertFalse($called, 'a key absent from the body must not trigger a resolver call at all');
+    }
+
+    public function testResolveMoveDestinationIdReportsExplicitNullWithoutCallingTheResolver(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveMoveDestinationId(['group_id' => null], 'group_id', $pdo, 7, null, $resolver);
+
+        self::assertSame('explicit_null', $result['status']);
+        self::assertNull($result['value']);
+        self::assertFalse($called, 'an explicit null (group_id\'s own "un-group" meaning) must not trigger a resolver call at all');
+    }
+
+    public function testResolveMoveDestinationIdRejectsAMalformedShortIdWithoutCallingTheResolver(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveMoveDestinationId(['section_id' => 'AB-xyz'], 'section_id', $pdo, 7, null, $resolver);
+
+        self::assertSame('malformed', $result['status']);
+        self::assertNull($result['value']);
+        self::assertFalse($called, 'a malformed short id must not reach the resolver — the caller 400s on this status first');
+    }
+
+    public function testResolveMoveDestinationIdRejectsANonScalarValueAsMalformedRatherThanThrowing(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+
+        // classify()'s own signature is string|int|null — under this
+        // codebase's strict_types, handing it an array would throw a
+        // TypeError instead of a clean 400 were this guard not here.
+        $result = $this->invokeResolveMoveDestinationId(['group_id' => ['nope']], 'group_id', $pdo, 7, null, fn () => 99);
+
+        self::assertSame('malformed', $result['status']);
+        self::assertNull($result['value']);
+    }
+
+    public function testResolveMoveDestinationIdCallsTheResolverWithTheExactTupleWhenSupplied(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $seen = null;
+        $resolver = function (PDO $calledPdo, int $tenantId, ?int $callerOuId, $raw) use (&$seen, $pdo): ?int {
+            $seen = [$calledPdo === $pdo, $tenantId, $callerOuId, $raw];
+
+            return 42;
+        };
+
+        $result = $this->invokeResolveMoveDestinationId(
+            ['section_id' => '11111111-1111-4111-8111-111111111111'],
+            'section_id',
+            $pdo,
+            7,
+            3,
+            $resolver
+        );
+
+        self::assertSame('resolved', $result['status']);
+        self::assertSame(42, $result['value']);
+        self::assertSame(
+            [true, 7, 3, '11111111-1111-4111-8111-111111111111'],
+            $seen,
+            'the resolver must receive the SAME pdo, the tenantId, the callerOuId, and the raw identifier untouched'
+        );
+    }
+
+    public function testResolveMoveDestinationIdReportsUnresolvedWhenTheResolverFindsNothing(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $resolver = fn (PDO $pdo, int $tenantId, ?int $callerOuId, $raw): ?int => null;
+
+        $result = $this->invokeResolveMoveDestinationId(['section_id' => 999], 'section_id', $pdo, 7, null, $resolver);
+
+        self::assertSame(
+            'unresolved',
+            $result['status'],
+            'a supplied identifier that does not resolve is distinct from "absent" — the caller 404s on this, ' .
+                'never move()\'s own 422 (which only fires once a resolved id reaches it at all)'
+        );
+        self::assertNull($result['value']);
+    }
+
+    /**
+     * Task review finding #4 (D1b Task 6): createTask()'s "section_id
+     * omitted -> default to the project's Backlog section" composition,
+     * extracted the same way — and for the same reason — Task 5 extracted
+     * resolveOptionalParentId(): createTask() itself is unreachable from
+     * PHPUnit (resolvePdo() needs the live host container), so this
+     * composition had zero coverage before the extraction.
+     *
+     * Unlike resolveOptionalParentId()'s 'empty' branch (pure, no database
+     * call), this one's 'empty' branch DOES hit the database —
+     * backlogSectionIdFor() — but that method is plain tenant-scoped SQL
+     * with no OU/Postgres-only syntax (see its own docblock), so it runs
+     * for real against a bare SQLite fixture rather than needing a spy. Only
+     * the "supplied" branch's resolver (IdentifierResolver::resolveSection()
+     * in production) needs a spy, for the usual reason: it calls
+     * OuScopeResolver::whereFragment() unconditionally, which SQLite's
+     * PDO::prepare() rejects outright.
+     */
+    private function invokeResolveCreateTaskSectionId(
+        Request $request,
+        PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        int $projectId,
+        callable $resolver
+    ): array {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveCreateTaskSectionId');
+        $method->setAccessible(true);
+
+        /** @var array{ok: bool, value: ?int, usedBacklogFallback: bool} $result */
+        $result = $method->invoke($plugin, $request, $pdo, $tenantId, $callerOuId, $projectId, $resolver);
+
+        return $result;
+    }
+
+    private function makeSectionsPdoWithOneSection(int $projectId, string $slug): PDO
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo->exec(
+            'CREATE TABLE tasker_sections (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, project_id INTEGER NOT NULL, slug VARCHAR(255) NOT NULL)'
+        );
+        $stmt = $pdo->prepare('INSERT INTO tasker_sections (tenant_id, project_id, slug) VALUES (7, :project_id, :slug)');
+        $stmt->execute([':project_id' => $projectId, ':slug' => $slug]);
+
+        return $pdo;
+    }
+
+    public function testResolveCreateTaskSectionIdDefaultsToBacklogWhenAbsent(): void
+    {
+        $pdo = $this->makeSectionsPdoWithOneSection(100, 'backlog');
+        $request = new Request('POST', '/api/tasker/tasks', [], (string) json_encode(['text' => 'x']));
+
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 999;
+        };
+
+        $result = $this->invokeResolveCreateTaskSectionId($request, $pdo, 7, null, 100, $resolver);
+
+        self::assertTrue($result['ok']);
+        self::assertTrue($result['usedBacklogFallback']);
+        self::assertFalse($called, 'an absent section_id must default to Backlog, never call the resolver');
+
+        $backlogId = (int) $pdo->query("SELECT id FROM tasker_sections WHERE project_id = 100 AND slug = 'backlog'")->fetchColumn();
+        self::assertSame($backlogId, $result['value']);
+    }
+
+    public function testResolveCreateTaskSectionIdReturnsNullWhenTheProjectHasNoBacklogSection(): void
+    {
+        $pdo = $this->makeSectionsPdoWithOneSection(100, 'in-progress');
+        $request = new Request('POST', '/api/tasker/tasks', [], (string) json_encode(['text' => 'x']));
+
+        $result = $this->invokeResolveCreateTaskSectionId($request, $pdo, 7, null, 100, fn () => 999);
+
+        self::assertTrue($result['ok']);
+        self::assertTrue($result['usedBacklogFallback']);
+        self::assertNull(
+            $result['value'],
+            'a project with no backlog section must resolve to null, not silently pick some other section'
+        );
+    }
+
+    public function testResolveCreateTaskSectionIdRejectsAMalformedShortIdWithoutFallingBackToBacklog(): void
+    {
+        $pdo = $this->makeSectionsPdoWithOneSection(100, 'backlog');
+        $request = new Request('POST', '/api/tasker/tasks', [], (string) json_encode(['section_id' => 'AB-xyz', 'text' => 'x']));
+
+        $result = $this->invokeResolveCreateTaskSectionId($request, $pdo, 7, null, 100, fn () => 999);
+
+        self::assertFalse($result['ok']);
+        self::assertNull($result['value']);
+        self::assertFalse(
+            $result['usedBacklogFallback'],
+            'a malformed section_id must 400, never silently fall back to Backlog'
+        );
+    }
+
+    public function testResolveCreateTaskSectionIdCallsTheResolverWithTheExactTupleWhenSupplied(): void
+    {
+        $pdo = $this->makeSectionsPdoWithOneSection(100, 'backlog');
+        $request = new Request('POST', '/api/tasker/tasks', [], (string) json_encode(['section_id' => 'TDE', 'text' => 'x']));
+
+        $seen = null;
+        $resolver = function (PDO $calledPdo, int $tenantId, ?int $callerOuId, $raw, ?int $projectId) use (&$seen, $pdo): ?int {
+            $seen = [$calledPdo === $pdo, $tenantId, $callerOuId, $raw, $projectId];
+
+            return 55;
+        };
+
+        $result = $this->invokeResolveCreateTaskSectionId($request, $pdo, 7, 3, 100, $resolver);
+
+        self::assertTrue($result['ok']);
+        self::assertSame(55, $result['value']);
+        self::assertFalse($result['usedBacklogFallback']);
+        self::assertSame(
+            [true, 7, 3, 'TDE', 100],
+            $seen,
+            'the resolver must receive the SAME pdo, tenantId, callerOuId, raw identifier, and the resolved ' .
+                'projectId as its parent — never the backlog fallback'
+        );
+    }
 }

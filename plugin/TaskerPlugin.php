@@ -1601,9 +1601,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * "default section/group" concept) — they stay pure optional filters,
      * resolved only when supplied, each scoped to whichever parent was
      * already resolved above it (section_id under project_id, group_id
-     * under section_id) so a slug form remains unambiguous. status defaults
-     * to 'pending', matching the original's own default of excluding done
-     * tasks.
+     * under section_id) so a slug form remains unambiguous.
+     *
+     * status is passed through as-is (null when the query param is
+     * omitted) rather than defaulted to the literal string 'pending' here —
+     * see {@see \Tasker\Api\TasksApiHandler::listFiltered()}'s own docblock
+     * for why: null means "everything except done" (the original's actual
+     * documented default), which is NOT the same predicate as an explicit
+     * 'pending'. Only validated (never defaulted) when the caller supplies
+     * a value at all.
      *
      * @param array<string, string> $params
      */
@@ -1659,8 +1665,8 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             }
         }
 
-        $status = $this->queryParam($request, 'status') ?? 'pending';
-        if (!in_array($status, ['pending', 'in_progress', 'done', 'all'], true)) {
+        $status = $this->queryParam($request, 'status');
+        if ($status !== null && !in_array($status, ['pending', 'in_progress', 'done', 'all'], true)) {
             return Response::error('status must be one of: pending, in_progress, done, all', 400);
         }
 
@@ -1710,26 +1716,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Project not found', 404);
         }
 
-        $rawSection = $this->identifierFromRequest($request, 'section_id');
-        if (IdentifierResolver::classify($rawSection) === 'malformed_short_id') {
+        $section = $this->resolveCreateTaskSectionId(
+            $request,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $projectId,
+            [IdentifierResolver::class, 'resolveSection']
+        );
+        if (!$section['ok']) {
             return Response::error('section_id looks like a short id but is malformed', 400);
         }
-
-        if (IdentifierResolver::classify($rawSection) === 'empty') {
-            $sectionId = $this->backlogSectionIdFor($pdo, $tenantId, $projectId);
-            if ($sectionId === null) {
-                return Response::error('Project has no backlog section', 404);
-            }
-        } else {
-            $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSection, $projectId);
-            if ($sectionId === null) {
-                return Response::error('Section not found', 404);
-            }
+        if ($section['value'] === null) {
+            return $section['usedBacklogFallback']
+                ? Response::error('Project has no backlog section', 404)
+                : Response::error('Section not found', 404);
         }
 
         $createdBy = $this->callerProfileId($request) ?? 0;
 
-        return (new TasksApiHandler($pdo))->create($tenantId, $sectionId, $createdBy, $request->getBody());
+        return (new TasksApiHandler($pdo))
+            ->create($tenantId, $ou['ouId'], $section['value'], $createdBy, $request->getBody());
     }
 
     /**
@@ -1771,6 +1778,18 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     /**
      * POST /api/tasker/tasks/move
      *
+     * section_id/group_id are flexible identifiers (UUID/id — see
+     * {@see self::resolveMoveDestinationId()}), exactly like every other
+     * identifier and filter in this task's routes, NOT bare integers:
+     * {@see \Tasker\Api\TasksApiHandler::move()} itself only ever does a
+     * plain `(int)` cast on whatever it is handed, which silently casts a
+     * UUID/slug to 0 and 422s. Both are resolved HERE, before delegating,
+     * the same way list_tasks resolves its own section_id/group_id filters
+     * — the resolved integers are substituted back into the JSON body move()
+     * decodes, so move()'s own array_key_exists()-based "supplied vs not
+     * supplied"/"explicit null means un-group" logic (see its own docblock)
+     * needs no change at all.
+     *
      * @param array<string, string> $params
      */
     public function moveTask(Request $request, array $params = []): Response
@@ -1801,7 +1820,51 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->move($tenantId, $taskId, $request->getBody());
+        $section = $this->resolveMoveDestinationId(
+            $decoded,
+            'section_id',
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            [IdentifierResolver::class, 'resolveSection']
+        );
+        if ($section['status'] === 'malformed') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+        if ($section['status'] === 'unresolved') {
+            return Response::error('Section not found', 404);
+        }
+        if ($section['status'] === 'resolved') {
+            $decoded['section_id'] = $section['value'];
+        }
+
+        $group = $this->resolveMoveDestinationId(
+            $decoded,
+            'group_id',
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            [IdentifierResolver::class, 'resolveGroup']
+        );
+        if ($group['status'] === 'malformed') {
+            return Response::error('group_id looks like a short id but is malformed', 400);
+        }
+        if ($group['status'] === 'unresolved') {
+            return Response::error('Group not found', 404);
+        }
+        if ($group['status'] === 'resolved') {
+            $decoded['group_id'] = $group['value'];
+        }
+        // 'absent' -> key untouched in $decoded (move() sees no key at all).
+        // 'explicit_null' -> $decoded['group_id'] is already null (move()'s
+        // own "explicit null means un-group" semantics preserved exactly).
+
+        $reencoded = json_encode($decoded);
+        if ($reencoded === false) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        return (new TasksApiHandler($pdo))->move($tenantId, $taskId, $reencoded);
     }
 
     /**
@@ -2408,6 +2471,147 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
+     * Resolve create_task's section_id: like {@see self::resolveOptionalParentId()},
+     * but the 'empty' (not supplied) branch defaults to the resolved
+     * project's Backlog section instead of null — our tasker_tasks.section_id
+     * is NOT NULL by design, so the original's "ungrouped if omitted" has no
+     * literal equivalent; Backlog is the closest one.
+     *
+     * Four outcomes:
+     *   - malformed (looks like a short id but is not one):
+     *     {ok: false, value: null, usedBacklogFallback: false}. Callers 400
+     *     on this — the fallback must NEVER fire for a malformed identifier,
+     *     only for a genuinely absent one.
+     *   - not supplied ('empty' form): {ok: true, value: <backlog id or
+     *     null>, usedBacklogFallback: true}. value is null only when
+     *     $projectId genuinely has no 'backlog' section (see
+     *     backlogSectionIdFor()'s own docblock for when that happens) —
+     *     callers 404 with a message distinguishing this from a plain
+     *     "not found" using usedBacklogFallback.
+     *   - any other supplied form, resolves: {ok: true, value: <int>,
+     *     usedBacklogFallback: false}.
+     *   - any other supplied form, does not resolve: {ok: true, value: null,
+     *     usedBacklogFallback: false} — callers 404.
+     *
+     * $resolver is injected (IdentifierResolver::resolveSection() in
+     * production) rather than called directly, for the same reason
+     * resolveOptionalParentId() injects its own resolver: it gives this
+     * composition a Reflection test seam with a spy, since the real
+     * resolver needs PostgreSQL (OuScopeResolver::whereFragment()'s
+     * `= ANY(:scope)` fails at PDO::prepare() under SQLite) — see
+     * TaskerPluginTest. backlogSectionIdFor() itself carries no such
+     * restriction (plain tenant-scoped SQL), so the 'empty' branch is
+     * tested directly against a real SQLite fixture, no spy needed.
+     *
+     * @param callable(\PDO, int, ?int, string|int|null, ?int): ?int $resolver
+     * @return array{ok: bool, value: ?int, usedBacklogFallback: bool}
+     */
+    private function resolveCreateTaskSectionId(
+        Request $request,
+        \PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        int $projectId,
+        callable $resolver
+    ): array {
+        $raw = $this->identifierFromRequest($request, 'section_id');
+        $form = IdentifierResolver::classify($raw);
+
+        if ($form === 'malformed_short_id') {
+            return ['ok' => false, 'value' => null, 'usedBacklogFallback' => false];
+        }
+
+        if ($form === 'empty') {
+            return [
+                'ok' => true,
+                'value' => $this->backlogSectionIdFor($pdo, $tenantId, $projectId),
+                'usedBacklogFallback' => true,
+            ];
+        }
+
+        return [
+            'ok' => true,
+            'value' => $resolver($pdo, $tenantId, $callerOuId, $raw, $projectId),
+            'usedBacklogFallback' => false,
+        ];
+    }
+
+    /**
+     * Resolve one of move_task's destination identifiers (section_id or
+     * group_id) from an ALREADY-DECODED request body — TasksApiHandler::move()
+     * itself only ever does a plain `(int)` cast on whatever it is handed,
+     * which silently casts a UUID/slug to 0 and 422s (task review finding);
+     * this is what fixes that, resolving both identifiers before moveTask()
+     * ever delegates to move().
+     *
+     * Five outcomes, distinguished the same way resolveOptionalParentId()'s
+     * three distinguish theirs — a bare `?int` cannot tell "absent" apart
+     * from "explicitly null" apart from "supplied but did not resolve":
+     *
+     *   - status 'absent': the key is not in $decoded at all — move()'s own
+     *     `array_key_exists()` check must see it stay absent (its "leave
+     *     unchanged" case).
+     *   - status 'explicit_null': the key IS present with a literal null
+     *     value — group_id's own "explicit null means un-group" (see
+     *     move()'s docblock); section_id has no such meaning, but callers
+     *     decide what to do with it (letting move()'s own project-membership
+     *     check reject it is enough — no separate handling needed here).
+     *   - status 'malformed': present, a string/int, but classifies as
+     *     malformed_short_id. Callers 400.
+     *   - status 'unresolved': present, classifies as a real form, but
+     *     $resolver found nothing (wrong tenant/OU, or genuinely absent).
+     *     Callers 404 — distinct from move()'s own 422 for "exists, but
+     *     doesn't belong to the target project/section", which only
+     *     triggers once a resolved id reaches move() at all.
+     *   - status 'resolved': present, resolves to a real id. value carries
+     *     it; callers substitute it back into $decoded before re-encoding.
+     *
+     * A non-string/non-int, non-null value (e.g. an array) is treated as
+     * 'malformed' defensively — IdentifierResolver::classify()'s own
+     * signature does not accept it, and this codebase's strict_types would
+     * otherwise throw a TypeError instead of a clean 400.
+     *
+     * $resolver is IdentifierResolver::resolveSection() or ::resolveGroup(),
+     * injected for the same Reflection-testability reason as
+     * resolveOptionalParentId()'s own $resolver — see TaskerPluginTest.
+     *
+     * @param array<string, mixed> $decoded
+     * @param callable(\PDO, int, ?int, string|int|null): ?int $resolver
+     * @return array{status: 'absent'|'explicit_null'|'malformed'|'unresolved'|'resolved', value: ?int}
+     */
+    private function resolveMoveDestinationId(
+        array $decoded,
+        string $key,
+        \PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        callable $resolver
+    ): array {
+        if (!array_key_exists($key, $decoded)) {
+            return ['status' => 'absent', 'value' => null];
+        }
+
+        $raw = $decoded[$key];
+        if ($raw === null) {
+            return ['status' => 'explicit_null', 'value' => null];
+        }
+
+        if (!is_string($raw) && !is_int($raw)) {
+            return ['status' => 'malformed', 'value' => null];
+        }
+
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return ['status' => 'malformed', 'value' => null];
+        }
+
+        $resolved = $resolver($pdo, $tenantId, $callerOuId, $raw);
+
+        return $resolved === null
+            ? ['status' => 'unresolved', 'value' => null]
+            : ['status' => 'resolved', 'value' => $resolved];
+    }
+
+    /**
      * The caller's default project id, or null. Used as the empty-identifier
      * fallback so tools like list_tasks can be called with no arguments,
      * exactly as the original allows.
@@ -2423,18 +2627,21 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
     /**
      * The Backlog section id for $projectId, or null when the project has
-     * none — used by createTask() as the fallback when section_id is
-     * omitted (D1b: our tasker_tasks.section_id is NOT NULL, so "ungrouped
-     * if omitted" from the original becomes "goes to Backlog" here instead).
-     * Every project created through create_project always seeds a 'backlog'
-     * section (see ProjectsApiHandler::create()); this only returns null for
-     * a project that reached this state some other way, e.g. imported
-     * without one.
+     * none — used by {@see self::resolveCreateTaskSectionId()} as the
+     * fallback when create_task's section_id is omitted (D1b: our
+     * tasker_tasks.section_id is NOT NULL, so "ungrouped if omitted" from
+     * the original becomes "goes to Backlog" here instead). Every project
+     * created through create_project always seeds a 'backlog' section (see
+     * ProjectsApiHandler::create()); this only returns null for a project
+     * that reached this state some other way, e.g. imported without one.
      *
      * Tenant-scoped only, matching the class docblock's reasoning on
      * TasksApiHandler: $projectId arriving here has already been resolved
      * (and OU-checked) by IdentifierResolver::resolveProject() above in
      * createTask(), so this is a discovered value, not a raw path parameter.
+     * Plain tenant-scoped SQL, no OU/Postgres-only syntax — exercised
+     * directly (no spy needed) in TaskerPluginTest's
+     * resolveCreateTaskSectionId() Reflection tests.
      */
     private function backlogSectionIdFor(\PDO $pdo, int $tenantId, int $projectId): ?int
     {

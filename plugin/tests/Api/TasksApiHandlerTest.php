@@ -11,26 +11,27 @@ use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Tests\Support\SqlitePolyfills;
 
 /**
- * NOTE ON WHAT MOVED, AND WHAT MOVED BACK (whole-branch review finding C1,
- * superseded by D1b Task 6): create()'s section-existence check was OU-aware
- * for a while — joining tasker_sections to tasker_projects and calling
- * OuScopeResolver::whereFragment() UNCONDITIONALLY, PostgreSQL's
- * `= ANY(:scope)`, which SQLite's PDO::prepare() rejects outright — so its
- * direct tests lived in TenantIsolationOuTest.php (Postgres-backed) instead
- * of here. D1b's route flattening removed the reason: POST /api/tasker/tasks
- * now resolves section_id via IdentifierResolver::resolveSection() (itself
- * OU-aware) in TaskerPlugin::createTask() BEFORE create() ever runs, so
- * create() dropped its own $callerOuId parameter and OU check entirely — see
- * TasksApiHandler::create()'s own docblock. Its tenant-scoped tests
- * (testCreateStampsTenantAndDefaultsStatusToPending et al.) are back on
- * SQLite here; only the OU-boundary regression test stayed retired, since
- * IdentifierResolver::resolveSection()'s own sibling-OU coverage in
- * TenantIsolationOuTest.php already proves that boundary.
- *
- * Every OTHER test below that predates this task still uses
- * insertTaskDirect() (a raw INSERT bypassing create()) purely as a
- * convenience fixture-builder for some other method under test
- * (update/move/delete/complete/pin/tag/listForSection) — left unchanged.
+ * NOTE ON WHAT MOVED (whole-branch review finding C1): create()'s
+ * section-existence check used to be tenant-scoped only; it is now OU-aware,
+ * joining tasker_sections to tasker_projects and calling
+ * OuScopeResolver::whereFragment() UNCONDITIONALLY — PostgreSQL's
+ * `= ANY(:scope)`, which SQLite's PDO::prepare() rejects outright regardless
+ * of runtime branching. The four tests that exercised create() directly
+ * (testCreateStampsTenantAndDefaultsStatusToPending,
+ * testCreateRejectsASectionOutsideTheCallersTenant,
+ * testCreateAcceptsAValidPriority, testCreateRejectsAnInvalidPriority) moved
+ * to TenantIsolationOuTest.php (Postgres-backed), alongside new OU-boundary
+ * regression tests proving the fix, and (D1b Task 6) a new test proving
+ * create()'s newly-added detail/due_date fields round-trip correctly. Every
+ * OTHER test below only ever used create() as a convenience fixture-builder
+ * for some other method under test (update/move/delete/complete/pin/tag/
+ * listForSection) — those build their task fixture via insertTaskDirect() (a
+ * raw INSERT bypassing create() entirely) so they stay on SQLite unchanged in
+ * every other respect. listForSection() itself remains tenant-scoped only
+ * (finding I7) and has no Postgres-only syntax, so it keeps its SQLite
+ * coverage as-is — and so does its D1b Task 6 successor, listFiltered(),
+ * whose own fixtures (below) are built the same insertTaskDirect() way for
+ * the same reason.
  */
 final class TasksApiHandlerTest extends TestCase
 {
@@ -58,12 +59,17 @@ final class TasksApiHandlerTest extends TestCase
     }
 
     /**
-     * Inserts a task directly (bypassing handler->create(), which now
-     * requires a real Postgres connection for its section-existence check —
-     * see this class's own docblock) and returns the id a subsequent
-     * handler call must use: SQLite's own `rowid`, not the `id` column value
-     * (see TasksApiHandler::idColumn()'s own doc for why those diverge under
-     * the in-memory SQLite double).
+     * Inserts a task directly (bypassing handler->create(), which requires a
+     * real Postgres connection for its section-existence check — see this
+     * class's own docblock) and returns the id a subsequent handler call
+     * must use: SQLite's own `rowid`, not the `id` column value (see
+     * TasksApiHandler::idColumn()'s own doc for why those diverge under the
+     * in-memory SQLite double).
+     *
+     * $status is appended last, defaulting to 'pending', so every existing
+     * call site keeps working unchanged — added for D1b Task 6's
+     * listFiltered() fixtures, which need an 'in_progress'/'done' row
+     * without going through complete() (which only ever produces 'done').
      */
     private function insertTaskDirect(
         int $tenantId,
@@ -71,13 +77,14 @@ final class TasksApiHandlerTest extends TestCase
         int $sectionId,
         string $text,
         ?string $priority = null,
-        ?int $groupId = null
+        ?int $groupId = null,
+        string $status = 'pending'
     ): int {
         $stmt = $this->pdo->prepare(
             "INSERT INTO tasker_tasks
                 (public_id, tenant_id, project_id, section_id, group_id, text, priority, status, created_by, created_at, updated_at)
              VALUES
-                (:public_id, :tenant_id, :project_id, :section_id, :group_id, :text, :priority, 'pending', 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                (:public_id, :tenant_id, :project_id, :section_id, :group_id, :text, :priority, :status, 3, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         );
         $stmt->bindValue(':public_id', sprintf('dddddddd-0000-0000-0000-%012d', random_int(1, 999999999999)));
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
@@ -86,6 +93,7 @@ final class TasksApiHandlerTest extends TestCase
         $stmt->bindValue(':group_id', $groupId, $groupId === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
         $stmt->bindValue(':text', $text, PDO::PARAM_STR);
         $stmt->bindValue(':priority', $priority, $priority === null ? PDO::PARAM_NULL : PDO::PARAM_STR);
+        $stmt->bindValue(':status', $status, PDO::PARAM_STR);
         $stmt->execute();
 
         return (int) $this->pdo->lastInsertId();
@@ -144,87 +152,63 @@ final class TasksApiHandlerTest extends TestCase
 
     /**
      * D1b Task 6: list_tasks generalises listForSection() into project/
-     * section/group/status filters. The original defaults to excluding done
-     * tasks and accepts 'all' to include everything.
+     * section/group/status filters. The original's documented contract is
+     * "Defaults to excluding DONE tasks. Pass 'all' to include everything" —
+     * NOT "pending only". in_progress is a live status (the directive
+     * playbook tells agents to set it when they start work), so it must
+     * appear in the default result too — a bug in this test's first version
+     * (calling listFiltered() with the literal string 'pending' to stand in
+     * for "the default") never created an in_progress fixture, so it never
+     * caught listFiltered() silently narrowing the default down to a plain
+     * `status = 'pending'` predicate. Now exercises the REAL default (no
+     * 5th argument at all) against all three statuses at once.
      */
     public function testListFilteredExcludesDoneByDefaultAndIncludesItOnAll(): void
     {
-        $open = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Open']))->getBody(), true);
-        $done = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Done']))->getBody(), true);
-        $this->handler->complete(7, (int) $done['data']['id']);
+        $this->insertTaskDirect(7, 100, 1, 'Open');
+        $this->insertTaskDirect(7, 100, 1, 'In progress', null, null, 'in_progress');
+        $this->insertTaskDirect(7, 100, 1, 'Done', null, null, 'done');
 
-        $default = json_decode($this->handler->listFiltered(7, null, 1, null, 'pending')->getBody(), true);
-        self::assertCount(1, $default['data']);
-        self::assertSame('Open', $default['data'][0]['text']);
+        $default = json_decode($this->handler->listFiltered(7, null, 1, null)->getBody(), true);
+        $defaultTexts = array_column($default['data'], 'text');
+        self::assertCount(2, $default['data']);
+        self::assertContains('Open', $defaultTexts);
+        self::assertContains('In progress', $defaultTexts, 'in_progress must appear by default -- only done is excluded');
+        self::assertNotContains('Done', $defaultTexts);
 
         $all = json_decode($this->handler->listFiltered(7, null, 1, null, 'all')->getBody(), true);
-        self::assertCount(2, $all['data']);
+        self::assertCount(3, $all['data']);
+    }
+
+    /**
+     * The other half of the same contract: an EXPLICIT status value is a
+     * plain equality filter (unchanged by the fix above), not "everything
+     * except done" — passing 'pending' explicitly must exclude in_progress
+     * too, exactly like passing 'in_progress' explicitly excludes pending.
+     */
+    public function testListFilteredByExplicitStatusMatchesOnlyThatStatus(): void
+    {
+        $this->insertTaskDirect(7, 100, 1, 'Open');
+        $this->insertTaskDirect(7, 100, 1, 'In progress', null, null, 'in_progress');
+
+        $pending = json_decode($this->handler->listFiltered(7, null, 1, null, 'pending')->getBody(), true);
+        self::assertCount(1, $pending['data']);
+        self::assertSame('Open', $pending['data'][0]['text']);
+
+        $inProgress = json_decode($this->handler->listFiltered(7, null, 1, null, 'in_progress')->getBody(), true);
+        self::assertCount(1, $inProgress['data']);
+        self::assertSame('In progress', $inProgress['data'][0]['text']);
     }
 
     public function testListFilteredByProjectSpansEverySectionOfThatProject(): void
     {
         $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
-        $this->handler->create(7, 1, 3, json_encode(['text' => 'In section 1']));
-        $this->handler->create(7, 3, 3, json_encode(['text' => 'In section 3']));
+        $this->insertTaskDirect(7, 100, 1, 'In section 1');
+        $this->insertTaskDirect(7, 100, 3, 'In section 3');
 
         $payload = json_decode($this->handler->listFiltered(7, 100, null, null, 'all')->getBody(), true);
 
         self::assertCount(2, $payload['data']);
-    }
-
-    /**
-     * D1b Task 6: create()'s section-existence check dropped its OU-awareness
-     * (moved to IdentifierResolver::resolveSection() at the route layer — see
-     * TasksApiHandler::create()'s own docblock), so it now runs happily
-     * against this file's plain SQLite double with a tenant-scoped-only
-     * signature: (tenantId, sectionId, createdBy, body).
-     */
-    public function testCreateStampsTenantAndDefaultsStatusToPending(): void
-    {
-        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Ship it']));
-
-        self::assertSame(201, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('pending', $payload['data']['status']);
-        self::assertSame('Ship it', $payload['data']['text']);
-        self::assertSame(100, $payload['data']['projectId']);
-    }
-
-    public function testCreateAcceptsDetailAndDueDate(): void
-    {
-        $response = $this->handler->create(7, 1, 3, json_encode([
-            'text' => 'With extras',
-            'detail' => 'Cold-reader context',
-            'due_date' => '2026-09-01',
-        ]));
-
-        self::assertSame(201, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('Cold-reader context', $payload['data']['detail']);
-        self::assertSame('2026-09-01', $payload['data']['dueDate']);
-    }
-
-    public function testCreateRejects404ForASectionOutsideTheCallersTenant(): void
-    {
-        // Section 2 belongs to tenant 9, not the caller's tenant 7.
-        $response = $this->handler->create(7, 2, 3, json_encode(['text' => 'Should fail']));
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testCreateAcceptsAValidPriority(): void
-    {
-        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Urgent', 'priority' => 'rush']));
-
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('rush', $payload['data']['priority']);
-    }
-
-    public function testCreateRejectsAnInvalidPriority(): void
-    {
-        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Bad', 'priority' => 'urgent-ish']));
-
-        self::assertSame(400, $response->getStatusCode());
     }
 
     public function testCompleteSetsStatusAndCompletedAt(): void
@@ -352,11 +336,13 @@ final class TasksApiHandlerTest extends TestCase
      */
     public function testMoveKeepsTheGroupWhenSectionIdIsEchoedUnchanged(): void
     {
-        $this->pdo->exec('CREATE TABLE IF NOT EXISTS tasker_groups (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, section_id INTEGER NOT NULL)');
+        $this->createGroupsTable();
         $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (1, 7, 1)');
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Grouped']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
-        $this->handler->move(7, $taskId, json_encode(['section_id' => 1, 'group_id' => 1]));
+        // Pre-grouped in section 1, group 1 -- built directly rather than via
+        // create() + a first move() call (create() needs Postgres for its
+        // own OU-aware section check; see this class's own docblock), since
+        // the point of THIS test is the second move() call below.
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Grouped', null, 1);
 
         // A reorder that echoes the CURRENT section must not un-group.
         $payload = json_decode($this->handler->move(7, $taskId, json_encode(['section_id' => 1, 'sort_order' => 5]))->getBody(), true);
@@ -478,8 +464,7 @@ final class TasksApiHandlerTest extends TestCase
                 PRIMARY KEY (entity_type, entity_id, tag_id)
             )
         ');
-        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Tagged then deleted']))->getBody(), true);
-        $taskId = (int) $created['data']['id'];
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Tagged then deleted');
         $this->pdo->exec("INSERT INTO entity_tags (tenant_id, entity_type, entity_id, tag_id) VALUES (7, 'tasker_task', {$taskId}, 11)");
 
         $this->handler->delete(7, $taskId);

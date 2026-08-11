@@ -861,22 +861,154 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(404, $response->getStatusCode());
     }
 
-    // ==================== TasksApiHandler::create() (whole-branch review finding C1, superseded by D1b Task 6) ====================
+    // ==================== TasksApiHandler::create() (whole-branch review finding C1) ====================
     //
-    // create()'s own OU-aware section check (and the $callerOuId parameter it
-    // needed) was removed in D1b Task 6: POST /api/tasker/tasks now resolves
-    // section_id via IdentifierResolver::resolveSection() — itself OU-aware —
-    // in TaskerPlugin::createTask() BEFORE create() ever runs, so the
-    // redundant second check here was dead weight tying create() to a real
-    // Postgres connection for no remaining reason. Its tenant-scoped tests
-    // (stamps tenant/pending, rejects outside tenant, valid/invalid priority)
-    // moved back to the SQLite-backed TasksApiHandlerTest.php, alongside new
-    // coverage for the `create(tenantId, sectionId, createdBy, body)`
-    // signature's due_date/detail fields. The sibling-OU regression case
-    // that used to live here is now covered directly against
-    // IdentifierResolver::resolveSection() itself — see
-    // testResolveSectionRefusesIdAndUuidAcrossAnOuBoundary() below (the
-    // "Task review finding #1" section) for that boundary proof.
+    // TASK REVIEW (D1b Task 6): a first draft of this task removed create()'s
+    // own OU-aware section check entirely, reasoning that
+    // TaskerPlugin::createTask() now resolves section_id via
+    // IdentifierResolver::resolveSection() (itself OU-aware) before create()
+    // ever runs, making the check here redundant. That reasoning was true
+    // TODAY but not load-bearing: SectionsApiHandler::create()/
+    // GroupsApiHandler::create() keep their OWN internal OU check for the
+    // exact same "the route also resolves it first" reason, and readyWork()
+    // (this very file, below) keeps its own isProjectVisible() despite
+    // getReadyWork() pre-resolving the project too — so removing it here
+    // alone broke that established belt-and-braces precedent. Restored.
+
+    public function testTasksCreateStampsTenantAndDefaultsStatusToPending(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, 3, json_encode(['text' => 'Ship it']));
+
+        self::assertSame(201, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('pending', $payload['data']['status']);
+        self::assertSame('Ship it', $payload['data']['text']);
+        self::assertNull($payload['data']['priority']);
+    }
+
+    public function testTasksCreateRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $otherSectionId, 3, json_encode(['text' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testTasksCreateAcceptsAValidPriority(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, 3, json_encode(['text' => 'Urgent', 'priority' => 'rush']));
+
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('rush', $payload['data']['priority']);
+    }
+
+    public function testTasksCreateRejectsAnInvalidPriority(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, 3, json_encode(['text' => 'Bad', 'priority' => 'urgent-ish']));
+
+        self::assertSame(400, $response->getStatusCode());
+    }
+
+    /**
+     * D1b Task 6: create() gained detail/due_date INSERT handling (the
+     * create_task interface contract requires both). Proven here rather than
+     * TasksApiHandlerTest.php since create() itself still needs Postgres.
+     */
+    public function testTasksCreateAcceptsDetailAndDueDate(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, null, $sectionId, 3, json_encode([
+            'text' => 'With extras',
+            'detail' => 'Cold-reader context',
+            'due_date' => '2026-09-01',
+        ]));
+
+        self::assertSame(201, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Cold-reader context', $payload['data']['detail']);
+        self::assertSame('2026-09-01', $payload['data']['dueDate']);
+    }
+
+    /**
+     * Regression test proving the C1 fix: {sectionId} is a path parameter --
+     * an OU-restricted caller must not be able to create a task under a
+     * sibling OU's section by iterating section ids.
+     */
+    public function testTasksCreateRejects404ForASectionInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->create(7, 2, $siblingSectionId, 3, json_encode(['text' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * D1b Task 6, task review finding #2: TaskerPlugin::moveTask() must
+     * resolve section_id/group_id destination identifiers through
+     * IdentifierResolver (UUID/id, exactly like every other identifier in
+     * this task's routes) BEFORE delegating to TasksApiHandler::move(),
+     * which itself only ever does a plain `(int)` cast on whatever it is
+     * handed. This proves the two-step composition end to end against real
+     * Postgres: resolve a section's UUID to its real id (the same call
+     * moveTask() itself makes), then feed that resolved id to move() — a
+     * genuine UUID destination round-trips correctly, not just casts to 0
+     * and 422s. moveTask() itself cannot be exercised directly (it calls
+     * resolvePdo(), which needs the live host container — see
+     * TaskerPluginTest's own note on this); this is the closest equivalent.
+     */
+    public function testMoveResolvesASectionUuidDestinationBeforeDelegatingToMove(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Move by UUID project');
+        $sourceSectionId = $this->makeSectionDirect(7, $projectId);
+        // makeSectionDirect() always stamps slug='backlog' (see its own
+        // docblock), so the second section in the SAME project (move() only
+        // allows moving within one project) needs a distinct slug, inserted
+        // directly to avoid the (project_id, slug) unique violation.
+        $targetStmt = $this->pdo->prepare(
+            "INSERT INTO tasker_sections (public_id, tenant_id, project_id, name, slug, created_at)
+             VALUES (gen_random_uuid(), :tenant_id, :project_id, 'In Progress', 'in-progress', CURRENT_TIMESTAMP) RETURNING id"
+        );
+        $targetStmt->execute([':tenant_id' => 7, ':project_id' => $projectId]);
+        $targetSectionId = (int) $targetStmt->fetchColumn();
+        $targetPublicId = (string) $this->pdo
+            ->query("SELECT public_id FROM tasker_sections WHERE id = {$targetSectionId}")
+            ->fetchColumn();
+        $taskId = $this->makeTaskDirect(7, $projectId, $sourceSectionId, 'Move me by uuid');
+
+        $resolvedSectionId = IdentifierResolver::resolveSection($this->pdo, 7, null, $targetPublicId);
+        self::assertSame($targetSectionId, $resolvedSectionId, 'the UUID must resolve to the real target section id');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->move(7, $taskId, json_encode(['section_id' => $resolvedSectionId]));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame($targetSectionId, $payload['data']['sectionId']);
+    }
 
     // ==================== ShortIdAllocator (Task 2: short_id allocation) ====================
 
@@ -889,9 +1021,9 @@ final class TenantIsolationOuTest extends TestCase
 
         $handler = new TasksApiHandler($this->pdo);
 
-        $first  = json_decode($handler->create(7, $sectionA, 1, json_encode(['text' => 'A1']))->getBody(), true);
-        $second = json_decode($handler->create(7, $sectionA, 1, json_encode(['text' => 'A2']))->getBody(), true);
-        $other  = json_decode($handler->create(7, $sectionB, 1, json_encode(['text' => 'B1']))->getBody(), true);
+        $first  = json_decode($handler->create(7, null, $sectionA, 1, json_encode(['text' => 'A1']))->getBody(), true);
+        $second = json_decode($handler->create(7, null, $sectionA, 1, json_encode(['text' => 'A2']))->getBody(), true);
+        $other  = json_decode($handler->create(7, null, $sectionB, 1, json_encode(['text' => 'B1']))->getBody(), true);
 
         self::assertSame(1, $first['data']['shortId']);
         self::assertSame(2, $second['data']['shortId']);
