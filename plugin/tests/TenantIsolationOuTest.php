@@ -2501,109 +2501,47 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(1, $count, 'the real OU (id 1) must be untouched by either rejected id-0 call');
     }
 
-    // ==================== AttentionApiHandler::rank() (D1b Task 11: rank_tasks) ====================
+    // ==================== AttentionApiHandler::rank() (D1b Task 11 round 2: rank_tasks) ====================
     //
     // Both rank() and attention() are OU-scoped project-level reads exactly
     // like TasksApiHandler::readyWork() -- see AttentionApiHandler's own
     // class docblock for why that confines every test below to this
-    // Postgres-only file.
+    // Postgres-only file. rank_by was withdrawn in full (see that same
+    // docblock) after the live original surface showed it never existed --
+    // the real contract orders by priority, then due date, then id.
 
-    public function testRankSortingOrderDefaultMatchesReadyWorkOrdering(): void
+    public function testRankOrdersByPriorityThenDueDateThenId(): void
     {
-        $projectId = $this->makeProjectDirect(7, null, 'Rank sorting_order project');
+        $projectId = $this->makeProjectDirect(7, null, 'Rank ordering project');
         $sectionId = $this->makeSectionDirect(7, $projectId);
-        $this->makeTaskDirect(7, $projectId, $sectionId, 'Low priority', 'low');
-        $this->makeTaskDirect(7, $projectId, $sectionId, 'Rush, unpinned', 'rush');
-        $this->makeTaskDirect(7, $projectId, $sectionId, 'Pinned, no priority', null, true);
+        // Priority leads: rush beats medium beats low, regardless of due date.
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Low, due soonest', 'low', false, '2027-01-01');
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Rush, due latest', 'rush', false, '2027-06-01');
+        // Tied on priority (both medium): due date breaks the tie.
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Medium, due later', 'medium', false, '2027-04-01');
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Medium, due sooner', 'medium', false, '2027-02-01');
 
         $handler = new AttentionApiHandler($this->pdo);
-        $payload = json_decode($handler->rank(7, null, $projectId, 'sorting_order')->getBody(), true);
+        $payload = json_decode($handler->rank(7, null, $projectId)->getBody(), true);
 
-        // Byte-for-byte the same fixture and expected order as
-        // TasksApiHandler::readyWork()'s own testReadyWorkOrdersPinnedAndHigherPriorityFirst
-        // above -- proving 'sorting_order' really does reuse readyWork()'s
-        // own ordering expression rather than a second, drifted copy of it.
-        self::assertSame(['Pinned, no priority', 'Rush, unpinned', 'Low priority'], array_column($payload['data'], 'text'));
+        self::assertSame(
+            ['Rush, due latest', 'Medium, due sooner', 'Medium, due later', 'Low, due soonest'],
+            array_column($payload['data'], 'text')
+        );
     }
 
-    /**
-     * @return array{projectId: int, x: int, y: int, z: int}
-     */
-    private function makeRankDifferentiationFixture(): array
+    public function testRankExcludesDoneTasks(): void
     {
-        $projectId = $this->makeProjectDirect(7, null, 'Rank differentiation project');
+        $projectId = $this->makeProjectDirect(7, null, 'Rank excludes done project');
         $sectionId = $this->makeSectionDirect(7, $projectId);
-        // X: low priority, middle due date, LOW sort_order, unpinned.
-        $x = $this->makeTaskDirect(7, $projectId, $sectionId, 'X', 'low', false, '2027-03-01', 1);
-        // Y: rush priority, LATEST due date, HIGH sort_order, unpinned.
-        $y = $this->makeTaskDirect(7, $projectId, $sectionId, 'Y', 'rush', false, '2027-06-01', 10);
-        // Z: medium priority, EARLIEST due date, middle sort_order, PINNED.
-        $z = $this->makeTaskDirect(7, $projectId, $sectionId, 'Z', 'medium', true, '2027-01-01', 5);
-
-        return ['projectId' => $projectId, 'x' => $x, 'y' => $y, 'z' => $z];
-    }
-
-    public function testRankByPriorityOrdersByPriorityAloneIgnoringPinnedStatus(): void
-    {
-        $fixture = $this->makeRankDifferentiationFixture();
+        $doneTaskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Already done', 'rush');
+        $this->pdo->exec("UPDATE tasker_tasks SET status = 'done' WHERE id = {$doneTaskId}");
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Still open');
 
         $handler = new AttentionApiHandler($this->pdo);
-        $payload = json_decode($handler->rank(7, null, $fixture['projectId'], 'priority')->getBody(), true);
+        $payload = json_decode($handler->rank(7, null, $projectId)->getBody(), true);
 
-        // rush (Y) < medium (Z) < low (X) -- Z's pinned status must NOT move
-        // it ahead of Y the way it would under 'sorting_order' or 'pinned'.
-        self::assertSame(['Y', 'Z', 'X'], array_column($payload['data'], 'text'));
-    }
-
-    public function testRankByDueDateOrdersByDueDateAlone(): void
-    {
-        $fixture = $this->makeRankDifferentiationFixture();
-
-        $handler = new AttentionApiHandler($this->pdo);
-        $payload = json_decode($handler->rank(7, null, $fixture['projectId'], 'due_date')->getBody(), true);
-
-        self::assertSame(['Z', 'X', 'Y'], array_column($payload['data'], 'text'));
-    }
-
-    public function testRankByPinnedOrdersPinnedFirstThenTieBreaksBySortOrder(): void
-    {
-        $fixture = $this->makeRankDifferentiationFixture();
-
-        $handler = new AttentionApiHandler($this->pdo);
-        $payload = json_decode($handler->rank(7, null, $fixture['projectId'], 'pinned')->getBody(), true);
-
-        // Z is pinned, so it leads; among the unpinned pair, X (sort_order 1)
-        // beats Y (sort_order 10) -- a DIFFERENT order than 'sorting_order'
-        // produces for the exact same fixture (see the test right below),
-        // proving 'pinned' and 'sorting_order' are genuinely distinct
-        // orderings, not aliases of each other.
-        self::assertSame(['Z', 'X', 'Y'], array_column($payload['data'], 'text'));
-    }
-
-    public function testRankSortingOrderTieBreaksByPriorityNotSortOrder(): void
-    {
-        $fixture = $this->makeRankDifferentiationFixture();
-
-        $handler = new AttentionApiHandler($this->pdo);
-        $payload = json_decode($handler->rank(7, null, $fixture['projectId'], 'sorting_order')->getBody(), true);
-
-        // Same pinned-first Z, but among the unpinned pair, sorting_order
-        // ties break by PRIORITY (Y=rush beats X=low) rather than
-        // sort_order -- Y and X swap places relative to the 'pinned' test
-        // above, for the identical fixture.
-        self::assertSame(['Z', 'Y', 'X'], array_column($payload['data'], 'text'));
-    }
-
-    public function testRankRejects400ForAnInvalidRankBy(): void
-    {
-        $projectId = $this->makeProjectDirect(7, null, 'Rank validation project');
-
-        $handler = new AttentionApiHandler($this->pdo);
-        $response = $handler->rank(7, null, $projectId, 'skip_count');
-
-        self::assertSame(400, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertStringContainsString('sorting_order', $payload['error'], 'the 400 message must name the allowed values');
+        self::assertSame(['Still open'], array_column($payload['data'], 'text'));
     }
 
     public function testRankRejects404ForAProjectOutsideTheCallersOuScope(): void
@@ -2613,7 +2551,7 @@ final class TenantIsolationOuTest extends TestCase
         $projectId = $this->makeProjectDirect(7, 1, 'Parent OU rank project');
 
         $handler = new AttentionApiHandler($this->pdo);
-        $response = $handler->rank(7, 2, $projectId, 'sorting_order');
+        $response = $handler->rank(7, 2, $projectId);
 
         self::assertSame(404, $response->getStatusCode());
     }
@@ -2623,16 +2561,75 @@ final class TenantIsolationOuTest extends TestCase
         $otherTenantProjectId = $this->makeProjectDirect(9, null, 'Other tenant rank project');
 
         $handler = new AttentionApiHandler($this->pdo);
-        $response = $handler->rank(7, null, $otherTenantProjectId, 'sorting_order');
+        $response = $handler->rank(7, null, $otherTenantProjectId);
 
         self::assertSame(404, $response->getStatusCode());
     }
 
-    // ==================== AttentionApiHandler::attention() (D1b Task 11: get_my_attention) ====================
+    /**
+     * The live original's own "otherwise this requires confirmed: true to
+     * rank across ALL projects" case: a null $projectId reaching
+     * AttentionApiHandler::rank() directly (the route-level confirmed gate
+     * that decides WHEN to pass null is tested separately, via Reflection,
+     * in TaskerPluginTest -- see rankTasks()'s own docblock for why that
+     * split exists) must rank across every project in OU scope, not just
+     * one.
+     */
+    public function testRankAcrossAllProjectsWhenProjectIdIsNull(): void
+    {
+        $projectA = $this->makeProjectDirect(7, null, 'Rank-all project A');
+        $sectionA = $this->makeSectionDirect(7, $projectA);
+        $projectB = $this->makeProjectDirect(7, null, 'Rank-all project B');
+        $sectionB = $this->makeSectionDirect(7, $projectB);
+        $this->makeTaskDirect(7, $projectA, $sectionA, 'Task in A', 'low');
+        $this->makeTaskDirect(7, $projectB, $sectionB, 'Task in B', 'rush');
+
+        $handler = new AttentionApiHandler($this->pdo);
+        $payload = json_decode($handler->rank(7, null, null)->getBody(), true);
+
+        $texts = array_column($payload['data'], 'text');
+        self::assertContains('Task in A', $texts);
+        self::assertContains('Task in B', $texts);
+        // Priority still governs across the combined set: rush (B) leads.
+        self::assertSame('Task in B', $payload['data'][0]['text']);
+    }
+
+    public function testRankAcrossAllProjectsExcludesASiblingOusTask(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU rank-all project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+
+        $handler = new AttentionApiHandler($this->pdo);
+        // Caller restricted to OU 2; the project lives in sibling OU 3.
+        $payload = json_decode($handler->rank(7, 2, null)->getBody(), true);
+
+        self::assertSame([], $payload['data']);
+    }
+
+    public function testRankAcrossAllProjectsExcludesAnotherTenantsTask(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant rank-all project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+
+        $handler = new AttentionApiHandler($this->pdo);
+        $payload = json_decode($handler->rank(7, null, null)->getBody(), true);
+
+        self::assertSame([], $payload['data']);
+    }
+
+    // ==================== AttentionApiHandler::attention() (D1b Task 11 round 2: get_my_attention) ====================
     //
     // "My" resolves to created_by (ruling #5: tasker_tasks has no assignee
     // column, only created_by) -- CALLER_ID below stands in for the
     // resolved caller's profile id every test binds tasks to or away from.
+    // `pinned` is REMOVED (see AttentionApiHandler's own class docblock):
+    // the live original's five buckets never included it -- only `overdue`
+    // and `stale` are implementable on this backend today.
 
     private const CALLER_ID = 42;
 
@@ -2651,7 +2648,6 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(['Past due'], array_column($payload['data']['overdue'], 'text'));
         self::assertSame([], $payload['data']['stale']);
-        self::assertSame([], $payload['data']['pinned']);
     }
 
     public function testAttentionStaleBucketIncludesAnUntouchedInProgressTaskAndExcludesATouchedTodayTask(): void
@@ -2695,22 +2691,8 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame([], $payload['data']['stale']);
     }
 
-    public function testAttentionPinnedBucketIncludesAPinnedTaskAndExcludesAnUnpinnedTask(): void
-    {
-        $projectId = $this->makeProjectDirect(7, null, 'Pinned attention project');
-        $sectionId = $this->makeSectionDirect(7, $projectId);
-
-        $this->makeAttentionTaskDirect(7, $projectId, $sectionId, 'Pinned', self::CALLER_ID, 'pending', null, true);
-        $this->makeAttentionTaskDirect(7, $projectId, $sectionId, 'Not pinned', self::CALLER_ID, 'pending', null, false);
-
-        $handler = new AttentionApiHandler($this->pdo);
-        $payload = json_decode($handler->attention(7, null, $projectId, self::CALLER_ID)->getBody(), true);
-
-        self::assertSame(['Pinned'], array_column($payload['data']['pinned'], 'text'));
-    }
-
     /**
-     * A task in every other respect qualifying for overdue AND pinned, but
+     * A task in every other respect qualifying for overdue AND stale, but
      * created by a DIFFERENT profile, must be excluded from both -- proving
      * ruling #5's created_by filter is real, not merely OU/tenant scoping
      * that happens to look personal.
@@ -2721,22 +2703,27 @@ final class TenantIsolationOuTest extends TestCase
         $sectionId = $this->makeSectionDirect(7, $projectId);
         $yesterday = (new \DateTimeImmutable('yesterday'))->format('Y-m-d');
 
-        $this->makeAttentionTaskDirect(7, $projectId, $sectionId, 'Not mine', 999, 'pending', $yesterday, true);
+        $this->makeAttentionTaskDirect(
+            7, $projectId, $sectionId, 'Not mine', 999, 'in_progress', $yesterday, false,
+            "CURRENT_TIMESTAMP - INTERVAL '5 days'"
+        );
 
         $handler = new AttentionApiHandler($this->pdo);
         $payload = json_decode($handler->attention(7, null, $projectId, self::CALLER_ID)->getBody(), true);
 
         self::assertSame([], $payload['data']['overdue']);
-        self::assertSame([], $payload['data']['pinned']);
+        self::assertSame([], $payload['data']['stale']);
     }
 
     /**
      * Ruling #8: a completed task must appear in NO bucket, even one that
-     * structurally qualifies for overdue, stale, AND pinned simultaneously
-     * (past due_date, long-untouched updated_at, pinned = true). This is
-     * the single most likely way this tool would end up useless in
-     * practice, per the ruling's own text -- tested explicitly rather than
-     * assumed from the individual bucket predicates.
+     * structurally qualifies for both overdue AND stale simultaneously
+     * (past due_date, long-untouched updated_at). This is the single most
+     * likely way this tool would end up useless in practice, per the
+     * ruling's own text -- tested explicitly rather than assumed from the
+     * individual bucket predicates. status = 'done' here overrides the
+     * fixture's own 'in_progress'/past-due_date setup, which is the whole
+     * point of the test.
      */
     public function testAttentionExcludesACompletedTaskFromEveryBucketEvenIfOtherwiseQualifying(): void
     {
@@ -2746,7 +2733,7 @@ final class TenantIsolationOuTest extends TestCase
 
         $this->makeAttentionTaskDirect(
             7, $projectId, $sectionId, 'Finished but flagged', self::CALLER_ID,
-            'done', $yesterday, true, "CURRENT_TIMESTAMP - INTERVAL '5 days'"
+            'done', $yesterday, false, "CURRENT_TIMESTAMP - INTERVAL '5 days'"
         );
 
         $handler = new AttentionApiHandler($this->pdo);
@@ -2754,7 +2741,6 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame([], $payload['data']['overdue']);
         self::assertSame([], $payload['data']['stale']);
-        self::assertSame([], $payload['data']['pinned']);
     }
 
     /**

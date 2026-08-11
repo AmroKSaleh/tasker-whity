@@ -1253,4 +1253,59 @@ final class TaskerPluginTest extends TestCase
     {
         self::assertTrue($this->invokeMergeFromReplace(['context' => ['goal' => 'x'], 'replace' => false]));
     }
+
+    /**
+     * D1b Task 11 round 2: rank_tasks's own four-case project_id/confirmed
+     * gate (see rankTasks()'s own docblock) is decided for its "omitted"
+     * half by resolveRankTasksOmittedProjectId() — pure, no database access,
+     * extracted for the same reason every other route-decision helper in
+     * this file is: rankTasks() itself calls resolvePdo() and is otherwise
+     * unreachable from PHPUnit. These three tests cover all three of that
+     * helper's own outcomes; rankTasks()'s OTHER two cases (project_id
+     * supplied, and the confirmed:true all-projects path once $projectId
+     * reaches AttentionApiHandler::rank() as null) are proven separately
+     * against real Postgres in TenantIsolationOuTest, the same split this
+     * file's own docblock-documented convention uses throughout.
+     */
+    private function invokeResolveRankTasksOmittedProjectId(?int $validatedDefault, bool $confirmed): array
+    {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveRankTasksOmittedProjectId');
+        $method->setAccessible(true);
+
+        /** @var array{status: string, projectId: ?int} $result */
+        $result = $method->invoke($plugin, $validatedDefault, $confirmed);
+
+        return $result;
+    }
+
+    public function testResolveRankTasksOmittedProjectIdUsesTheValidatedDefaultWhenPresent(): void
+    {
+        $result = $this->invokeResolveRankTasksOmittedProjectId(42, false);
+
+        self::assertSame(['status' => 'use_project', 'projectId' => 42], $result);
+    }
+
+    public function testResolveRankTasksOmittedProjectIdUsesTheDefaultEvenWhenConfirmedIsAlsoTrue(): void
+    {
+        // A present, in-scope default always wins -- confirmed is only ever
+        // consulted once there is genuinely no default to fall back to.
+        $result = $this->invokeResolveRankTasksOmittedProjectId(42, true);
+
+        self::assertSame(['status' => 'use_project', 'projectId' => 42], $result);
+    }
+
+    public function testResolveRankTasksOmittedProjectIdSpansAllProjectsWhenNoDefaultAndConfirmed(): void
+    {
+        $result = $this->invokeResolveRankTasksOmittedProjectId(null, true);
+
+        self::assertSame(['status' => 'use_project', 'projectId' => null], $result);
+    }
+
+    public function testResolveRankTasksOmittedProjectIdNeedsConfirmationWhenNoDefaultAndNotConfirmed(): void
+    {
+        $result = $this->invokeResolveRankTasksOmittedProjectId(null, false);
+
+        self::assertSame(['status' => 'need_confirmation', 'projectId' => null], $result);
+    }
 }

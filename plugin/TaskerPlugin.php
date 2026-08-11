@@ -1032,25 +1032,30 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:view',
                 'schema' => [
                     'operationId' => 'rank_tasks',
-                    'summary' => 'List a project\'s non-done tasks (the same set get_ready_work uses) in an explicit '
-                        . 'ranking order you choose. D1 dropped skip_count, so unlike the original app this cannot '
-                        . 'rank by skip-decay -- ranking is pinned/priority/due_date/sort_order only.',
+                    'summary' => 'Return non-done tasks ranked by priority then due date -- "what should I work on '
+                        . 'next?". D1 dropped skip_count, so unlike the original app this cannot rank by skip-decay. '
+                        . 'If project_id is omitted, your default project is used when you have one set; otherwise '
+                        . 'pass confirmed: true to rank across EVERY project in your scope.',
                     'tags' => ['tasker'],
                     'parameters' => [
-                        ['name' => 'project_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
                         [
-                            'name' => 'rank_by',
+                            'name' => 'project_id',
                             'in' => 'query',
                             'required' => false,
-                            'schema' => ['type' => 'string', 'enum' => ['sorting_order', 'priority', 'due_date', 'pinned']],
-                            'description' => 'Which criterion leads the ordering. Defaults to sorting_order -- the '
-                                . 'same pinned > priority > due_date > sort_order ordering get_ready_work uses. The '
-                                . 'other three lead with that one criterion instead, then break ties by sort_order.',
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project (falls through to confirmed if you have none).',
+                        ],
+                        [
+                            'name' => 'confirmed',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'boolean'],
+                            'description' => 'Only needed when project_id is omitted AND you have no default project set. Pass true to rank tasks across ALL projects in your scope.',
                         ],
                     ],
                     'responses' => [
                         200 => ['description' => 'The ranked task list'],
-                        400 => ['description' => 'rank_by is not one of: sorting_order, priority, due_date, pinned'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed, or no project_id/default project was found and confirmed was not passed as true'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
                     ],
                 ],
@@ -1063,13 +1068,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:view',
                 'schema' => [
                     'operationId' => 'get_my_attention',
-                    'summary' => 'List the CALLING USER\'S OWN overdue, stale, and pinned tasks -- not the whole '
-                        . 'team\'s. Matched by created_by (tasker_tasks has no assignee column). Three separate '
-                        . 'buckets in the response: overdue (due_date before today), stale (in_progress and not '
-                        . 'updated in 2+ days -- fixed, not configurable), and pinned. A task qualifying for more '
-                        . 'than one bucket appears in each, not deduplicated. A completed (done) task appears in no '
-                        . 'bucket. project_id is optional, and omitting it means every project in your OU scope -- '
-                        . 'NOT your default project, unlike every other tool in this plugin.',
+                    'summary' => 'The "what needs me?" triage for the CALLING USER\'S OWN non-done work -- not the '
+                        . 'whole team\'s. Matched by created_by (tasker_tasks has no assignee column). Two buckets '
+                        . 'in the response: overdue (due_date before today) and stale (in_progress and not updated '
+                        . 'in 2+ days -- fixed, not configurable). NOT AVAILABLE ON THIS BACKEND (the original also '
+                        . 'covers these, but this schema has no such concept yet): tasks awaiting review verdict, '
+                        . 'pending human guidance, and agent sessions awaiting input. A task qualifying for both '
+                        . 'available buckets appears in each, not deduplicated. A completed (done) task appears in '
+                        . 'no bucket. project_id is optional, and omitting it means every project in your OU scope '
+                        . '-- NOT your default project, unlike every other tool in this plugin.',
                     'tags' => ['tasker'],
                     'parameters' => [
                         [
@@ -1081,7 +1088,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         ],
                     ],
                     'responses' => [
-                        200 => ['description' => 'The three buckets: overdue, stale, pinned'],
+                        200 => ['description' => 'The two buckets: overdue, stale'],
                         400 => ['description' => 'project_id looks like a short id but is malformed'],
                         403 => ['description' => 'Caller membership or identity could not be resolved'],
                         404 => ['description' => 'project_id was supplied but not found or outside the caller\'s OU scope'],
@@ -3031,18 +3038,43 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * GET /api/tasker/rank-tasks?project_id=&rank_by= — the original's
-     * rank_tasks. project_id follows getReadyWork()'s own shape exactly
-     * (optional, falling back to the caller's default project, 404 if
-     * neither resolves) — D1b Task 11 ruling #6 explicitly calls this tool
-     * OUT as one of the two that scopes project_id the ordinary way, unlike
-     * its sibling get_my_attention below.
+     * GET /api/tasker/rank-tasks?project_id=&confirmed= — the original's
+     * rank_tasks, matched against the LIVE original MCP server (D1b Task 11
+     * round 2 — the earlier `rank_by` design was this task's own invention,
+     * based on a stale docs page, and has been withdrawn in full; see
+     * AttentionApiHandler's own class docblock for the full correction).
      *
-     * rank_by is read via queryParam() with a PHP-side default of
-     * 'sorting_order' applied ONLY when the parameter is absent — an
-     * explicitly supplied but invalid value is never silently coerced to
-     * the default; it reaches AttentionApiHandler::rank() unchanged, which
-     * 400s naming the allowed set (ruling #2).
+     * The live contract's own words: "If no project_id is provided, the
+     * user's default project is used when set; otherwise this requires
+     * confirmed: true to rank across ALL projects." Four cases, in order:
+     *
+     *   1. project_id supplied, resolves         -> rank that project.
+     *   2. project_id supplied, does NOT resolve -> 404 (wrong tenant/OU scope).
+     *   3. project_id omitted, caller HAS a default project -> rank the
+     *      default (re-validated through the same OU-scoped resolveProject()
+     *      call every other route's default-project fallback uses — a stale
+     *      default that has since left OU scope is never trusted directly,
+     *      matching every sibling route's own established behaviour of
+     *      treating "no identifier and no IN-SCOPE default" as one and the
+     *      same outcome, not a distinct case of its own).
+     *   4. project_id omitted, caller has NO in-scope default project:
+     *      4a. confirmed=true  -> rank across every project in OU scope.
+     *      4b. confirmed absent/false -> 400 naming `confirmed` as the way
+     *          to proceed, never a silent "rank nothing" or a silent
+     *          all-projects scan an agent did not ask for.
+     *
+     * Cases 3/4 (project_id genuinely omitted) are decided by
+     * {@see self::resolveRankTasksOmittedProjectId()}, a pure composition
+     * helper extracted for the same reason resolveCreateTaskSectionId()/
+     * resolveGroupMembership()/mergeFromReplace() elsewhere in this file
+     * are: this route method itself calls resolvePdo(), making it otherwise
+     * unreachable from PHPUnit — see TaskerPluginTest for that helper's own
+     * direct Reflection coverage of all three of ITS outcomes. Case 1's
+     * single-project path and case 4a's all-projects path are both proven
+     * against real Postgres in TenantIsolationOuTest via
+     * AttentionApiHandler::rank() directly (bypassing this route method,
+     * the same split every other resolvePdo()-calling route in this file
+     * uses for its own test coverage).
      *
      * @param array<string, string> $params
      */
@@ -3060,32 +3092,103 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $raw = $this->queryParam($request, 'project_id');
-        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+        $form = IdentifierResolver::classify($raw);
+        if ($form === 'malformed_short_id') {
             return Response::error('project_id looks like a short id but is malformed', 400);
         }
 
-        $projectId = IdentifierResolver::resolveProject(
-            $pdo,
-            $tenantId,
-            $ou['ouId'],
-            $raw,
-            $this->defaultProjectIdFor($request, $tenantId)
-        );
-        if ($projectId === null) {
-            return Response::error('Project not found', 404);
+        if ($form !== 'empty') {
+            $projectId = IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $raw);
+            if ($projectId === null) {
+                return Response::error('Project not found', 404);
+            }
+
+            return (new AttentionApiHandler($pdo))->rank($tenantId, $ou['ouId'], $projectId);
         }
 
-        $rankBy = $this->queryParam($request, 'rank_by') ?? 'sorting_order';
+        // project_id omitted: re-validate the caller's stored default (if
+        // any) through the SAME OU-scoped query every other route's
+        // empty-identifier fallback uses, rather than trusting the stored
+        // id directly -- a default that has since moved out of OU scope
+        // must not be honoured (matches resolveProject()'s own 'empty'
+        // branch precedent, and IdentifierResolverTest's own
+        // testResolveProjectFallsBackToTheDefaultOnlyWhenInScope coverage
+        // of that exact rule). A stale, now-out-of-scope default is treated
+        // identically to "no default at all" below -- the same uniform
+        // treatment IdentifierResolver::resolveProject()'s own callers give
+        // it everywhere else in this file.
+        $storedDefault = $this->defaultProjectIdFor($request, $tenantId);
+        $validatedDefault = $storedDefault === null
+            ? null
+            : IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $raw, $storedDefault);
 
-        return (new AttentionApiHandler($pdo))->rank($tenantId, $ou['ouId'], $projectId, $rankBy);
+        $outcome = $this->resolveRankTasksOmittedProjectId(
+            $validatedDefault,
+            $this->queryParamBool($request, 'confirmed', false)
+        );
+
+        if ($outcome['status'] === 'need_confirmation') {
+            return Response::error(
+                'No project_id was supplied and you have no default project set. '
+                    . 'Pass confirmed: true to rank tasks across every project in your scope.',
+                400
+            );
+        }
+
+        return (new AttentionApiHandler($pdo))->rank($tenantId, $ou['ouId'], $outcome['projectId']);
+    }
+
+    /**
+     * The rank_tasks decision for an OMITTED project_id only (cases 3/4 of
+     * {@see self::rankTasks()}'s own docblock) — pure, no database access,
+     * extracted so this composition logic (new in D1b Task 11 round 2) has
+     * an actual Reflection test seam the way every other route-decision
+     * helper in this file does; rankTasks() itself is otherwise unreachable
+     * from PHPUnit because it calls resolvePdo().
+     *
+     * $validatedDefault is the caller's stored default project id ALREADY
+     * re-validated through the OU-scoped resolveProject() call — null both
+     * when there was no stored default AND when the stored default no
+     * longer resolves in scope. Those two are treated IDENTICALLY here,
+     * matching every sibling route in this file: none of them distinguishes
+     * "no identifier supplied" from "supplied/defaulted identifier resolved
+     * to nothing" as separate cases; both fall through to the same outcome
+     * (here: the confirmed gate, rather than a stale default silently
+     * widening or narrowing what gets ranked).
+     *
+     * Two outcomes:
+     *   - 'need_confirmation': no in-scope default, and $confirmed is not
+     *     true. Callers 400, naming `confirmed` as the way to proceed.
+     *   - 'use_project': either the validated default (projectId set), or —
+     *     when there was no default at all but $confirmed was true —
+     *     projectId null, meaning "every project in OU scope".
+     *
+     * @return array{status: 'use_project'|'need_confirmation', projectId: ?int}
+     */
+    private function resolveRankTasksOmittedProjectId(?int $validatedDefault, bool $confirmed): array
+    {
+        if ($validatedDefault !== null) {
+            return ['status' => 'use_project', 'projectId' => $validatedDefault];
+        }
+        if ($confirmed) {
+            return ['status' => 'use_project', 'projectId' => null];
+        }
+
+        return ['status' => 'need_confirmation', 'projectId' => null];
     }
 
     /**
      * GET /api/tasker/attention?project_id= — the original's
-     * get_my_attention: overdue, stale, and pinned tasks CREATED BY the
-     * calling user (D1b Task 11 ruling #5 — tasker_tasks has no assignee
-     * column).
+     * get_my_attention: overdue and stale tasks CREATED BY the calling user
+     * (D1b Task 11 ruling #5 — tasker_tasks has no assignee column). The
+     * live original's own five buckets also include review-verdict,
+     * guidance, and agent-session concepts this D1 schema does not have at
+     * all — see AttentionApiHandler::attention()'s own docblock for the full
+     * round-2 correction against the live surface (this task's earlier
+     * `pinned` bucket, ruling #7, was withdrawn — it was never one of the
+     * original's five).
      *
+
      * project_id is optional, but UNLIKE every other project-scoped route in
      * this file (and unlike this tool's own sibling rankTasks() just above),
      * an omitted value here does NOT fall back to the caller's default

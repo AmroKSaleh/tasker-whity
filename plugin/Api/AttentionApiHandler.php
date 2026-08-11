@@ -18,38 +18,49 @@ use Whity\Sdk\Http\Response;
  * every method here needs a real PostgreSQL connection and has no SQLite-tier
  * coverage. See TenantIsolationOuTest.php for the full suite.
  *
- * NAME COLLISION (D1b Task 11 — flagged, not silently worked around): the
- * ORIGINAL app already documents a DIFFERENT tool also called `rank_tasks`:
- * `rank_tasks(tasks: ["TDE-3", "TDE-1", "TDE-5"])`, "Reorder tasks within a
- * group" (app/src/docs/contentMcpV2.js:485-492) — a bulk reorder-by-list-of-ids
- * MUTATION, not a read. This task's brief and this task's binding rulings both
- * independently specify the read-only, rank_by-driven tool implemented below,
- * so that is what ships — but the two are NOT contract-compatible under the
- * same name: an agent that learned the original's rank_tasks(tasks: [...])
- * contract will find this tool takes different arguments and does something
- * unrelated. Given this whole slice's stated purpose is contract parity with
- * the original app's MCP surface, shipping a same-named, differently-shaped
- * tool is itself a parity gap, not a fix for one. See this task's own report
- * for the full writeup; nothing here silently reinterprets or renames around
- * it, since both controlling instructions were explicit and in agreement.
+ * CORRECTED AGAINST THE LIVE ORIGINAL SURFACE (D1b Task 11, round 2): this
+ * class's first draft trusted `app/src/docs/contentMcpV2.js` — the original
+ * app's in-app documentation PAGE — as the source of truth for both tools'
+ * real contracts. That page is STALE relative to the live MCP server: it
+ * documents `rank_tasks` as a bulk reorder-by-task-list MUTATION
+ * (`rank_tasks(tasks: [...])`) and omits `get_my_attention` entirely. The
+ * live server (queried directly, authoritative over its own docs page) shows
+ * both tools genuinely exist as reads, with contracts closer to (but not
+ * identical to) this task's original brief/rulings — see this task's own
+ * report for the full writeup and the corrected contracts below. The
+ * docs-page-vs-live-surface disagreement is itself carried forward as a
+ * standing finding, not just a footnote of this one task.
  *
- * get_my_attention has NO PRE-EXISTING original counterpart found anywhere in
- * this repo's copy of the original app (app/src/docs/contentMcpV2.js documents
- * ~70 tools and none of them is get_my_attention, nor does any grep for
- * "attention" turn up a match) — also noted in the report rather than assumed.
+ * rank_tasks: "Return pending tasks ranked by priority, due date, and skip
+ * count... If no project_id is provided, the user's default project is used
+ * when set; otherwise this requires confirmed: true to rank across ALL
+ * projects." No `rank_by` parameter exists on the real tool — it was this
+ * task's earlier ruling's own invention, now withdrawn in full. D1 dropped
+ * skip_count (see CreateTaskerTasksTable's own docblock), so ranking here is
+ * priority then due date then an id tiebreak — never skip-decay, stated in
+ * the route's own summary text (the only field that actually surfaces as an
+ * MCP tool's `description`; verified against
+ * {@see \Whity\Mcp\Tools\ToolDeriver::deriveTool()}).
+ *
+ * get_my_attention: "the 'what needs me?' triage... tasks awaiting review
+ * verdict, pending human GUIDANCE (unconsumed), agent sessions AWAITING
+ * INPUT, STALE in-progress tasks (quiet 2+ days), and OVERDUE items." Of
+ * these five, only stale and overdue are implementable on this backend today
+ * — review, guidance, and agent-session concepts do not exist in this D1
+ * schema at all. `pinned` (this task's earlier, withdrawn ruling #7) was
+ * NEVER one of the original's five and has been removed entirely. The three
+ * unimplementable buckets are named explicitly, as missing, in the route's
+ * own summary text — the same honesty the skip_count disclosure above
+ * already established, extended to this tool.
  */
 final class AttentionApiHandler
 {
-    /**
-     * @var list<string>
-     */
-    private const VALID_RANK_BY = ['sorting_order', 'priority', 'due_date', 'pinned'];
-
-    // Ruling #4 (D1b Task 11): stale is a FIXED 2-day interval, never a
-    // caller parameter — accepting a stale_days argument would mean either
-    // interpolating a caller-supplied value into SQL text (forbidden) or
-    // building a parameterised INTERVAL expression for no real benefit, so
-    // the literal is hardcoded here instead.
+    // D1b Task 11 ruling #4 (upheld through the round-2 correction above):
+    // stale is a FIXED 2-day interval, never a caller parameter — accepting
+    // a stale_days argument would mean either interpolating a caller-supplied
+    // value into SQL text (forbidden) or building a parameterised INTERVAL
+    // expression for no real benefit, so the literal is hardcoded here
+    // instead.
     private const STALE_CUTOFF_SQL = "CURRENT_TIMESTAMP - INTERVAL '2 days'";
 
     private PDO $db;
@@ -60,66 +71,65 @@ final class AttentionApiHandler
     }
 
     /**
-     * GET /api/tasker/rank-tasks?project_id=&rank_by= — exposes explicitly
-     * the pinned/priority/due-date/sort-order ordering
-     * {@see TasksApiHandler::readyWork()} already applies implicitly, over
-     * the SAME task set (non-done tasks in the project).
+     * GET /api/tasker/rank-tasks?project_id= — the original's rank_tasks:
+     * non-done tasks ranked by priority, then due date (D1 dropped
+     * skip_count — see this class's own docblock), then `id` as this task's
+     * own determinism tiebreak (ruling #9). No `rank_by` parameter — the
+     * live original tool has none; this task's earlier `rank_by` ruling was
+     * withdrawn in full after the docs-page-vs-live-surface correction (see
+     * this class's own docblock).
      *
-     * rank_by is a closed, whitelisted vocabulary (ruling #2): an
-     * unrecognised value is a 400 naming the allowed set, never a silent
-     * fallback to the default — a silent fallback would make an agent's
-     * typo look like success. Each valid value maps, via match() over this
-     * already-validated string, to one of four fully literal ORDER BY
-     * clauses — never a clause built by concatenating or interpolating the
-     * caller's own string, which is the load-bearing constraint for this
-     * task.
-     *
-     * D1 deliberately dropped skip_count (see CreateTaskerTasksTable's own
-     * docblock), so this cannot rank by skip-decay the way the original
-     * app's rank_tasks reportedly does for its own (differently-shaped —
-     * see this class's own docblock) tool of the same name; that limit is
-     * stated in the route's own summary text, which is the only field that
-     * actually surfaces as this tool's MCP description (verified against
-     * {@see \Whity\Mcp\Tools\ToolDeriver::deriveTool()}: only schema.summary
-     * becomes the tool's `description` — a route-level schema.description
-     * key, if one were added instead, would be silently dropped).
+     * $projectId is nullable here (a deviation from this task's ORIGINAL
+     * interface, which took a required `int $projectId`): the live
+     * original's own contract is "if no project_id is provided, the user's
+     * default project is used when set; otherwise this requires
+     * confirmed: true to rank across ALL projects" — a caller-identity- and
+     * preference-dependent decision this handler has no access to (no
+     * Request, no profile id), so the FOUR-case gating logic (supplied /
+     * default / confirmed / neither) lives entirely in the route method,
+     * {@see \Tasker\TaskerPlugin::rankTasks()} — see that method's own
+     * docblock. By the time $projectId reaches here, it is either a single,
+     * already-resolved project (ranked alone, OU-checked again below,
+     * belt-and-braces like readyWork()) or null (ranked across every
+     * project in $callerOuId's scope, the route's own confirmed:true case).
      */
-    public function rank(int $tenantId, ?int $callerOuId, int $projectId, string $rankBy): Response
+    public function rank(int $tenantId, ?int $callerOuId, ?int $projectId): Response
     {
-        if (!in_array($rankBy, self::VALID_RANK_BY, true)) {
-            return Response::error(
-                'rank_by must be one of: ' . implode(', ', self::VALID_RANK_BY),
-                400
-            );
-        }
-
-        if (!$this->isProjectVisible($tenantId, $callerOuId, $projectId)) {
+        if ($projectId !== null && !$this->isProjectVisible($tenantId, $callerOuId, $projectId)) {
             return Response::error('Project not found', 404);
         }
 
-        // Ruling #9 (determinism): id ASC is appended as the final tiebreak
-        // on every branch here — a query this handler owns outright, unlike
-        // readyWork() itself, which is left completely untouched below.
-        $orderBy = match ($rankBy) {
-            // The EXACT expression readyWork() uses (see
-            // TasksApiHandler::readyWorkOrderBy()'s own docblock for why
-            // this is extracted rather than retyped), plus the id tiebreak.
-            'sorting_order' => TasksApiHandler::readyWorkOrderBy() . ', id ASC',
-            'priority'      => TasksApiHandler::priorityRankCase() . ' ASC, sort_order ASC, id ASC',
-            'due_date'      => 'due_date ASC NULLS LAST, sort_order ASC, id ASC',
-            'pinned'        => 'pinned DESC, sort_order ASC, id ASC',
-        };
-
         try {
+            $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+            $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+            $projectClause = $projectId !== null ? ' AND t.project_id = :project_id' : '';
+
+            // t.tenant_id/p.tenant_id kept as LITERAL SQL text (not folded
+            // into an interpolated variable) for the same reason
+            // fetchBucket() below does — see that method's own docblock for
+            // the tenant-predicate-scanner rationale. `t.id` (not a bare
+            // `id`) in the ORDER BY is required here, unlike readyWork()'s
+            // own single-table query: this JOINs tasker_projects, which also
+            // has its own `id` column, so an unqualified `id` would be
+            // ambiguous.
             $stmt = $this->db->prepare(
-                "SELECT id, public_id, tenant_id, project_id, section_id, group_id, text, detail,
-                        status, priority, due_date, pinned, pinned_at, sort_order, completed_at,
-                        short_id, created_by, created_at, updated_at
-                 FROM tasker_tasks
-                 WHERE tenant_id = :tenant_id AND project_id = :project_id AND status != 'done'
-                 ORDER BY {$orderBy}"
+                "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
+                        t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
+                        t.short_id, t.created_by, t.created_at, t.updated_at
+                 FROM tasker_tasks t
+                 JOIN tasker_projects p ON p.id = t.project_id
+                 WHERE t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
+                   AND t.status != 'done'{$projectClause}
+                 ORDER BY " . TasksApiHandler::priorityRankCase() . " ASC, t.due_date ASC NULLS LAST, t.id ASC"
             );
-            $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+            $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+            $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+            if ($projectId !== null) {
+                $stmt->bindValue(':project_id', $projectId, PDO::PARAM_INT);
+            }
+            $stmt->execute();
 
             /** @var array<int, array<string, mixed>> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -131,13 +141,18 @@ final class AttentionApiHandler
     }
 
     /**
-     * GET /api/tasker/attention?project_id= — overdue items, stale
-     * in-progress work, and pinned tasks, in three named buckets: `overdue`,
-     * `stale`, `pinned` (ruling #7). A task qualifying for more than one
-     * bucket appears in EACH — buckets are deliberately not deduplicated
-     * against each other. A completed (`status = 'done'`) task appears in
-     * NO bucket regardless of how many of the three it would otherwise
-     * qualify for (ruling #8).
+     * GET /api/tasker/attention?project_id= — the live original's actual
+     * get_my_attention: "tasks awaiting review verdict, pending human
+     * GUIDANCE (unconsumed), agent sessions AWAITING INPUT, STALE
+     * in-progress tasks (quiet 2+ days), and OVERDUE items." Of those five,
+     * only `stale` and `overdue` are implementable here — this D1 schema has
+     * no review/guidance/agent-session concept at all. `pinned` (this task's
+     * earlier, now-withdrawn ruling #7) was NEVER one of the original's five
+     * and is not returned. Two named buckets: `overdue`, `stale`. A task
+     * qualifying for both appears in EACH — buckets are deliberately not
+     * deduplicated against each other. A completed (`status = 'done'`) task
+     * appears in NO bucket regardless of how many it would otherwise qualify
+     * for (ruling #8, upheld through the round-2 correction).
      *
      * PERSONAL, NOT TEAM-WIDE (ruling #5): tasker_tasks has no assignee/owner
      * column, only `created_by` (see CreateTaskerTasksTable) — the closest
@@ -203,20 +218,11 @@ final class AttentionApiHandler
                 "t.status = 'in_progress' AND t.updated_at <= " . self::STALE_CUTOFF_SQL,
                 't.updated_at ASC, t.id ASC'
             );
-            $pinned = $this->fetchBucket(
-                $tenantId,
-                $callerOuId,
-                $projectId,
-                $callerId,
-                't.pinned = TRUE',
-                't.pinned_at ASC NULLS LAST, t.id ASC'
-            );
 
             return Response::json([
                 'data' => [
                     'overdue' => array_map([$this, 'toPublicTask'], $overdue),
                     'stale'   => array_map([$this, 'toPublicTask'], $stale),
-                    'pinned'  => array_map([$this, 'toPublicTask'], $pinned),
                 ],
             ], 200);
         } catch (\Throwable) {
@@ -228,13 +234,13 @@ final class AttentionApiHandler
      * One bucket's rows: tenant + OU (unconditional, one static SQL
      * template per {@see OuScopeResolver::whereFragment()}) + created_by +
      * "not done" + the bucket's own predicate, optionally narrowed to one
-     * project. $bucketPredicate and $orderBy are ALWAYS one of the three
-     * fixed literals {@see self::attention()} passes — never caller input —
-     * so this is not a runtime-branched WHERE/ORDER BY text in the sense the
-     * architecture forbids; it is three separate static templates selected
-     * by which of the three fixed call sites invoked this method, the same
-     * shape as {@see TasksApiHandler::listFiltered()}'s own optional,
-     * presence-controlled (never value-controlled) predicate text.
+     * project. $bucketPredicate and $orderBy are ALWAYS one of the two fixed
+     * literals {@see self::attention()} passes (overdue, stale) — never
+     * caller input — so this is not a runtime-branched WHERE/ORDER BY text
+     * in the sense the architecture forbids; it is two separate static
+     * templates selected by which of the two fixed call sites invoked this
+     * method, the same shape as {@see TasksApiHandler::listFiltered()}'s own
+     * optional, presence-controlled (never value-controlled) predicate text.
      *
      * The `t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p` predicate
      * is kept as LITERAL SQL text below (not folded into a `$conditions`
