@@ -287,6 +287,168 @@ final class ProjectsApiHandler
     }
 
     /**
+     * GET /api/tasker/project?project_id=&include_notes= — the original's
+     * get_project: the project itself, plus every one of its sections and
+     * TASKS OF EVERY STATUS. Unlike list_tasks (whose default excludes done
+     * tasks — a deliberate work-queue behaviour), this is a full project read
+     * a UI renders, so nothing is filtered by status. Flat: tasks nest
+     * directly under their section, with no group nesting (unlike
+     * {@see \Tasker\Api\BoardApiHandler::get()}'s groups/ungroupedTasks
+     * split) — matching the original's own get_project shape. Sections and
+     * tasks are both ordered by sort_order then id, for a deterministic
+     * response, matching every other composed-read handler in this codebase.
+     *
+     * Reuses {@see self::findScoped()} for the OU-scoped project lookup —
+     * this method's SQLite-tier status is therefore identical to every other
+     * findScoped()-based method: Postgres-only (see this class's own
+     * docblock), exercised in TenantIsolationOuTest, never a SQLite unit test.
+     *
+     * $includeNotes controls whether each task's `detail` key is present in
+     * the response AT ALL — omitted entirely (not present-as-null) when
+     * false, since a large project's accumulated detail text can be very
+     * large. See {@see \Tasker\TaskerPlugin::queryParamBool()} for how the
+     * caller's `include_notes` query string is parsed into this bool without
+     * a naive `(bool)` cast misreading a falsy string like "false" as true.
+     */
+    public function getOne(int $tenantId, ?int $callerOuId, int $projectId, bool $includeNotes): Response
+    {
+        $project = $this->findScoped($projectId, $tenantId, $callerOuId);
+        if ($project === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $sections = $this->fetchSectionsForProject($tenantId, $projectId);
+        $tasks = $this->fetchTasksForProject($tenantId, $projectId);
+
+        $tasksBySection = [];
+        foreach ($tasks as $task) {
+            $tasksBySection[(int) $task['section_id']][] = $this->toProjectTask($task, $includeNotes);
+        }
+
+        $publicSections = [];
+        foreach ($sections as $section) {
+            $sectionId = (int) $section['id'];
+            $publicSections[] = [
+                'id' => $sectionId,
+                'publicId' => (string) $section['public_id'],
+                'name' => (string) $section['name'],
+                'slug' => (string) $section['slug'],
+                'description' => $section['description'],
+                'sortOrder' => (int) $section['sort_order'],
+                'tasks' => $tasksBySection[$sectionId] ?? [],
+            ];
+        }
+
+        return Response::json([
+            'data' => array_merge($this->toPublicProject($project), ['sections' => $publicSections]),
+        ], 200);
+    }
+
+    /**
+     * Every section of $projectId, tenant_id bound explicitly (never
+     * implicit) — ordered by sort_order then id for a deterministic
+     * get_project response.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function fetchSectionsForProject(int $tenantId, int $projectId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT id, public_id, tenant_id, project_id, name, slug, description, sort_order
+             FROM tasker_sections WHERE tenant_id = :tenant_id AND project_id = :project_id
+             ORDER BY sort_order ASC, id ASC'
+        );
+        $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
+
+        /** @var array<int, array<string, mixed>> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        return $rows;
+    }
+
+    /**
+     * Every task in $projectId, regardless of status — see {@see self::getOne()}'s
+     * own docblock for why get_project does not apply list_tasks' default
+     * "exclude done" filter. Ordered by sort_order then id.
+     *
+     * @return array<int, array<string, mixed>>
+     */
+    private function fetchTasksForProject(int $tenantId, int $projectId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT id, public_id, section_id, group_id, text, detail, status, priority, due_date,
+                    pinned, sort_order, completed_at, short_id
+             FROM tasker_tasks WHERE tenant_id = :tenant_id AND project_id = :project_id
+             ORDER BY sort_order ASC, id ASC'
+        );
+        $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
+
+        /** @var array<int, array<string, mixed>> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        return $rows;
+    }
+
+    /**
+     * A task's shape within a get_project response — deliberately NOT the
+     * same shape as {@see \Tasker\Api\TasksApiHandler::toPublicTask()} (no
+     * tenantId/projectId/createdBy/timestamps — a project-scoped nested view
+     * does not need to repeat its own parent's ids), and `detail` is present
+     * ONLY when $includeNotes is true (see {@see self::getOne()}'s docblock).
+     *
+     * @param array<string, mixed> $row
+     * @return array<string, mixed>
+     */
+    private function toProjectTask(array $row, bool $includeNotes): array
+    {
+        $task = [
+            'id' => (int) $row['id'],
+            'publicId' => (string) $row['public_id'],
+            'groupId' => $row['group_id'] !== null ? (int) $row['group_id'] : null,
+            'text' => (string) $row['text'],
+            'status' => (string) $row['status'],
+            'priority' => $row['priority'],
+            'dueDate' => $row['due_date'],
+            'pinned' => self::dbTruthy($row['pinned']),
+            'sortOrder' => (int) $row['sort_order'],
+            'completedAt' => $row['completed_at'],
+            'shortId' => $row['short_id'] !== null ? (int) $row['short_id'] : null,
+        ];
+        if ($includeNotes) {
+            $task['detail'] = $row['detail'];
+        }
+
+        return $task;
+    }
+
+    /**
+     * Coerce a DB boolean column to a real bool across drivers.
+     *
+     * CRITICAL: pdo_pgsql can return a boolean column as the STRING "f" for
+     * false, and PHP's (bool) cast treats the non-empty string "f" as TRUE —
+     * a naive `(bool) $row['pinned']` would therefore report every unpinned
+     * task as pinned over the real API. Mirrors the identical, repeated fix
+     * already established elsewhere in this codebase for the exact same
+     * driver quirk — see {@see \Tasker\Api\TasksApiHandler::dbTruthy()} and
+     * {@see \Tasker\Api\BoardApiHandler::dbTruthy()} (both private-static, so
+     * replicated here rather than reused directly).
+     *
+     * @param mixed $value Raw column value from a boolean field.
+     */
+    private static function dbTruthy(mixed $value): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value)) {
+            return $value !== 0;
+        }
+        $normalised = strtolower(trim((string) $value));
+
+        return !in_array($normalised, ['', '0', 'f', 'false', 'no'], true);
+    }
+
+    /**
      * Reads the caller-supplied OU id out of a decoded body, accepting
      * `environment_id` as the request-facing alias for the internal `ou_id`
      * column — the derived MCP tool surface speaks "Environment", never

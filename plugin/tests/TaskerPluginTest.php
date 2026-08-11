@@ -302,6 +302,66 @@ final class TaskerPluginTest extends TestCase
     }
 
     /**
+     * D1b Task 8 (get_project's include_notes): a query-string boolean is
+     * ALWAYS a string or entirely absent, never a real PHP bool, so a naive
+     * `(bool) $raw` cast is wrong for the non-empty-string falsy forms — most
+     * concretely `(bool) 'false'`, which is `true` (any non-empty string
+     * other than the single-character "0" is truthy under PHP's own cast
+     * rules). This is the mirror-image problem to this codebase's own
+     * dbTruthy() helpers (see e.g. {@see \Tasker\Api\TasksApiHandler::dbTruthy()}),
+     * which parse a stored DB column's driver-returned representation of a
+     * bool back into a real one; queryParamBool() parses the query-string
+     * representation using the same accepted-falsy-string set, in the same
+     * spirit, rather than inventing a second convention. This exact class of
+     * bug (a naive truthy/falsy conversion silently inverting for one
+     * representation) made unpin() 500 in the previous slice — see
+     * TasksApiHandler::setPinned()'s own docblock — so it is worth pinning at
+     * the unit level here too, via Reflection (queryParamBool() is a private
+     * route-dispatch helper with no other seam to invoke it through, the same
+     * reason {@see self::invokeIdentifierFromRequest()} exists above).
+     */
+    private function invokeQueryParamBool(Request $request, string $name, bool $default): bool
+    {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'queryParamBool');
+        $method->setAccessible(true);
+
+        /** @var bool $result */
+        $result = $method->invoke($plugin, $request, $name, $default);
+
+        return $result;
+    }
+
+    public function testQueryParamBoolTreatsFalseyStringFormsAsFalse(): void
+    {
+        foreach (['false', 'False', 'FALSE', '0', 'f', 'no', ''] as $falsey) {
+            $request = new Request('GET', "/api/tasker/project?include_notes={$falsey}", [], '');
+
+            self::assertFalse(
+                $this->invokeQueryParamBool($request, 'include_notes', false),
+                "include_notes={$falsey} must parse as false, not as PHP's naive truthy non-empty-string cast"
+            );
+        }
+    }
+
+    public function testQueryParamBoolTreatsTruthyStringFormsAsTrue(): void
+    {
+        foreach (['true', '1', 'yes'] as $truthy) {
+            $request = new Request('GET', "/api/tasker/project?include_notes={$truthy}", [], '');
+
+            self::assertTrue($this->invokeQueryParamBool($request, 'include_notes', false));
+        }
+    }
+
+    public function testQueryParamBoolUsesTheSuppliedDefaultWhenTheParameterIsAbsent(): void
+    {
+        $request = new Request('GET', '/api/tasker/project', [], '');
+
+        self::assertFalse($this->invokeQueryParamBool($request, 'include_notes', false));
+        self::assertTrue($this->invokeQueryParamBool($request, 'include_notes', true));
+    }
+
+    /**
      * Task 5 review finding: the new updateSection()/deleteSection()/
      * updateGroup()/deleteGroup() branch — classify an optional parent
      * identifier, 400 on malformed, resolve it only when non-empty, pass it

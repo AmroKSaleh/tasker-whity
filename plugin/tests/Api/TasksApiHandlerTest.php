@@ -32,6 +32,24 @@ use Tasker\Tests\Support\SqlitePolyfills;
  * coverage as-is — and so does its D1b Task 6 successor, listFiltered(),
  * whose own fixtures (below) are built the same insertTaskDirect() way for
  * the same reason.
+ *
+ * NO SQLite COVERAGE FOR getOne() (D1b Task 8, get_task): the brief for that
+ * task sketched a shape/milestones test and a cross-tenant 404 test living in
+ * THIS file. getOne() is OU-aware (see its own docblock in TasksApiHandler),
+ * which — like create() above — means it calls OuScopeResolver::whereFragment()
+ * unconditionally, embedding PostgreSQL's `= ANY(:scope)` in the SQL TEXT
+ * regardless of whether the caller's OU is null. Unlike create(), where the
+ * OU check is a SEPARATE query from the tenant-scoped SELECT/INSERT (so only
+ * the OU-boundary tests needed to move to Postgres), getOne()'s OU-aware join
+ * IS the query that fetches the row — there is no tenant-scoped-only variant
+ * left to exercise here. Confirmed empirically: this file's own setUp() does
+ * not even give tasker_projects an ou_id column. All of getOne()'s coverage
+ * — shape, milestones ordering, cross-tenant 404, AND the sibling-OU 404 the
+ * brief itself did not ask for but the boundary requires — lives in
+ * TenantIsolationOuTest.php instead. See that file's own "TasksApiHandler::
+ * getOne()" section for the full reasoning and a survey of every other
+ * whereFragment() call site in this codebase confirming none has SQLite
+ * coverage either, including calls made with a null caller OU.
  */
 final class TasksApiHandlerTest extends TestCase
 {

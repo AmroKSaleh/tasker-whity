@@ -261,6 +261,26 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
+                'path' => '/api/tasker/project',
+                'handler' => [$this, 'getProject'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:view',
+                'schema' => [
+                    'operationId' => 'get_project',
+                    'summary' => 'Get a single project: its sections and every task, regardless of status',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'project_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
+                        ['name' => 'include_notes', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'boolean'], 'description' => 'Include each task\'s detail field. Defaults to false — on a large project this can be very large.'],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The project, its sections, and their tasks'],
+                        404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
                 'path' => '/api/tasker/sections',
                 'handler' => [$this, 'listSections'],
                 'requiredRole' => null,
@@ -802,6 +822,25 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
+                'path' => '/api/tasker/task',
+                'handler' => [$this, 'getTask'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:view',
+                'schema' => [
+                    'operationId' => 'get_task',
+                    'summary' => 'Get a single task, including its milestones',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'task_id', 'in' => 'query', 'required' => true, 'schema' => ['type' => 'string'], 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The task and its milestones'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
                 'path' => '/api/tasker/milestones',
                 'handler' => [$this, 'listMilestones'],
                 'requiredRole' => null,
@@ -1306,6 +1345,53 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new ProjectsApiHandler($pdo))->delete($tenantId, $ou['ouId'], $projectId);
+    }
+
+    /**
+     * GET /api/tasker/project?project_id=&include_notes= — the original's
+     * get_project.
+     *
+     * project_id is optional and falls back to the caller's default project —
+     * mirrors getBoard()'s/listSections()'s own shape exactly ("read my
+     * current project" is precisely the call an agent makes first).
+     * include_notes is an optional query-string boolean, defaulting to false
+     * — see {@see self::queryParamBool()} for why a naive `(bool)` cast on
+     * the raw string is wrong.
+     *
+     * @param array<string, string> $params
+     */
+    public function getProject(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $raw = $this->queryParam($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $callerOu['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $includeNotes = $this->queryParamBool($request, 'include_notes', false);
+
+        return (new ProjectsApiHandler($pdo))->getOne($tenantId, $callerOu['ouId'], $projectId, $includeNotes);
     }
 
     /**
@@ -2223,6 +2309,45 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
+     * GET /api/tasker/task?task_id= — the original's get_task.
+     *
+     * task_id is required — a single task has no "default" fallback the way
+     * a project does. Resolved via IdentifierResolver::resolveTask() (itself
+     * OU-scoped) BEFORE ever reaching TasksApiHandler::getOne(), which ALSO
+     * re-checks OU scope itself — belt-and-braces, matching every other
+     * OU-aware handler method in this codebase (see that method's own
+     * docblock for why get_task specifically needs this, unlike its
+     * tenant-scoped-only siblings update_task/move_task/etc.).
+     *
+     * @param array<string, string> $params
+     */
+    public function getTask(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->queryParam($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->getOne($tenantId, $ou['ouId'], $taskId);
+    }
+
+    /**
      * GET /api/tasker/milestones?task_id=
      *
      * task_id is required — a task's milestones have no "default" fallback
@@ -2629,6 +2754,38 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return $value;
+    }
+
+    /**
+     * Parse an OPTIONAL query-string boolean (D1b Task 8: get_project's
+     * `include_notes`) — the mirror-image problem to this codebase's own
+     * dbTruthy() helpers (see e.g. {@see \Tasker\Api\TasksApiHandler::dbTruthy()}),
+     * which parse a stored DB column's driver-returned representation of a
+     * bool back into a real one. A query parameter is always a string or
+     * entirely absent, never a real PHP bool, so a naive `(bool) $raw` cast
+     * is wrong for the non-empty falsy string "false" (PHP's own bool cast
+     * treats any non-empty string other than the single character "0" as
+     * truthy) — `include_notes=false` would otherwise silently turn ON the
+     * very feature it asked to turn off. Handled here in the same spirit as
+     * dbTruthy() (same accepted-falsy-string set) rather than a second,
+     * differently-shaped convention.
+     *
+     * $default applies ONLY when the parameter is absent entirely — a bare
+     * `?bool` cannot distinguish "not supplied" from "supplied but falsy", so
+     * this takes an explicit default rather than folding absence into the
+     * falsy-string set (which would silently break a future caller wanting a
+     * true default).
+     */
+    private function queryParamBool(Request $request, string $name, bool $default): bool
+    {
+        $raw = $this->queryParam($request, $name);
+        if ($raw === null) {
+            return $default;
+        }
+
+        $normalised = strtolower(trim($raw));
+
+        return !in_array($normalised, ['', '0', 'f', 'false', 'no'], true);
     }
 
     /**

@@ -506,6 +506,63 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(404, $response->getStatusCode());
     }
 
+    // ==================== ProjectsApiHandler::getOne() (D1b Task 8: get_project) ====================
+
+    public function testGetProjectOmitsTaskDetailUnlessIncludeNotesIsSet(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Notes Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId    = $this->makeTaskDirect(7, $projectId, $sectionId, 'Has detail');
+        $this->pdo->exec("UPDATE tasker_tasks SET detail = 'the long detail' WHERE id = {$taskId}");
+
+        $handler = new ProjectsApiHandler($this->pdo);
+
+        $without = json_decode($handler->getOne(7, null, $projectId, false)->getBody(), true);
+        $task = $without['data']['sections'][0]['tasks'][0];
+        self::assertArrayNotHasKey('detail', $task, 'detail must be omitted by default — it can be very large');
+
+        $with = json_decode($handler->getOne(7, null, $projectId, true)->getBody(), true);
+        self::assertSame('the long detail', $with['data']['sections'][0]['tasks'][0]['detail']);
+    }
+
+    public function testGetProjectIncludesTasksOfEveryStatus(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Full read project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $doneTaskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Already done');
+        $this->pdo->exec("UPDATE tasker_tasks SET status = 'done' WHERE id = {$doneTaskId}");
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Still open');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $payload = json_decode($handler->getOne(7, null, $projectId, false)->getBody(), true);
+
+        // Unlike list_tasks (which excludes done by default), get_project is a
+        // full project read a UI renders -- a done task must not disappear.
+        self::assertCount(2, $payload['data']['sections'][0]['tasks']);
+    }
+
+    public function testGetProjectIs404OutsideOuScope(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $sibling = $this->makeProjectDirect(7, 3, 'Sibling');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+
+        self::assertSame(404, $handler->getOne(7, 2, $sibling, false)->getStatusCode());
+    }
+
+    public function testGetProjectRejects404ForAProjectOutsideTheCallersTenant(): void
+    {
+        $otherTenantProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->getOne(7, null, $otherTenantProjectId, false);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
     public function testReadyWorkExcludesDoneTasks(): void
     {
         $projectId = $this->makeProjectDirect(7, null, 'Ready work project');
@@ -962,6 +1019,83 @@ final class TenantIsolationOuTest extends TestCase
 
         $handler = new TasksApiHandler($this->pdo);
         $response = $handler->create(7, 2, $siblingSectionId, 3, json_encode(['text' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== TasksApiHandler::getOne() (D1b Task 8: get_task) ====================
+    //
+    // getOne() is OU-aware (D1b Task 8 brief resolution #2: tasker_tasks.id is
+    // a sequential BIGSERIAL, so a tenant-scoped-only lookup would let an
+    // OU-restricted caller reach a sibling OU's task simply by counting
+    // upward through ids -- the same reasoning that made create()'s own
+    // section check and MilestonesApiHandler::taskVisible() real). ALL of its
+    // coverage lives here, in the Postgres tier, not in TasksApiHandlerTest.php
+    // (SQLite) -- unlike create(), where only the OU-boundary cases moved
+    // here and the plain shape/CRUD tests stayed on SQLite. getOne() has NO
+    // SQLite-safe path at all, not even with a null caller OU:
+    // OuScopeResolver::whereFragment() embeds PostgreSQL's `= ANY(:scope)` in
+    // the SQL TEXT unconditionally (never a runtime-branched query, per this
+    // whole fix's own static-SQL-template rule), so SQLite's PDO::prepare()
+    // rejects it before any parameter -- including :unrestricted -- is ever
+    // bound. Every other OU-aware method in this codebase (ProjectsApiHandler
+    // ::findScoped(), BoardApiHandler::findProject(), TasksApiHandler's own
+    // create()/isProjectVisible(), MilestonesApiHandler::taskVisible(),
+    // TaskDiscussionsApiHandler::taskVisible()) is Postgres-only for exactly
+    // the same reason, confirmed by grepping this codebase for every
+    // whereFragment() call site: none has SQLite coverage, including the
+    // ones exercised with a null caller OU.
+
+    public function testTasksGetOneReturnsTheTaskWithItsMilestonesOrderedBySortOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Get task project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'With milestones');
+        $this->makeMilestoneDirect(7, $taskId, 'Second step');
+        $this->pdo->exec("UPDATE tasker_milestones SET sort_order = 2 WHERE task_id = {$taskId}");
+        $firstId = $this->makeMilestoneDirect(7, $taskId, 'First step');
+        $this->pdo->exec("UPDATE tasker_milestones SET sort_order = 1 WHERE id = {$firstId}");
+
+        $handler = new TasksApiHandler($this->pdo);
+        $payload = json_decode($handler->getOne(7, null, $taskId)->getBody(), true);
+
+        self::assertSame('With milestones', $payload['data']['text']);
+        self::assertCount(2, $payload['data']['milestones']);
+        self::assertSame('First step', $payload['data']['milestones'][0]['summary'], 'milestones must be ordered by sort_order, not insertion order');
+        self::assertSame('Second step', $payload['data']['milestones'][1]['summary']);
+    }
+
+    public function testTasksGetOneRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->getOne(7, null, $otherTaskId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * The stronger of the two boundary tests the brief asks for -- a
+     * cross-tenant 404 alone would not catch a missing OU check, since a
+     * missing tenant_id predicate and a missing OU predicate are different
+     * bugs. Proves the D1b Task 8 brief resolution #2 fix directly: without
+     * getOne()'s own OU-aware join, a caller scoped to OU 2 could reach OU
+     * 3's task simply by supplying its id.
+     */
+    public function testTasksGetOneRejects404ForASiblingOusTask(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->getOne(7, 2, $siblingTaskId);
 
         self::assertSame(404, $response->getStatusCode());
     }

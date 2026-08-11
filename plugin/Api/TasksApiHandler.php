@@ -751,6 +751,126 @@ final class TasksApiHandler
     }
 
     /**
+     * GET /api/tasker/task?task_id= — the original's get_task: a single task
+     * plus its milestones, ordered by sort_order then id for a deterministic
+     * response.
+     *
+     * OU-AWARE — DEVIATION FROM THE BRIEF (D1b Task 8 brief resolution #2):
+     * the brief's own stated interface is `getOne(int $tenantId, int $taskId):
+     * Response`, tenant-scoped only, matching every other single-task method
+     * in this class (update/move/delete/complete/uncomplete/pin/unpin/tag).
+     * Those all stay tenant-scoped only because a caller only ever reaches
+     * one of THEIR task ids through an OU-scoped list/get_board first — by
+     * the time a caller holds a task id, OU visibility has already been
+     * proven once. get_task is different: it is the caller's FIRST hop
+     * straight to a task by identifier, and `tasker_tasks.id` is a sequential
+     * BIGSERIAL, so a tenant-scoped-only lookup would let an OU-restricted
+     * caller reach a sibling OU's task simply by counting upward through ids
+     * — exactly the reasoning that made create()'s own section check (see
+     * this class's own docblock) and
+     * {@see \Tasker\Api\MilestonesApiHandler::taskVisible()} real in the
+     * previous slice's review. {@see \Tasker\Api\ProjectsApiHandler::getOne()}
+     * (this task's sibling method) takes the identical `?int $callerOuId`
+     * shape for the same reason.
+     *
+     * Confines this method to a real PostgreSQL connection (see
+     * TenantIsolationOuTest), same as every other OU-aware method in this
+     * codebase: {@see self::findVisible()} joins to tasker_projects (the only
+     * table with an ou_id column) and applies
+     * {@see OuScopeResolver::whereFragment()} there, unconditionally, one
+     * static SQL template — which embeds PostgreSQL's `= ANY(:scope)` in the
+     * SQL TEXT regardless of whether the caller's OU is null, so SQLite's
+     * PDO::prepare() rejects it before any parameter is ever bound. There is
+     * consequently NO SQLite-tier coverage for this method at all — see
+     * TasksApiHandlerTest's own docblock for the full reasoning.
+     */
+    public function getOne(int $tenantId, ?int $callerOuId, int $taskId): Response
+    {
+        $row = $this->findVisible($tenantId, $callerOuId, $taskId);
+        if ($row === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $task = $this->toPublicTask($row);
+        $task['milestones'] = $this->fetchMilestonesForTask($tenantId, (int) $row['id']);
+
+        return Response::json(['data' => $task], 200);
+    }
+
+    /**
+     * OU-aware task lookup for {@see self::getOne()} — see that method's own
+     * docblock for why this differs from the tenant-scoped-only
+     * {@see self::findScoped()} above. tenant_id is bound explicitly on BOTH
+     * sides of the join (`:tenant_id` on tasker_tasks, `:tenant_id_p` on
+     * tasker_projects) — matching
+     * {@see \Tasker\Access\IdentifierResolver::taskByColumn()}'s own
+     * precedent — rather than the child-table-only binding some of this
+     * codebase's older OU-aware joins carry (create()'s own section check
+     * above, and MilestonesApiHandler::taskVisible()/
+     * TaskDiscussionsApiHandler::taskVisible() only bind tenant_id on the
+     * child table's side); that gap is a known, separately-tracked
+     * carry-over item, not a pattern to repeat in new code.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function findVisible(int $tenantId, ?int $callerOuId, int $taskId): ?array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
+                    t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
+                    t.short_id, t.created_by, t.created_at, t.updated_at
+             FROM tasker_tasks t
+             JOIN tasker_projects p ON p.id = t.project_id
+             WHERE t.id = :id AND t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * $taskId's milestones, ordered by sort_order then id — matching
+     * {@see \Tasker\Api\MilestonesApiHandler::listForTask()}'s own ordering
+     * and shape for the milestone fields it selects.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function fetchMilestonesForTask(int $tenantId, int $taskId): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT id, summary, detail, checked, sort_order
+             FROM tasker_milestones
+             WHERE tenant_id = :tenant_id AND task_id = :task_id
+             ORDER BY sort_order ASC, id ASC'
+        );
+        $stmt->execute([':tenant_id' => $tenantId, ':task_id' => $taskId]);
+
+        $milestones = [];
+        /** @var array<string, mixed> $row */
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $milestones[] = [
+                'id' => (int) $row['id'],
+                'summary' => (string) $row['summary'],
+                'detail' => $row['detail'],
+                'checked' => self::dbTruthy($row['checked']),
+                'sortOrder' => (int) $row['sort_order'],
+            ];
+        }
+
+        return $milestones;
+    }
+
+    /**
      * Whether $sectionId exists and belongs to $tenantId — tenant-scoped
      * only, per this method's own I7 note (listForSection() is explicitly
      * not part of C1's OU-scoping fix).

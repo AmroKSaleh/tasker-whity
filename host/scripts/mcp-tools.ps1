@@ -116,13 +116,13 @@ try {
     $taskerToolNames = @(
         '__init_tasker_session', 'set_default_project',
         'list_pings', 'create_ping', 'tag_ping',
-        'list_projects', 'create_project', 'update_project', 'delete_project',
+        'list_projects', 'create_project', 'update_project', 'delete_project', 'get_project',
         'list_sections', 'create_section', 'update_section', 'rename_section', 'delete_section',
         'list_groups', 'create_group', 'update_group', 'rename_group', 'delete_group',
         'list_tasks', 'create_task', 'update_task', 'move_task', 'delete_task',
         'complete_task', 'uncomplete_task', 'pin_task', 'unpin_task', 'tag_task', 'get_ready_work',
         'list_milestones', 'add_milestone', 'complete_milestone', 'uncomplete_milestone', 'update_milestone', 'delete_milestone',
-        'get_board',
+        'get_board', 'get_task',
         'get_task_discussion', 'set_task_discussion'
     )
     $tools = $response.result.tools |
