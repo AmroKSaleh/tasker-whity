@@ -6,6 +6,7 @@ namespace Tasker\Tests;
 
 use PDO;
 use PHPUnit\Framework\TestCase;
+use Tasker\Access\IdentifierResolver;
 use Tasker\Api\BoardApiHandler;
 use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\MilestonesApiHandler;
@@ -1282,5 +1283,95 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->update(7, null, $projectId, json_encode(['ou_id' => 999999]));
 
         self::assertSame(422, $response->getStatusCode());
+    }
+
+    // ==================== IdentifierResolver (Task 1 of the D1b plan) ====================
+    //
+    // resolveProject()/resolveTask() call OuScopeResolver::whereFragment(),
+    // which emits Postgres-only `= ANY(:scope)` — unrunnable under SQLite at
+    // PDO::prepare() time, before any binding. classify() itself is pure and
+    // covered on SQLite in IdentifierResolverTest; everything here that
+    // touches the database belongs against real Postgres instead.
+
+    public function testResolveProjectAcceptsEveryIdentifierFormWithinScope(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Tasker Dev Env');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TDE', slug = 'tasker-dev-env' WHERE id = {$projectId}");
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_projects WHERE id = {$projectId}")->fetchColumn();
+
+        self::assertSame($projectId, IdentifierResolver::resolveProject($this->pdo, 7, null, $projectId));
+        self::assertSame($projectId, IdentifierResolver::resolveProject($this->pdo, 7, null, (string) $projectId));
+        self::assertSame($projectId, IdentifierResolver::resolveProject($this->pdo, 7, null, $publicId));
+        self::assertSame($projectId, IdentifierResolver::resolveProject($this->pdo, 7, null, 'TDE'));
+        self::assertSame($projectId, IdentifierResolver::resolveProject($this->pdo, 7, null, 'tasker-dev-env'));
+    }
+
+    public function testResolveProjectRefusesEveryFormAcrossATenantBoundary(): void
+    {
+        $foreign = $this->makeProjectDirect(9, null, 'Foreign Project');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'FGN', slug = 'foreign-project' WHERE id = {$foreign}");
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_projects WHERE id = {$foreign}")->fetchColumn();
+
+        // Caller is tenant 7. Every form must miss.
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, null, $foreign));
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, null, $publicId));
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, null, 'FGN'));
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, null, 'foreign-project'));
+    }
+
+    public function testResolveProjectRefusesEveryFormAcrossAnOuBoundary(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $sibling = $this->makeProjectDirect(7, 3, 'Sibling Branch Project');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'SBP', slug = 'sibling-branch-project' WHERE id = {$sibling}");
+        $publicId = (string) $this->pdo->query("SELECT public_id FROM tasker_projects WHERE id = {$sibling}")->fetchColumn();
+
+        // Caller restricted to OU 2 must not reach OU 3's project by ANY form.
+        // This is the assertion that matters most in the whole slice: it is
+        // what replaces the structural OU check that flattening removed.
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, 2, $sibling));
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, 2, $publicId));
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, 2, 'SBP'));
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, 2, 'sibling-branch-project'));
+    }
+
+    public function testResolveProjectFallsBackToTheDefaultOnlyWhenInScope(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $mine    = $this->makeProjectDirect(7, 2, 'Mine');
+        $sibling = $this->makeProjectDirect(7, 3, 'Sibling');
+
+        // Empty identifier + an in-scope default resolves to it.
+        self::assertSame($mine, IdentifierResolver::resolveProject($this->pdo, 7, 2, null, $mine));
+
+        // A stale default pointing outside scope must NOT be honoured — the
+        // stored id is re-checked through the same scoped query.
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, 2, null, $sibling));
+
+        // No identifier and no default is simply a miss.
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, 2, null, null));
+    }
+
+    public function testResolveTaskAcceptsAShortIdAndRefusesItAcrossAnOuBoundary(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $sibling = $this->makeProjectDirect(7, 3, 'Sibling');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'SIB' WHERE id = {$sibling}");
+        $sectionId = $this->makeSectionDirect(7, $sibling);
+        $taskId    = $this->makeTaskDirect(7, $sibling, $sectionId, 'Hidden task');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 31 WHERE id = {$taskId}");
+
+        // Tenant-root sees it.
+        self::assertSame($taskId, IdentifierResolver::resolveTask($this->pdo, 7, null, 'SIB-31'));
+
+        // A caller in sibling OU 2 must not, because the PROJECT is out of scope.
+        self::assertNull(IdentifierResolver::resolveTask($this->pdo, 7, 2, 'SIB-31'));
     }
 }
