@@ -43,9 +43,23 @@ final class ShortIdAllocator
      * Whether a PDOException is a unique-constraint violation, i.e. a lost
      * race worth retrying rather than a real failure.
      *
-     * Postgres reports SQLSTATE 23505; SQLite reports 23000 with a message
-     * naming the constraint. Both are checked because the plugin's tests run
-     * on SQLite and production runs on Postgres.
+     * Postgres reports SQLSTATE 23505 for a unique violation specifically, so
+     * that check alone is precise. SQLite reports the broader 23000
+     * (integrity constraint violation in general — NOT NULL, CHECK, and FK
+     * failures all share it too), so 23000 alone would be too wide: it would
+     * make withRetry() waste every attempt retrying a NOT NULL/CHECK/FK bug
+     * that will never succeed, before finally rethrowing the last one.
+     * Narrowed instead by checking the message names OUR OWN table and both
+     * columns — confirmed empirically (a throwaway PDO SQLite script against
+     * this exact schema) that a real violation of
+     * `idx_tasker_tasks_project_short_id` reports:
+     *   "UNIQUE constraint failed: tasker_tasks.project_id, tasker_tasks.short_id"
+     * i.e. the table/column names, NEVER the index name — an earlier version
+     * of this check matched on the index name instead and consequently never
+     * matched a real SQLite error at all, silently turning the SQLite retry
+     * path into dead code. Matching both column names (rather than the exact
+     * substring, which also encodes their comma-separated order) tolerates
+     * a future SQLite version reordering or rewording the message slightly.
      */
     public static function isRaceLoss(PDOException $e): bool
     {
@@ -56,7 +70,8 @@ final class ShortIdAllocator
         }
 
         return (string) $sqlState === '23000'
-            && stripos($e->getMessage(), 'idx_tasker_tasks_project_short_id') !== false;
+            && stripos($e->getMessage(), 'tasker_tasks.project_id') !== false
+            && stripos($e->getMessage(), 'tasker_tasks.short_id') !== false;
     }
 
     /**

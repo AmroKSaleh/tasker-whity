@@ -34,18 +34,21 @@ final class PrefixDeriver
 
         $taken = self::takenPrefixes($db, $tenantId);
 
-        // Truncate relative to the BASE's own length, not a hardcoded 5: a
-        // suffix replaces trailing characters of the base so the candidate
-        // stays the same length as the unsuffixed base (e.g. "TDE" + "X"
-        // collision candidate is "TDX", not "TDEX") -- confirmed against
-        // PrefixDeriverTest::testSuffixesOnCollisionWithinTheTenant. A
-        // hardcoded 5 only matches this when $base is already 5 chars long;
-        // for anything shorter it silently grows the candidate past the
-        // base's own length instead of substituting into it.
-        $baseLength = strlen($base);
-
+        // The 5 here is deliberately hardcoded, not $base's own length: this
+        // mirrors the original app's `base.slice(0, 5 - suffix.length) +
+        // suffix` exactly, and JS's slice()/PHP's substr() both return the
+        // whole string (not padded) when the requested end exceeds it. For a
+        // base shorter than 5 (the common case), that means a suffix
+        // APPENDS rather than substitutes -- "TDE" + suffix "X" candidate is
+        // "TDEX" (4 chars, one longer than the base), never "TDX". This
+        // looks like it should substitute instead, but changing it would
+        // silently break contract parity with the original, which is the
+        // whole point of this port -- confirmed empirically via
+        // PrefixDeriverTest::testSuffixesOnCollisionWithinTheTenant and
+        // ::testReturnsNullWhenEveryCandidateIsTaken. Do not "fix" this
+        // again without re-deriving both tests' expected values first.
         foreach (self::SUFFIXES as $suffix) {
-            $candidate = substr($base, 0, $baseLength - strlen($suffix)) . $suffix;
+            $candidate = substr($base, 0, 5 - strlen($suffix)) . $suffix;
             $length    = strlen($candidate);
 
             if ($length >= 2 && $length <= 5 && !isset($taken[$candidate])) {
