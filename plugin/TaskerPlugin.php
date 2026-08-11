@@ -1421,21 +1421,23 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      */
     public function listEnvironments(Request $request, array $params = []): Response
     {
-        if ($this->requireTenantId() === null) {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
             return Response::error('Tenant context is required', 403);
         }
 
-        if (!$request instanceof \Whity\Core\Request) {
-            return Response::error('Unexpected request type', 500);
-        }
-
         try {
-            return $this->ousHandler()->list($request);
+            return $this->ousHandler()->list($this->toHostRequest($request));
         } catch (\Throwable $e) {
             // Ruling #4: an uncaught throw is an uncontrolled error path this
             // slice's error discipline does not allow anywhere else. The one
             // concrete case this guards today is ousHandler() failing to
-            // resolve a live HookManager/Database from the container.
+            // resolve a live HookManager/Database from the container. Logged
+            // (review finding, Important #2) because catching here bypasses
+            // the host's own error boundary (PluginLoader::wrapHandler()),
+            // which would otherwise be the only place this failure surfaces
+            // with a stack trace at all.
+            $this->logEnvironmentAliasFailure('listEnvironments', $tenantId, $e);
             return Response::error('Environments are temporarily unavailable', 500);
         }
     }
@@ -1457,17 +1459,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      */
     public function createEnvironment(Request $request, array $params = []): Response
     {
-        if ($this->requireTenantId() === null) {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
             return Response::error('Tenant context is required', 403);
         }
 
-        if (!$request instanceof \Whity\Core\Request) {
-            return Response::error('Unexpected request type', 500);
-        }
-
         try {
-            return $this->ousHandler()->create($request);
+            return $this->ousHandler()->create($this->toHostRequest($request));
         } catch (\Throwable $e) {
+            $this->logEnvironmentAliasFailure('createEnvironment', $tenantId, $e);
             return Response::error('Environments are temporarily unavailable', 500);
         }
     }
@@ -1486,26 +1486,38 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * is used completely opaquely (never resolved, classified, or otherwise
      * interpreted by Tasker) per ruling #2.
      *
+     * Review finding (promoted from Minor): core's OWN routing constrains the
+     * id with a `{id:\d+}` path pattern, so a non-numeric value never reaches
+     * OusApiHandler::update() over core's own API. This flat alias has no
+     * such pattern to lean on, so a non-numeric environment_id (e.g. an agent
+     * passing an Environment NAME where an id is expected — a very plausible
+     * MCP call) would otherwise reach Postgres as an integer comparison,
+     * throw, and surface as a 500 via OusApiHandler's own catch. Rejected
+     * here with a clean 400 instead. `environment_id: 0` / `"0"` are digit
+     * strings and pass this check unchanged, exactly like today — they still
+     * 400 downstream via OusApiHandler's own `if (!$id)` guard, not this one.
+     *
      * @param array<string, string> $params
      */
     public function renameEnvironment(Request $request, array $params = []): Response
     {
-        if ($this->requireTenantId() === null) {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
             return Response::error('Tenant context is required', 403);
-        }
-
-        if (!$request instanceof \Whity\Core\Request) {
-            return Response::error('Unexpected request type', 500);
         }
 
         $environmentId = $this->identifierFromRequest($request, 'environment_id');
         if ($environmentId === null) {
             return Response::error('environment_id is required', 400);
         }
+        if (!ctype_digit((string) $environmentId)) {
+            return Response::error('environment_id must be numeric', 400);
+        }
 
         try {
-            return $this->ousHandler()->update($request, ['id' => (string) $environmentId]);
+            return $this->ousHandler()->update($this->toHostRequest($request), ['id' => (string) $environmentId]);
         } catch (\Throwable $e) {
+            $this->logEnvironmentAliasFailure('renameEnvironment', $tenantId, $e);
             return Response::error('Environments are temporarily unavailable', 500);
         }
     }
@@ -1520,26 +1532,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * on every real MCP delete_environment call — exactly the mistake that
      * shipped once already in this slice for delete_project.
      *
+     * Review finding (promoted from Minor): same non-numeric guard as
+     * renameEnvironment() above, for the same reason (core's `{id:\d+}` path
+     * pattern has no equivalent on this flat alias) — see that method's
+     * docblock.
+     *
      * @param array<string, string> $params
      */
     public function deleteEnvironment(Request $request, array $params = []): Response
     {
-        if ($this->requireTenantId() === null) {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
             return Response::error('Tenant context is required', 403);
-        }
-
-        if (!$request instanceof \Whity\Core\Request) {
-            return Response::error('Unexpected request type', 500);
         }
 
         $environmentId = $this->identifierFromRequest($request, 'environment_id');
         if ($environmentId === null) {
             return Response::error('environment_id is required', 400);
         }
+        if (!ctype_digit((string) $environmentId)) {
+            return Response::error('environment_id must be numeric', 400);
+        }
 
         try {
-            return $this->ousHandler()->delete($request, ['id' => (string) $environmentId]);
+            return $this->ousHandler()->delete($this->toHostRequest($request), ['id' => (string) $environmentId]);
         } catch (\Throwable $e) {
+            $this->logEnvironmentAliasFailure('deleteEnvironment', $tenantId, $e);
             return Response::error('Environments are temporarily unavailable', 500);
         }
     }
@@ -1574,6 +1592,87 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return new \Whity\Api\OusApiHandler($this->resolvePdo(), $hooks);
+    }
+
+    /**
+     * Adapt an incoming SDK-typed Request into the core Request type
+     * OusApiHandler's methods actually type-hint.
+     *
+     * REVIEW FIX (Important #1): the first version of this alias REJECTED
+     * (500) any request that was not already a `\Whity\Core\Request`
+     * instance. That silently broke `list_environments` (and, over the same
+     * transport, every one of these four aliases) called via the MCP
+     * `resources/read` transport specifically: every GET route with a
+     * non-empty `schema` is auto-derived into an MCP resource
+     * (`Whity\Mcp\Resources\ResourceDeriver`), and
+     * `Whity\Mcp\Resources\ResourcesReadHandler::buildRequest()` constructs
+     * its synthesized Request from the SDK's OWN `Whity\Sdk\Http\Request`
+     * class directly — never the `Whity\Core\Request` subclass the HTTP
+     * kernel (`Request::fromGlobals(): static`) and `tools/call`
+     * (`Whity\Mcp\Tools\ToolsCallHandler`, which imports the core class) both
+     * pass. This plugin's OTHER pre-existing GET routes never hit this
+     * because none of them narrow the request type at all; these four
+     * aliases are the first that do, because OusApiHandler itself
+     * type-hints `\Whity\Core\Request` (an empty subclass of the SDK's own
+     * type — verified directly against host/.core/src/Core/Request.php).
+     *
+     * Re-wrapping rather than rejecting is safe precisely because
+     * `\Whity\Core\Request` adds nothing over the SDK base class: every
+     * accessor OusApiHandler/JsonBody/PaginationParams actually call
+     * (getMethod/getPath/getHeaders/getBody) is carried across unchanged,
+     * including the query string embedded in getPath() — queryParam() (and,
+     * through it, identifierFromRequest(), which deleteEnvironment() depends
+     * on for its query-string-only MCP transport shape) parses that string,
+     * not a structured object, so nothing is lost by rebuilding it. There is
+     * no security concern in doing this: resources/read applies the exact
+     * same requiredRole gate as every other transport
+     * (`ResourcesReadHandler`'s own RBAC check).
+     *
+     * An already-correct `\Whity\Core\Request` (the HTTP and tools/call
+     * paths) is returned unchanged rather than needlessly rebuilt.
+     */
+    private function toHostRequest(Request $request): \Whity\Core\Request
+    {
+        if ($request instanceof \Whity\Core\Request) {
+            return $request;
+        }
+
+        return new \Whity\Core\Request(
+            $request->getMethod(),
+            $request->getPath(),
+            $request->getHeaders(),
+            $request->getBody()
+        );
+    }
+
+    /**
+     * Log an environment-alias failure before returning the generic 500.
+     *
+     * REVIEW FIX (Important #2): ruling #4 requires every route method to
+     * catch \Throwable around its OusApiHandler delegation rather than let it
+     * escape (see each catch block above). That catch has a cost the ruling
+     * did not account for: it runs BEFORE the host's own error boundary,
+     * `Whity\Core\PluginLoader::wrapHandler()`, which is what normally logs a
+     * structured entry (message, stack trace, tenant_id) and records the
+     * failure against the plugin's lifecycle. Catching here silently
+     * prevents that from ever happening — the exact failure this guards
+     * against (an unregistered HookManager/Database service) would otherwise
+     * reach production as "Environments are temporarily unavailable" with
+     * ZERO diagnostics anywhere. Logged via error_log(), matching the
+     * pattern OusApiHandler's own catch blocks already use
+     * (`error_log('[OusApiHandler] create failed: ...')`) rather than
+     * inventing a second logging convention. The response body stays
+     * generic; only this log line carries the exception detail.
+     */
+    private function logEnvironmentAliasFailure(string $method, ?int $tenantId, \Throwable $e): void
+    {
+        error_log(sprintf(
+            '[TaskerPlugin] %s failed: tenant_id=%s %s: %s',
+            $method,
+            var_export($tenantId, true),
+            get_class($e),
+            $e->getMessage()
+        ));
     }
 
     /**

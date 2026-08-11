@@ -2348,4 +2348,124 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(403, $response->getStatusCode());
     }
+
+    /**
+     * REVIEW FIX (Important #1): reproduces the transport shape none of the
+     * tests above exercise -- MCP `resources/read`. Every GET route with a
+     * non-empty schema is auto-derived into an MCP resource
+     * (`Whity\Mcp\Resources\ResourceDeriver`), and
+     * `Whity\Mcp\Resources\ResourcesReadHandler::buildRequest()` constructs
+     * its synthesized Request from the SDK's OWN `Whity\Sdk\Http\Request`
+     * class directly -- never the `Whity\Core\Request` subclass this file's
+     * own hostRequest() helper (and the HTTP/tools/call transports) pass.
+     * Before toHostRequest() existed, listEnvironments()'s own
+     * `instanceof \Whity\Core\Request` guard rejected exactly this shape
+     * with a 500 -- the one MCP transport this alias had never actually been
+     * driven against. Constructing the SDK type directly here (not
+     * hostRequest(), which deliberately always returns the core type)
+     * reproduces that gap precisely.
+     */
+    public function testListEnvironmentsSucceedsWithAnSdkRequestNotJustTheCoreSubclass(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+
+        $sdkRequest = new \Whity\Sdk\Http\Request('GET', '/api/tasker/environments');
+        self::assertNotInstanceOf(
+            \Whity\Core\Request::class,
+            $sdkRequest,
+            'this test is only meaningful if the SDK type is NOT already the core subclass'
+        );
+
+        $plugin = new TaskerPlugin();
+        $response = $plugin->listEnvironments($sdkRequest);
+
+        self::assertSame(
+            200,
+            $response->getStatusCode(),
+            'resources/read hands plugin routes a bare Whity\Sdk\Http\Request -- rejecting it (the pre-fix '
+                . 'behaviour) 500s every environment alias called over that transport'
+        );
+        $payload = json_decode($response->getBody(), true);
+        self::assertCount(1, $payload['data']);
+    }
+
+    /**
+     * REVIEW FIX (promoted Minor): core's own routing constrains the OU id
+     * with `{id:\d+}`, so a non-numeric value never reaches
+     * OusApiHandler::update() over core's own API -- this flat alias has no
+     * such pattern, so without a guard a non-numeric environment_id (e.g. an
+     * agent passing an Environment NAME where an id is expected) reaches
+     * Postgres as an integer comparison, throws, and 500s via
+     * OusApiHandler's own catch. Must 400 instead -- this slice's error
+     * discipline is that caller input never produces a 500.
+     */
+    public function testRenameEnvironmentRejectsANonNumericEnvironmentIdWith400NotA500(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+
+        $plugin = new TaskerPlugin();
+        $response = $plugin->renameEnvironment($this->hostRequest(
+            'PATCH',
+            '/api/tasker/environments',
+            (string) json_encode(['environment_id' => 'engineering', 'name' => 'Should not apply'])
+        ));
+
+        self::assertSame(400, $response->getStatusCode());
+        self::assertCount(0, $this->auditRowsFor(7), 'a rejected, non-numeric identifier must never reach OusApiHandler at all');
+    }
+
+    public function testDeleteEnvironmentRejectsANonNumericEnvironmentIdWith400NotA500(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+
+        $previousGet = $_GET;
+        $_GET = ['environment_id' => 'engineering'];
+        try {
+            $plugin = new TaskerPlugin();
+            $response = $plugin->deleteEnvironment($this->hostRequest('DELETE', '/api/tasker/environments', ''));
+        } finally {
+            $_GET = $previousGet;
+        }
+
+        self::assertSame(400, $response->getStatusCode());
+        $count = (int) $this->pdo->query('SELECT COUNT(*) FROM organizational_units WHERE tenant_id = 7')->fetchColumn();
+        self::assertSame(1, $count, 'the OU must survive a rejected, non-numeric delete identifier');
+    }
+
+    /**
+     * REVIEW: "don't regress" check -- environment_id 0 / "0" must keep
+     * 400ing exactly as before this fix, via OusApiHandler's own
+     * `if (!$id)` guard (a digit STRING, "0" passes the new ctype_digit()
+     * pre-check unchanged and is rejected downstream instead, same
+     * observable outcome).
+     */
+    public function testRenameAndDeleteEnvironmentStillRejectAnIdOfZero(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+
+        $plugin = new TaskerPlugin();
+
+        $renameResponse = $plugin->renameEnvironment($this->hostRequest(
+            'PATCH',
+            '/api/tasker/environments',
+            (string) json_encode(['environment_id' => 0, 'name' => 'Should not apply'])
+        ));
+        self::assertSame(400, $renameResponse->getStatusCode());
+
+        $previousGet = $_GET;
+        $_GET = ['environment_id' => '0'];
+        try {
+            $deleteResponse = $plugin->deleteEnvironment($this->hostRequest('DELETE', '/api/tasker/environments', ''));
+        } finally {
+            $_GET = $previousGet;
+        }
+        self::assertSame(400, $deleteResponse->getStatusCode());
+
+        $count = (int) $this->pdo->query('SELECT COUNT(*) FROM organizational_units WHERE tenant_id = 7')->fetchColumn();
+        self::assertSame(1, $count, 'the real OU (id 1) must be untouched by either rejected id-0 call');
+    }
 }
