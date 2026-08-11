@@ -761,7 +761,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                             'status' => [
                                 'type' => 'string',
                                 'enum' => ['pending', 'in_progress', 'done'],
-                                'description' => 'Does not stamp or clear completed_at -- use complete_task/uncomplete_task for that.',
+                                'description' => 'Setting this to done stamps completed_at; setting it to pending or in_progress clears completed_at -- same as complete_task/uncomplete_task.',
                             ],
                         ],
                     ],
