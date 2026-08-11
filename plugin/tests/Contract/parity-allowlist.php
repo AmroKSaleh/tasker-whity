@@ -23,10 +23,18 @@ declare(strict_types=1);
  *               core's InputSchemaValidator only enforces `required`, so
  *               undeclared arguments pass straight through and vanish.
  *   SEMANTIC  — the same call does something DIFFERENT here. These are the
- *               dangerous ones. There are nine; two (delete_section,
- *               delete_project) diverge in the UNSAFE direction, one
- *               (move_task) is a silent no-op, and three (the milestone
- *               index trio) mutate the WRONG ROW.
+ *               dangerous ones. There are FOUR left: move_task is a silent
+ *               no-op on a cross-project move, delete_environment reassigns
+ *               behind a gate that 409s instead of moving anything, get_task
+ *               no longer auto-starts a task, and delete_group fails SAFE
+ *               (un-groups instead of the destructive delete_tasks:true the
+ *               original also offers). The five most dangerous entries this
+ *               file used to carry — delete_section and delete_project (both
+ *               UNSAFE-direction: the identical call was a refusal on the
+ *               original and irreversible data loss here) and the milestone
+ *               `index` trio (WRONG-ROW: an id-first resolver silently
+ *               mutated the wrong milestone) — were FIXED in D1b Task 12b,
+ *               not merely allowlisted. See git history for their entries.
  *
  * EVERY SEMANTIC ENTRY MUST CARRY `severity => 'semantic'` AND `dischargedBy`,
  * and the test enforces both. The reason is an escape hatch found in review:
@@ -39,8 +47,14 @@ declare(strict_types=1);
  * property FAILS unless the behavioural test named in `dischargedBy` actually
  * exists in the suite. Behaviour first, schema second.
  *
- * 22 entries waiving 64 individual divergences across the 36 shared tools, after
- * one route was fixed rather than waived (add_milestone — see its entry).
+ * 18 entries waiving 60 individual divergences across the 36 shared tools, after
+ * D1b Task 12b fixed four routes rather than waiving them — delete_section,
+ * delete_project, the milestone `index` trio, and list_groups/create_group's
+ * missing project_id — closing 4 entries outright (delete_section,
+ * delete_project, list_groups, create_group) and dropping the milestone
+ * trio's severity from semantic to a plain ADDITIVE remainder (milestone_id
+ * itself), on top of the earlier add_milestone fix (also fixed rather than
+ * waived — see its entry).
  *
  * Divergence keys:
  *   missing      — property the original accepts and we do not
@@ -73,32 +87,6 @@ return [
         'reason' => 'SEMANTIC: the original move_task is a cross-project move (target_project_id required); ours is '
             . 'within-project relocation/reordering. A cross-project call silently no-ops with a 200. Needs a real '
             . 'port, not a property — short ids are project-prefixed and OU scope travels with the project. Unowned.',
-    ],
-
-    'delete_section' => [
-        // SEMANTIC, UNSAFE DIRECTION. The original REFUSES to delete a non-empty
-        // section unless delete_tasks:true. Ours always cascades to the
-        // section's groups and tasks. The identical call is a refusal there and
-        // irreversible data loss here. The most dangerous entry in this file.
-        'missing' => ['delete_tasks'],
-        'severity' => 'semantic',
-        'dischargedBy' => 'testDeleteSectionRefusesANonEmptySectionUnlessDeleteTasksIsTrue',
-        'reason' => 'SEMANTIC/UNSAFE: the original refuses a non-empty section without delete_tasks:true; ours always '
-            . 'cascades. Same call, refusal there vs irreversible data loss here. Unowned — fix before D1b ships to '
-            . 'anyone driving it from an original-app agent.',
-    ],
-
-    'delete_project' => [
-        // SEMANTIC, UNSAFE DIRECTION. The original REQUIRES confirmed:true
-        // before permanently deleting a project and everything under it. We have
-        // no gate at all. An original-shaped call (which sends confirmed:true)
-        // still works — the value is simply ignored — so nothing breaks; what is
-        // lost is the deliberateness the gate exists to force.
-        'missing' => ['confirmed'],
-        'severity' => 'semantic',
-        'dischargedBy' => 'testDeleteProjectRefusesWithoutConfirmedTrue',
-        'reason' => 'SEMANTIC/UNSAFE: the original gates permanent project deletion on confirmed:true; D1 deletes '
-            . 'immediately. No original call breaks (the flag is ignored), but the safety gate is gone. Unowned.',
     ],
 
     'delete_environment' => [
@@ -279,63 +267,42 @@ return [
             . 'sort_order places a milestone explicitly, which the original\'s jsonb array could not.',
     ],
 
-    // ── SEMANTIC: the milestone `index` trio ─────────────────────────────────
-    //
-    // An earlier version of this file said, of all three, that "index is still
-    // accepted and still means the same thing, so the original's call works
-    // unchanged". That was FALSE, and a false reason is worse than no entry: it
-    // tells the next reader the case is handled.
-    //
-    // The original is strictly positional — complete_milestone documents index
-    // as 0-based, types it `number`, and REQUIRES it. Ours resolves an integer
-    // ID-FIRST: IdentifierResolver::resolveMilestone() tries
-    // `WHERE id = :value AND task_id = …` (IdentifierResolver.php:419-427) and
-    // only falls through to the ordinal list (:429-438) when no milestone with
-    // that primary key belongs to the task. So for any task whose milestone ids
-    // land in the low integers — the normal case for early rows —
-    // complete_milestone({task_id, index: 1}) completes the milestone with ID 1,
-    // not the second milestone.
-    //
-    // Same class of break as add_milestone, one degree worse: it does not error,
-    // it mutates the WRONG ROW. A separate task owns the fix (positional
-    // resolution for `index`, id resolution reserved to `milestone_id`); it is
-    // deliberately not fixed here, where the remit is the test artifacts.
-    //
-    // Note what is NOT waived: the `extra` waiver below covers milestone_id, and
-    // the `missing` waiver covers nothing, because `index` exists on both sides.
-    // The shape matches; only the meaning does not. That is precisely the kind
-    // of divergence a property-name diff cannot see, and the reason these three
-    // carry severity 'semantic' — so nobody can retire them without landing the
-    // behaviour and the test.
+    // The milestone `index` trio (complete_milestone/uncomplete_milestone/
+    // delete_milestone) used to carry SEMANTIC/WRONG-ROW entries here: the
+    // original addresses milestones POSITIONALLY (index, 0-based, required),
+    // but IdentifierResolver::resolveMilestone() resolved an integer ID-FIRST
+    // and only fell back to the ordinal list when no milestone with that
+    // primary key belonged to the task — so an original-shaped positional
+    // call silently completed/reopened/DELETED the wrong milestone whenever
+    // ids landed in the low integers. D1b Task 12b fixed this by splitting
+    // resolution into IdentifierResolver::resolveMilestoneById() (id/UUID
+    // only) and ::resolveMilestoneByIndex() (position only, 0-based, matching
+    // the original), with NO cross-fallback in either direction — see
+    // testCompleteMilestoneTreatsIndexAsAPositionNotAnId()/
+    // testUncompleteMilestoneTreatsIndexAsAPositionNotAnId()/
+    // testDeleteMilestoneTreatsIndexAsAPositionNotAnId() in TaskerPluginTest
+    // for the behavioural proof (each constructs the exact id/position
+    // collision the old resolver got wrong). What is LEFT below is the
+    // ordinary ADDITIVE remainder: milestone_id itself is not on the
+    // original's surface at all (it only ever had `index`), which is a
+    // plain extra-property divergence, not a divergence in MEANING, so none
+    // of these three carry `severity`/`dischargedBy` any more.
 
     'complete_milestone' => [
         'extra' => ['milestone_id'],
-        'severity' => 'semantic',
-        'dischargedBy' => 'testCompleteMilestoneTreatsIndexAsAPositionNotAnId',
-        'reason' => 'SEMANTIC/WRONG-ROW: the original addressed milestones POSITIONALLY (index, 0-based, required) '
-            . 'because they lived in a jsonb array; here they are rows and index is resolved ID-FIRST '
-            . '(IdentifierResolver.php:419-438), falling back to the ordinal only when no milestone with that primary '
-            . 'key belongs to the task. An original-shaped positional call therefore completes the WRONG milestone '
-            . 'whenever the ids land in the low integers, silently. milestone_id is the unambiguous form and is '
-            . 'ADDITIVE. Fix owned by the separate behaviour task split out of this review.',
+        'reason' => 'ADDITIVE: milestone_id is the unambiguous, non-positional way to address a milestone; the '
+            . 'original only ever had `index`. (The WRONG-ROW resolution bug this entry used to describe was fixed '
+            . 'in D1b Task 12b, not merely allowlisted — see git history.)',
     ],
 
     'uncomplete_milestone' => [
         'extra' => ['milestone_id'],
-        'severity' => 'semantic',
-        'dischargedBy' => 'testUncompleteMilestoneTreatsIndexAsAPositionNotAnId',
-        'reason' => 'SEMANTIC/WRONG-ROW: same id-first resolution of index as complete_milestone — an original-shaped '
-            . 'positional call reopens the wrong milestone rather than erroring. milestone_id is ADDITIVE and '
-            . 'unambiguous. Fix owned by the separate behaviour task.',
+        'reason' => 'ADDITIVE, same as complete_milestone: milestone_id has no original counterpart.',
     ],
 
     'delete_milestone' => [
         'extra' => ['milestone_id'],
-        'severity' => 'semantic',
-        'dischargedBy' => 'testDeleteMilestoneTreatsIndexAsAPositionNotAnId',
-        'reason' => 'SEMANTIC/WRONG-ROW, and the most destructive of the three: same id-first resolution of index, so '
-            . 'an original-shaped positional call DELETES the wrong milestone silently. milestone_id is ADDITIVE and '
-            . 'unambiguous. Fix owned by the separate behaviour task.',
+        'reason' => 'ADDITIVE, same as complete_milestone: milestone_id has no original counterpart.',
     ],
 
     // ── ADDITIVE (continued) ─────────────────────────────────────────────────
@@ -379,41 +346,19 @@ return [
             . 'wholesale replacement; it defaults to false, so omitting it reproduces the original exactly.',
     ],
 
-    // An earlier version of these two justified dropping project_id partly on
-    // "ours additionally accepts section slugs". That was FALSE. listGroups()
-    // and createGroup() are the only two section-consuming routes that call
-    // IdentifierResolver::resolveSection() with NO parent id
-    // (TaskerPlugin.php:2232, :2266), and resolveSection() returns null for a
-    // slug when $parentId === null (IdentifierResolver.php:339) — refusing to
-    // guess, correctly, since a slug is only unique within its parent. Every
-    // other section-consuming route passes a parent. So slug form does not work
-    // on exactly these two, and the route descriptions used to advertise it
-    // anyway; that clause has been removed from both.
-    //
-    // The CONCLUSION still holds — the original sends UUID-form ids and those
-    // resolve fine tenant- and OU-scoped without a project — but it holds for a
-    // narrower reason than was claimed. Restoring project_id to both routes (as
-    // the slug-bearing sibling routes have) is the better long-term fix and
-    // belongs to the separate behaviour task, not here.
-
-    'list_groups' => [
-        'missing' => ['project_id'],
-        'reason' => 'ADDITIVE-INVERSE (we need less), for UUID-form ids only: the original requires project_id '
-            . 'alongside section_id because its section ids are bare UUIDs with no scoping of their own. Here a '
-            . 'UUID/integer section_id resolves through IdentifierResolver against the caller\'s tenant AND OU '
-            . '(Tasks 1/5), so the project is implied and the original\'s call — which always sends a UUID — works. '
-            . 'It does NOT buy slug support: this route passes no parent to resolveSection(), so slugs return null '
-            . '(IdentifierResolver.php:339). Restoring project_id, which would make slug form work here as it does '
-            . 'on the sibling routes, is owned by the separate behaviour task.',
-    ],
-
-    'create_group' => [
-        'missing' => ['project_id'],
-        'reason' => 'ADDITIVE-INVERSE, same as list_groups and with the same limit: UUID/integer section_id resolves '
-            . 'tenant- and OU-scoped without a project, so the original\'s identifier pair is redundant for the calls '
-            . 'the original actually makes — but slug form does not resolve here either, for want of a parent. Same '
-            . 'owner for the fix.',
-    ],
+    // listGroups()/createGroup() used to carry ADDITIVE-INVERSE entries here
+    // (project_id waived as `missing`): they were the only two
+    // section-consuming routes that called IdentifierResolver::resolveSection()
+    // with NO parent id at all, so a slug-form section_id could never resolve
+    // on either regardless of what a caller supplied, and their descriptions
+    // were correctly amended to stop advertising a path that could not
+    // execute. D1b Task 12b restored project_id to both (with the usual
+    // defaultProjectIdFor() fallback) and passed it through to
+    // resolveSection() as the slug's parent — see
+    // testListGroupsAndCreateGroupResolveASectionSlugWhenProjectIdIsSupplied()
+    // in TenantIsolationOuTest for the behavioural proof. Both routes' shapes
+    // now match the original's exactly (project_id + section_id [+ name]),
+    // so neither needs an entry any more.
 
     'rename_group' => [
         'extra' => ['section_id'],

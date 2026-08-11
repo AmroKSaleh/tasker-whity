@@ -22,6 +22,7 @@ use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
+use Tasker\Migrations\CreateTaskerUserPrefsTable;
 use Tasker\TaskerPlugin;
 
 /**
@@ -181,6 +182,14 @@ final class TenantIsolationOuTest extends TestCase
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
         ');
+        // D1b Task 12b: the delete_section/delete_project/list_groups/
+        // create_group route-level tests below DO insert a membership row
+        // (resolveCallerOu() needs one to resolve a caller identity at all),
+        // unlike the environment alias tests above -- cleared per run the
+        // same way audit_log/organizational_units already are, so repeated
+        // runs against the shared tasker_test database never accumulate
+        // stale rows for the same (profile_id, tenant_id) pair.
+        $this->pdo->exec('DELETE FROM memberships WHERE tenant_id IN (7, 9)');
 
         $this->ensureTestTenant(7);
         $this->ensureTestTenant(9);
@@ -208,6 +217,15 @@ final class TenantIsolationOuTest extends TestCase
         (new AddTaskerTaskShortIdUnique())->up($this->pdo);
         (new CreateTaskerMilestonesTable())->up($this->pdo);
         (new CreateTaskerTaskDiscussionsTable())->up($this->pdo);
+        // D1b Task 12b: deleteProject()/listGroups()/createGroup() all call
+        // defaultProjectIdFor(), which queries this table UNCONDITIONALLY —
+        // PHP evaluates every argument before the call, so
+        // SessionApiHandler::defaultProjectId() runs even when the route's
+        // OWN project_id/section_id was supplied explicitly and the default
+        // is never actually used. No prior test in this file reached that
+        // code path, so this table's absence went unnoticed until the
+        // route-level tests below exercised it for real.
+        (new CreateTaskerUserPrefsTable())->up($this->pdo);
     }
 
     /**
@@ -261,6 +279,30 @@ final class TenantIsolationOuTest extends TestCase
         $stmt->execute([$id, $tenantId, $parentId, "OU {$id}", "ou-{$tenantId}-{$id}"]);
     }
 
+    /**
+     * A membership row for resolveCallerOu() to find (D1b Task 12b). Unlike
+     * the Environment alias tests above (which never insert one and so
+     * always fail closed to "unrestricted" via a bare null $callerOuId
+     * argument passed straight to a handler), the delete_section/
+     * delete_project/list_groups/create_group tests below go through the
+     * FULL route method — deleteSection(), deleteProject(), etc. — which
+     * calls resolveCallerOu() itself and 403s ("Caller membership could not
+     * be resolved") without a real row for $request->user->profile_id.
+     * $ouId null means unrestricted (tenant-root), matching
+     * MembershipRepository's own null-ou_id convention.
+     */
+    private function makeMembership(int $profileId, int $tenantId, ?int $ouId): void
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO memberships (profile_id, tenant_id, role_id, ou_id, status, created_at)
+             VALUES (:profile_id, :tenant_id, 1, :ou_id, \'active\', CURRENT_TIMESTAMP)'
+        );
+        $stmt->bindValue(':profile_id', $profileId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':ou_id', $ouId, $ouId === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+        $stmt->execute();
+    }
+
     private function makeProjectDirect(int $tenantId, ?int $ouId, string $name): int
     {
         $stmt = $this->pdo->prepare(
@@ -279,6 +321,28 @@ final class TenantIsolationOuTest extends TestCase
              VALUES (gen_random_uuid(), :tenant_id, :project_id, 'Backlog', 'backlog', CURRENT_TIMESTAMP) RETURNING id"
         );
         $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * Like makeSectionDirect() but with a caller-chosen name/slug (D1b Task
+     * 12b) — needed whenever a single project needs MORE THAN ONE section in
+     * the same test: makeSectionDirect() always inserts 'Backlog'/'backlog',
+     * and (project_id, slug) is UNIQUE on the real schema.
+     */
+    private function makeSectionDirectNamed(int $tenantId, int $projectId, string $name): int
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO tasker_sections (public_id, tenant_id, project_id, name, slug, created_at)
+             VALUES (gen_random_uuid(), :tenant_id, :project_id, :name, :slug, CURRENT_TIMESTAMP) RETURNING id'
+        );
+        $stmt->execute([
+            ':tenant_id' => $tenantId,
+            ':project_id' => $projectId,
+            ':name' => $name,
+            ':slug' => strtolower(str_replace(' ', '-', $name)),
+        ]);
 
         return (int) $stmt->fetchColumn();
     }
@@ -2955,5 +3019,179 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->attention(7, 2, $projectId, self::CALLER_ID);
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ── D1b Task 12b: contract-parity safety-gate fixes ─────────────────────
+    //
+    // Full ROUTE-LEVEL dispatch (via registerOusContainer(), same as the
+    // Environment alias tests above), not just the ApiHandler classes
+    // directly, because the behaviour under test here IS the route method's
+    // own composition: reading delete_tasks/confirmed off the QUERY STRING
+    // (queryParamBool()) rather than a JSON body, and resolveSection()'s own
+    // OU-aware SQL, both of which need a real Postgres connection anyway
+    // (OuScopeResolver::whereFragment()'s `= ANY(:scope)` fails at
+    // PDO::prepare() under SQLite). These are the parity-allowlist.php
+    // `dischargedBy` tests for delete_section/delete_project — the guard
+    // that lets those two SEMANTIC entries be removed greps for these exact
+    // method names, so each one asserts the REAL behaviour, not a stub.
+
+    /**
+     * parity-allowlist.php['delete_section']'s dischargedBy test.
+     *
+     * Proves the whole floor in one place: refusal survives (asserted by
+     * COUNTING rows, not just the status code — a 409 that still let the
+     * DELETE run underneath it would pass a status-code-only check and
+     * still be the exact bug this closes), explicit false refuses
+     * identically to absent, delete_tasks:true really cascades (the FK
+     * ON DELETE CASCADE this fix now gates), an empty section still deletes
+     * without the flag, and every one of delete_tasks's three states
+     * arrives as a QUERY-STRING parameter — the actual MCP transport shape
+     * (core empties the DELETE body and flattens every argument into the
+     * query string) — not a JSON body.
+     */
+    public function testDeleteSectionRefusesANonEmptySectionUnlessDeleteTasksIsTrue(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'D12b delete_section project');
+        $nonEmptySectionId = $this->makeSectionDirectNamed(7, $projectId, 'Non-empty section');
+        $emptySectionId = $this->makeSectionDirectNamed(7, $projectId, 'Empty section');
+        $keepSectionId = $this->makeSectionDirectNamed(7, $projectId, 'Keep section'); // keeps the project non-empty throughout
+
+        $this->makeTaskDirect(7, $projectId, $nonEmptySectionId, 'Task A');
+        $this->makeTaskDirect(7, $projectId, $nonEmptySectionId, 'Task B');
+        $this->makeGroupDirect(7, $nonEmptySectionId, 'Group A');
+
+        $plugin = new TaskerPlugin();
+
+        // delete_tasks ABSENT (defaults false) — the exact call an
+        // original-app agent makes routinely, and a REFUSAL against the
+        // original. Must refuse here too, not cascade.
+        $refuseRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$nonEmptySectionId}");
+        $refuseRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $refuseResponse = $plugin->deleteSection($refuseRequest);
+
+        self::assertSame(409, $refuseResponse->getStatusCode());
+        $refuseBody = json_decode($refuseResponse->getBody(), true);
+        self::assertStringContainsString('delete_tasks', $refuseBody['error']);
+        self::assertStringContainsString('2', $refuseBody['error'], 'the refusal must report the task count');
+        self::assertStringContainsString('1', $refuseBody['error'], 'the refusal must report the group count');
+
+        self::assertSame(2, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE section_id = {$nonEmptySectionId}")->fetchColumn(), 'the tasks must still exist after a refused delete');
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE section_id = {$nonEmptySectionId}")->fetchColumn(), 'the group must still exist after a refused delete');
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE id = {$nonEmptySectionId}")->fetchColumn(), 'the section itself must still exist after a refused delete');
+
+        // delete_tasks EXPLICITLY false must refuse identically to absent —
+        // proves the gate distinguishes "true" from everything else, not
+        // just "present vs absent".
+        $explicitFalseRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$nonEmptySectionId}&delete_tasks=false");
+        $explicitFalseRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $explicitFalseResponse = $plugin->deleteSection($explicitFalseRequest);
+        self::assertSame(409, $explicitFalseResponse->getStatusCode());
+
+        // delete_tasks:true, arriving as a QUERY PARAMETER, must proceed AND
+        // really cascade.
+        $forceRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$nonEmptySectionId}&delete_tasks=true");
+        $forceRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $forceResponse = $plugin->deleteSection($forceRequest);
+
+        self::assertSame(204, $forceResponse->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE id = {$nonEmptySectionId}")->fetchColumn());
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE section_id = {$nonEmptySectionId}")->fetchColumn(), 'the FK cascade must really have removed the tasks');
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE section_id = {$nonEmptySectionId}")->fetchColumn(), 'the FK cascade must really have removed the group');
+
+        // An EMPTY section deletes without the flag at all.
+        $emptyRequest = $this->hostRequest('DELETE', "/api/tasker/sections?section_id={$emptySectionId}");
+        $emptyRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $emptyResponse = $plugin->deleteSection($emptyRequest);
+        self::assertSame(204, $emptyResponse->getStatusCode());
+
+        // $keepSectionId was never touched — sanity check that the project
+        // still has a section at all, i.e. none of the above accidentally
+        // tripped the SEPARATE "last remaining section" guard instead of
+        // (or as well as) the delete_tasks gate under test.
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE id = {$keepSectionId}")->fetchColumn());
+    }
+
+    /**
+     * parity-allowlist.php['delete_project']'s dischargedBy test.
+     *
+     * The original REQUIRES confirmed:true before permanently deleting a
+     * project and everything under it; this route previously had no gate at
+     * all. Proves: confirmed absent refuses (project survives), confirmed
+     * EXPLICITLY false refuses identically (not just "present vs absent"),
+     * and confirmed:true — arriving as a QUERY-STRING parameter, the real
+     * MCP transport shape for a DELETE — actually deletes.
+     */
+    public function testDeleteProjectRefusesWithoutConfirmedTrue(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'D12b delete_project project');
+
+        $plugin = new TaskerPlugin();
+
+        $refuseRequest = $this->hostRequest('DELETE', "/api/tasker/projects?project_id={$projectId}");
+        $refuseRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $refuseResponse = $plugin->deleteProject($refuseRequest);
+
+        self::assertSame(400, $refuseResponse->getStatusCode());
+        $refuseBody = json_decode($refuseResponse->getBody(), true);
+        self::assertStringContainsString('confirmed', $refuseBody['error']);
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(), 'the project must survive an unconfirmed delete');
+
+        $explicitFalseRequest = $this->hostRequest('DELETE', "/api/tasker/projects?project_id={$projectId}&confirmed=false");
+        $explicitFalseRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $explicitFalseResponse = $plugin->deleteProject($explicitFalseRequest);
+        self::assertSame(400, $explicitFalseResponse->getStatusCode());
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(), 'confirmed:false must refuse identically to absent, not be treated as truthy');
+
+        $confirmedRequest = $this->hostRequest('DELETE', "/api/tasker/projects?project_id={$projectId}&confirmed=true");
+        $confirmedRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $confirmedResponse = $plugin->deleteProject($confirmedRequest);
+        self::assertSame(204, $confirmedResponse->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn());
+    }
+
+    /**
+     * D1b Task 12b floor requirement: list_groups/create_group resolve a
+     * section SLUG when project_id is supplied — the exact path
+     * IdentifierResolver::resolveSection() refuses when its parent is null
+     * (a slug is unique only within its parent), which is why these two
+     * routes' descriptions used to explicitly disclaim slug support. Proves
+     * both routes now pass project_id through as that parent.
+     */
+    public function testListGroupsAndCreateGroupResolveASectionSlugWhenProjectIdIsSupplied(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'D12b slug project');
+        $sectionId = $this->makeSectionDirect(7, $projectId); // slug is 'backlog', per makeSectionDirect()
+        $this->makeGroupDirect(7, $sectionId, 'Existing group');
+
+        $plugin = new TaskerPlugin();
+
+        $listRequest = $this->hostRequest('GET', "/api/tasker/groups?section_id=backlog&project_id={$projectId}");
+        $listRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $listResponse = $plugin->listGroups($listRequest);
+
+        self::assertSame(200, $listResponse->getStatusCode());
+        $listPayload = json_decode($listResponse->getBody(), true);
+        self::assertCount(1, $listPayload['data'], 'the slug must have resolved to the real section, not 404d');
+
+        $createRequest = $this->hostRequest(
+            'POST',
+            '/api/tasker/groups',
+            (string) json_encode(['section_id' => 'backlog', 'project_id' => $projectId, 'name' => 'New via slug'])
+        );
+        $createRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $createResponse = $plugin->createGroup($createRequest);
+
+        self::assertSame(201, $createResponse->getStatusCode());
+        $created = json_decode($createResponse->getBody(), true);
+        self::assertSame($sectionId, $created['data']['sectionId'] ?? $created['data']['section_id'] ?? null);
     }
 }

@@ -120,25 +120,60 @@ final class IdentifierResolverTest extends TestCase
     }
 
     // Task review finding #2: resolveMilestone() had no coverage at all.
-    // It makes no OuScopeResolver call, so unlike resolveProject()/
+    // It made no OuScopeResolver call, so unlike resolveProject()/
     // resolveTask()/resolveSection()/resolveGroup() it belongs here, on the
-    // SQLite double, not in the Postgres-only suite.
+    // SQLite double, not in the Postgres-only suite. That single method was
+    // later split into resolveMilestoneById()/resolveMilestoneByIndex() (D1b
+    // Task 12b) because it resolved an integer ID-FIRST and only fell back
+    // to the ordinal position when no milestone with that id belonged to the
+    // task — silently mutating the WRONG milestone whenever ids landed in
+    // the low integers on a positional (`index`) call. The tests below cover
+    // the two replacement methods directly, including the no-cross-fallback
+    // guarantee that fixes that bug.
 
-    public function testResolveMilestoneFindsByIdWithinTheTask(): void
+    public function testResolveMilestoneByIdFindsByIdWithinTheTask(): void
     {
         $milestoneId = $this->makeMilestone(7, 100, 'Write tests');
 
-        self::assertSame($milestoneId, IdentifierResolver::resolveMilestone($this->pdo, 7, 100, $milestoneId));
+        self::assertSame($milestoneId, IdentifierResolver::resolveMilestoneById($this->pdo, 7, 100, $milestoneId));
     }
 
-    public function testResolveMilestoneFallsBackToPositionalIndexWhenTheIntegerIsNotAKnownId(): void
+    public function testResolveMilestoneByIdFindsByUuid(): void
+    {
+        $milestoneId = $this->makeMilestone(7, 500, 'Ship it');
+        $publicId = $this->publicIdOf($milestoneId);
+
+        self::assertSame($milestoneId, IdentifierResolver::resolveMilestoneById($this->pdo, 7, 500, $publicId));
+    }
+
+    public function testResolveMilestoneByIdReturnsNullWhenNoMilestoneHasThatId(): void
+    {
+        self::assertNull(IdentifierResolver::resolveMilestoneById($this->pdo, 7, 300, 999999));
+    }
+
+    /**
+     * THE FIX under direct test: resolveMilestoneById() must NEVER fall back
+     * to treating its argument as a position. A value that is a valid
+     * POSITION (0) but not a real milestone id under this task must resolve
+     * to null, not to "whatever sits at index 0".
+     */
+    public function testResolveMilestoneByIdDoesNotFallBackToPositionalIndex(): void
+    {
+        // id=0 is never a real row (AUTOINCREMENT starts at 1); this proves
+        // resolveMilestoneById(..., 0) does not quietly resolve to the
+        // milestone that happens to sit at ordinal position 0.
+        $this->makeMilestone(7, 300, 'Sits at position 0', 0);
+        $this->makeMilestone(7, 300, 'Sits at position 1', 1);
+
+        self::assertNull(IdentifierResolver::resolveMilestoneById($this->pdo, 7, 300, 0));
+    }
+
+    public function testResolveMilestoneByIndexFindsEachPositionInSortOrder(): void
     {
         // Filler rows for an unrelated task, inserted first purely to push
         // SQLite's AUTOINCREMENT counter past the 0/1/2 values used as
-        // INDEXES below. Without this, a fresh table's first three rows
-        // would be handed ids 1/2/3 -- which would coincidentally also BE
-        // valid milestone ids and make the id-lookup branch succeed instead
-        // of falling through to the positional index this test targets.
+        // INDEXES below — proving the lookup is positional and never
+        // coincidentally matches by id.
         $this->makeMilestone(7, 999, 'Unrelated filler A');
         $this->makeMilestone(7, 999, 'Unrelated filler B');
         $this->makeMilestone(7, 999, 'Unrelated filler C');
@@ -148,28 +183,56 @@ final class IdentifierResolverTest extends TestCase
         $third  = $this->makeMilestone(7, 200, 'Third', 2);
         self::assertGreaterThan(2, $first, 'sanity check: ids must be clear of the 0/1/2 index values used below');
 
-        self::assertSame($first, IdentifierResolver::resolveMilestone($this->pdo, 7, 200, 0));
-        self::assertSame($second, IdentifierResolver::resolveMilestone($this->pdo, 7, 200, 1));
-        self::assertSame($third, IdentifierResolver::resolveMilestone($this->pdo, 7, 200, 2));
+        self::assertSame($first, IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, 200, 0));
+        self::assertSame($second, IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, 200, 1));
+        self::assertSame($third, IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, 200, 2));
     }
 
-    public function testResolveMilestoneReturnsNullForAnOutOfRangeIndex(): void
+    public function testResolveMilestoneByIndexReturnsNullForAnOutOfRangeIndex(): void
     {
         $this->makeMilestone(7, 300, 'Only one');
 
-        self::assertNull(IdentifierResolver::resolveMilestone($this->pdo, 7, 300, 5));
+        self::assertNull(IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, 300, 5));
     }
 
-    public function testResolveMilestoneReturnsNullWhenTheTaskHasNoMilestonesAtAll(): void
+    public function testResolveMilestoneByIndexReturnsNullWhenTheTaskHasNoMilestonesAtAll(): void
     {
-        self::assertNull(IdentifierResolver::resolveMilestone($this->pdo, 7, 400, 0));
+        self::assertNull(IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, 400, 0));
     }
 
-    public function testResolveMilestoneFindsByUuid(): void
+    /**
+     * THE FIX under direct test, mirror image of
+     * testResolveMilestoneByIdDoesNotFallBackToPositionalIndex(): a value
+     * that IS a real milestone id, but sits at a DIFFERENT position than
+     * that same integer would name as an index, must not resolve when asked
+     * for positionally — resolveMilestoneByIndex() never consults `id` at
+     * all. This is the exact collision that made
+     * `complete_milestone({task_id, index: 1})` complete milestone id 1
+     * instead of the second milestone under the old combined resolver.
+     */
+    public function testResolveMilestoneByIndexIgnoresAMilestoneIdThatCollidesWithTheRequestedPosition(): void
     {
-        $milestoneId = $this->makeMilestone(7, 500, 'Ship it');
-        $publicId = $this->publicIdOf($milestoneId);
+        $this->pdo->exec('DELETE FROM tasker_milestones'); // keep ids deterministic for this test
+        $collidingId = $this->insertMilestoneWithExplicitId(7, 1, 600, 'Has id 1, sits at position 2', 2);
+        $atPositionZero = $this->insertMilestoneWithExplicitId(7, 50, 600, 'Sits at position 0', 0);
+        $atPositionOne  = $this->insertMilestoneWithExplicitId(7, 77, 600, 'Sits at position 1', 1);
 
-        self::assertSame($milestoneId, IdentifierResolver::resolveMilestone($this->pdo, 7, 500, $publicId));
+        self::assertSame(1, $collidingId);
+        self::assertSame($atPositionZero, IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, 600, 0));
+        self::assertSame(
+            $atPositionOne,
+            IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, 600, 1),
+            'index:1 must resolve to the milestone actually at position 1, never to the milestone whose id is 1'
+        );
+    }
+
+    private function insertMilestoneWithExplicitId(int $tenantId, int $id, int $taskId, string $summary, int $sortOrder): int
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO tasker_milestones (id, public_id, tenant_id, task_id, summary, sort_order) VALUES (?, ?, ?, ?, ?, ?)'
+        );
+        $stmt->execute([$id, self::uuid(), $tenantId, $taskId, $summary, $sortOrder]);
+
+        return $id;
     }
 }

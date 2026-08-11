@@ -363,17 +363,25 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_project:manage',
                 'schema' => [
                     'operationId' => 'delete_project',
-                    'summary' => 'Delete a project and everything under it',
+                    // PARITY (D1b Task 12b): matches the original app's own
+                    // wording exactly — this is the ONE place in the slice
+                    // where a REQUIRED property is deliberately correct: it
+                    // is a safety gate, not a shape gap, and dropping it is
+                    // what made this route dangerous (see confirmed below).
+                    'summary' => 'Permanently delete a project and all its sections, tasks, and milestones. Always '
+                        . 'confirm with the user before calling this.',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
-                        'required' => ['project_id'],
+                        'required' => ['project_id', 'confirmed'],
                         'properties' => [
                             'project_id' => ['type' => 'string', 'description' => 'Project prefix (e.g. TDE), slug, UUID or id.'],
+                            'confirmed' => ['type' => 'boolean', 'description' => 'Must be true to confirm permanent deletion'],
                         ],
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
+                        400 => ['description' => 'confirmed was not true'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
                     ],
                 ],
@@ -544,7 +552,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_structure:manage',
                 'schema' => [
                     'operationId' => 'delete_section',
-                    'summary' => 'Delete a section and its groups and tasks',
+                    // PARITY (D1b Task 12b), matching the original app's own
+                    // wording so an agent gets the same guidance on either
+                    // surface: by default this REFUSES a non-empty section.
+                    'summary' => 'Delete a section. By default REFUSES if the section still has tasks (move them to '
+                        . 'another section first, e.g. via update_task/move_task_to_group). Pass delete_tasks: true '
+                        . 'to delete the section together with all its tasks and groups. Irreversible — confirm with '
+                        . 'the user before calling.',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
@@ -552,12 +566,18 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         'properties' => [
                             'section_id' => ['type' => 'string'],
                             'project_id' => ['type' => 'string', 'description' => 'Needed only when section_id is a slug.'],
+                            'delete_tasks' => [
+                                'type' => 'boolean',
+                                'description' => 'If true, delete the section AND every task/group in it. If false '
+                                    . '(default), the section must already be empty or the call is refused.',
+                            ],
                         ],
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
                         404 => ['description' => 'Section not found in the caller\'s tenant'],
-                        409 => ['description' => 'Cannot delete a project\'s last remaining section'],
+                        409 => ['description' => 'Cannot delete a project\'s last remaining section, or the section '
+                            . 'still has tasks/groups and delete_tasks was not true'],
                     ],
                 ],
             ],
@@ -577,13 +597,21 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                             'in' => 'query',
                             'required' => false,
                             'schema' => ['type' => 'string'],
-                            // NOT "or slug": this route resolves section_id with no
-                            // parent id (see listGroups()), and resolveSection()
-                            // refuses a slug without one — a slug is unique only
-                            // within its parent. Advertising slug form here promised
-                            // a path that cannot execute. Restoring project_id so
-                            // slugs DO work is tracked separately.
-                            'description' => 'Section UUID or id.',
+                            // D1b Task 12b FIX: the "NOT or slug" caveat this
+                            // description used to carry is gone because it is
+                            // no longer true — listGroups() now passes
+                            // project_id through to resolveSection() as the
+                            // parent a slug needs to disambiguate (see
+                            // listGroups() below).
+                            'description' => 'Section UUID, id, or slug (slug requires project_id).',
+                        ],
+                        [
+                            'name' => 'project_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Needed only when '
+                                . 'section_id is a slug. Omit to use your default project.',
                         ],
                     ],
                     'responses' => [
@@ -606,10 +634,12 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         'type' => 'object',
                         'required' => ['name'],
                         'properties' => [
-                            // NOT "or slug" — same reason as list_groups above:
-                            // createGroup() passes no parent to resolveSection(),
-                            // so a slug cannot resolve on this route.
-                            'section_id' => ['type' => 'string', 'description' => 'Section UUID or id.'],
+                            // D1b Task 12b FIX: see list_groups above — the
+                            // "NOT or slug" caveat is gone because
+                            // createGroup() now passes project_id through to
+                            // resolveSection() as the slug's parent.
+                            'section_id' => ['type' => 'string', 'description' => 'Section UUID, id, or slug (slug requires project_id).'],
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Needed only when section_id is a slug. Omit to use your default project.'],
                             'name' => ['type' => 'string'],
                         ],
                     ],
@@ -1867,6 +1897,26 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * {@see self::identifierFromRequest()}'s docblock for why a DELETE
      * request here may legitimately carry no body at all.
      *
+     * D1b Task 12b FIX (contract parity, unsafe-direction): the original app
+     * REQUIRES confirmed:true before permanently deleting a project and
+     * everything under it; this route previously had NO such gate at all —
+     * confirmed was declared on neither the schema nor checked here, so core's
+     * InputSchemaValidator (which enforces only `required`) silently dropped
+     * it as an undeclared argument. confirmed is now declared REQUIRED on the
+     * schema (see getRoutes() above — the one deliberate exception to this
+     * slice's usual "more permissive than the original" posture: here the
+     * original's stricter contract IS the safety gate) and is checked here
+     * BEFORE any project resolution, the same way a malformed-short-id check
+     * runs before resolution elsewhere in this class — a caller who cannot
+     * confirm should not learn anything about whether the project exists
+     * from a DIFFERENT failure mode.
+     *
+     * Read via {@see self::queryParamBool()}, NOT a naive `(bool)` cast — see
+     * deleteSection()'s own docblock for why: core empties the body and
+     * flattens every MCP argument into the query string for DELETE, so
+     * `confirmed: false` sent by an agent MUST still read as false, never
+     * coerced truthy by a bare cast on the non-empty string "false".
+     *
      * @param array<string, string> $params
      */
     public function deleteProject(Request $request, array $params = []): Response
@@ -1880,6 +1930,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        if (!$this->queryParamBool($request, 'confirmed', false)) {
+            return Response::error(
+                'confirmed must be true to permanently delete a project and everything under it',
+                400
+            );
         }
 
         $raw = $this->identifierFromRequest($request, 'project_id');
@@ -2168,6 +2225,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * {@see self::identifierFromRequest()}'s docblock for why a DELETE
      * request here may legitimately carry no body at all.
      *
+     * delete_tasks is read via {@see self::queryParamBool()}, NOT a naive
+     * `(bool)` cast — see that method's own docblock for why, and see the
+     * class-level global constraint this route exists to satisfy: DELETE
+     * arguments arrive as query-string parameters over the MCP transport
+     * (core empties the body and flattens every argument into the query
+     * string for GET/DELETE/HEAD), so `delete_tasks: false` sent by an agent
+     * MUST still be read as false, never coerced truthy by a bare cast on
+     * the non-empty string "false".
+     *
      * @param array<string, string> $params
      */
     public function deleteSection(Request $request, array $params = []): Response
@@ -2205,11 +2271,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Section not found', 404);
         }
 
-        return (new SectionsApiHandler($pdo))->delete($tenantId, $sectionId);
+        $deleteTasks = $this->queryParamBool($request, 'delete_tasks', false);
+
+        return (new SectionsApiHandler($pdo))->delete($tenantId, $sectionId, $deleteTasks);
     }
 
     /**
-     * GET /api/tasker/groups?section_id=
+     * GET /api/tasker/groups?section_id=&project_id=
      *
      * Unlike project_id on listSections(), section_id has no "default
      * section" fallback to fall back to (tasker_user_prefs stores only a
@@ -2217,6 +2285,20 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * The existence check this relies on (GroupsApiHandler::list() calling
      * sectionVisible() before querying) is D1 Task 4 fix-round behaviour and
      * is unchanged here.
+     *
+     * D1b Task 12b FIX: this route used to call resolveSection() with NO
+     * parent id at all — the only section-consuming route (besides
+     * createGroup(), fixed alongside it) that did not even pass null
+     * explicitly the way resolveOptionalParentId() callers do. Since
+     * resolveSection() refuses a slug when its parent is null (a slug is
+     * unique only within its parent — IdentifierResolver::resolveStructural()),
+     * section_id's slug form could never resolve here regardless of what a
+     * caller supplied, and the route description was correctly amended to
+     * stop advertising a path that could not execute. project_id is restored
+     * here — through resolveOptionalParentId()'s new $defaultValue
+     * parameter, falling back to the caller's default project exactly like
+     * listTasks()/createTask() already do — so slug resolution actually
+     * works, and the description above is restored to match.
      *
      * @param array<string, string> $params
      */
@@ -2233,12 +2315,25 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        $parent = $this->resolveOptionalParentId(
+            $request,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            'project_id',
+            [IdentifierResolver::class, 'resolveProject'],
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if (!$parent['ok']) {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
         $raw = $this->queryParam($request, 'section_id');
         if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
             return Response::error('section_id looks like a short id but is malformed', 400);
         }
 
-        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $raw);
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $raw, $parent['value']);
         if ($sectionId === null) {
             return Response::error('Section not found', 404);
         }
@@ -2250,7 +2345,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * POST /api/tasker/groups
      *
      * section_id lives in the body and is required (no default-section
-     * fallback exists — see listGroups()'s docblock).
+     * fallback exists — see listGroups()'s docblock). project_id is
+     * restored for the same reason as listGroups() above — see that
+     * method's own docblock.
      *
      * @param array<string, string> $params
      */
@@ -2267,12 +2364,25 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        $parent = $this->resolveOptionalParentId(
+            $request,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            'project_id',
+            [IdentifierResolver::class, 'resolveProject'],
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if (!$parent['ok']) {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
         $raw = $this->identifierFromRequest($request, 'section_id');
         if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
             return Response::error('section_id looks like a short id but is malformed', 400);
         }
 
-        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $raw);
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $raw, $parent['value']);
         if ($sectionId === null) {
             return Response::error('Section not found', 404);
         }
@@ -3818,12 +3928,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * distinguishes its own three outcomes — a bare `?int` cannot tell
      * "not supplied" apart from "supplied but did not resolve":
      *
-     *   - not supplied at all ('empty' form): {ok: true, value: null}. The
-     *     resolver is never called — a slug lookup against a null parent
-     *     legitimately fails to resolve later (resolveSection()/
-     *     resolveGroup() return null for a slug/prefix form with $parentId
-     *     === null), which becomes the same 404 as "not found", not a
-     *     separate error here.
+     *   - not supplied at all ('empty' form): {ok: true, value: $defaultValue}.
+     *     The resolver is never called. $defaultValue is null for every
+     *     caller except listGroups()/createGroup() (D1b Task 12b — see
+     *     below); a slug lookup against a null parent legitimately fails to
+     *     resolve later (resolveSection()/resolveGroup() return null for a
+     *     slug/prefix form with $parentId === null), which becomes the same
+     *     404 as "not found", not a separate error here.
      *   - malformed (looks like a short id but is not one):
      *     {ok: false, value: null}. Callers must 400 on this, matching
      *     every other malformed-short-id check in this file.
@@ -3853,6 +3964,21 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * passed as a first-class callable and invoked with no default/
      * grandparent argument — this resolves exactly one level up, never two.
      *
+     * $defaultValue (D1b Task 12b): listGroups()/createGroup() were the only
+     * two section-consuming routes that passed NO parent to resolveSection()
+     * at all — not even null-when-absent, which is what every OTHER caller
+     * of this method already does — so a slug-form section_id could never
+     * resolve on those two routes regardless of what project_id a caller
+     * supplied. Restoring project_id (with the usual defaultProjectIdFor()
+     * fallback other list/create routes already apply, e.g. listTasks())
+     * fixes that: when project_id is genuinely absent, these two routes pass
+     * the caller's resolved default project as the parent instead of null,
+     * so a slug resolves even when the caller never named a project
+     * explicitly — matching how "read my current project" already works
+     * everywhere else in this class. Every other call site keeps passing no
+     * 7th argument, so $defaultValue stays null for them and this change is
+     * behaviourally invisible there.
+     *
      * @param callable(\PDO, int, ?int, string|int|null): ?int $resolver
      * @return array{ok: bool, value: ?int}
      */
@@ -3862,7 +3988,8 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         int $tenantId,
         ?int $callerOuId,
         string $key,
-        callable $resolver
+        callable $resolver,
+        ?int $defaultValue = null
     ): array {
         $raw = $this->identifierFromRequest($request, $key);
         $form = IdentifierResolver::classify($raw);
@@ -3872,7 +3999,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         if ($form === 'empty') {
-            return ['ok' => true, 'value' => null];
+            return ['ok' => true, 'value' => $defaultValue];
         }
 
         return ['ok' => true, 'value' => $resolver($pdo, $tenantId, $callerOuId, $raw)];
@@ -4083,10 +4210,12 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * milestone_id/index straight off a bare `json_decode($request->getBody(),
      * true)` rather than through {@see self::identifierFromRequest()}. Under
      * this codebase's `strict_types=1`, a caller sending a non-scalar value —
-     * e.g. `{"task_id":"TDE-1","milestone_id":{"x":1}}` — reached
-     * `IdentifierResolver::resolveMilestone(..., string|int|null $raw)` as a
-     * PHP array and threw an uncaught TypeError instead of a controlled 400.
-     * `deleteMilestone()`, in the same original commit, already read both
+     * e.g. `{"task_id":"TDE-1","milestone_id":{"x":1}}` — reached what was
+     * then a single `IdentifierResolver::resolveMilestone(..., string|int|null
+     * $raw)` (since split into resolveMilestoneById()/resolveMilestoneByIndex()
+     * — see their own docblocks) as a PHP array and threw an uncaught
+     * TypeError instead of a controlled 400. `deleteMilestone()`, in the same
+     * original commit, already read both
      * identifiers correctly through `identifierFromRequest()` (required
      * there regardless, since DELETE bodies never survive the MCP
      * transport) — this extraction generalises that already-correct method's
@@ -4101,27 +4230,41 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      *   - 'malformed_milestone': milestone_id/index classifies as
      *     malformed_short_id (only reachable when $requireMilestone is
      *     true). Callers 400.
-     *   - 'milestone_not_found': the task resolved, but
-     *     IdentifierResolver::resolveMilestone() found nothing under it
-     *     (wrong tenant, wrong task, or genuinely absent/non-scalar — see
-     *     the TypeError note above: a non-scalar value is filtered out by
+     *   - 'milestone_not_found': the task resolved, but neither resolver
+     *     below found anything under it (wrong tenant, wrong task, an
+     *     out-of-range index, or genuinely absent/non-scalar — see the
+     *     TypeError note above: a non-scalar value is filtered out by
      *     identifierFromRequest() before it ever reaches classify() or
-     *     resolveMilestone(), so it lands here rather than throwing).
+     *     either resolver, so it lands here rather than throwing).
      *     Callers 404.
      *   - 'resolved': the task resolved (and, unless $requireMilestone is
      *     false, so did the milestone within it).
+     *
+     * D1b Task 12b FIX: milestone_id and index used to be coalesced into one
+     * `$rawMilestone` value and handed to a single id-first resolver that
+     * fell back to positional resolution — see
+     * {@see \Tasker\Access\IdentifierResolver::resolveMilestoneById()}'s own
+     * docblock for why that made an original-shaped positional call mutate
+     * the WRONG milestone whenever the ids happened to land in the low
+     * integers. The two identifiers now resolve through two SEPARATE
+     * methods with NO cross-fallback in either direction: milestone_id (when
+     * present) resolves ONLY by id/UUID via resolveMilestoneById(); index
+     * (only consulted when milestone_id is absent, preserving the original
+     * `??` precedence) resolves ONLY positionally via
+     * resolveMilestoneByIndex(). Neither ever consults the other's meaning.
      *
      * $taskResolver is injected — IdentifierResolver::resolveTask() in
      * production — for the same Reflection-testability reason
      * resolveOptionalParentId()/resolveMoveDestinationId()/
      * resolveCreateTaskSectionId() inject theirs: it calls
      * OuScopeResolver::whereFragment() unconditionally, which SQLite's
-     * PDO::prepare() rejects outright. IdentifierResolver::resolveMilestone()
-     * itself is called directly, NOT injected — it carries no OU-scoping and
-     * no Postgres-only syntax at all (plain tenant/task-scoped SQL), so it
-     * runs for real against a bare SQLite fixture in this class's own tests,
-     * the same way resolveCreateTaskSectionId() calls backlogSectionIdFor()
-     * directly rather than injecting it.
+     * PDO::prepare() rejects outright. resolveMilestoneById()/
+     * resolveMilestoneByIndex() are called directly, NOT injected — neither
+     * carries any OU-scoping or Postgres-only syntax at all (plain
+     * tenant/task-scoped SQL), so they run for real against a bare SQLite
+     * fixture in this class's own tests, the same way
+     * resolveCreateTaskSectionId() calls backlogSectionIdFor() directly
+     * rather than injecting it.
      *
      * @param callable(\PDO, int, ?int, string|int|null): ?int $taskResolver
      * @return array{status: 'malformed_task'|'task_not_found'|'malformed_milestone'|'milestone_not_found'|'resolved', taskId: ?int, milestoneId: ?int}
@@ -4148,13 +4291,21 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return ['status' => 'resolved', 'taskId' => $taskId, 'milestoneId' => null];
         }
 
-        $rawMilestone = $this->identifierFromRequest($request, 'milestone_id')
-            ?? $this->identifierFromRequest($request, 'index');
+        // milestone_id wins when both are supplied — the same precedence the
+        // old coalesced `??` expression had — but each is now resolved by
+        // its OWN method; there is no shared fallback path between them.
+        $rawMilestoneId = $this->identifierFromRequest($request, 'milestone_id');
+        $rawIndex       = $this->identifierFromRequest($request, 'index');
+        $usingMilestoneId = $rawMilestoneId !== null;
+        $rawMilestone = $usingMilestoneId ? $rawMilestoneId : $rawIndex;
+
         if (IdentifierResolver::classify($rawMilestone) === 'malformed_short_id') {
             return ['status' => 'malformed_milestone', 'taskId' => $taskId, 'milestoneId' => null];
         }
 
-        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
+        $milestoneId = $usingMilestoneId
+            ? IdentifierResolver::resolveMilestoneById($pdo, $tenantId, $taskId, $rawMilestone)
+            : IdentifierResolver::resolveMilestoneByIndex($pdo, $tenantId, $taskId, $rawMilestone);
         if ($milestoneId === null) {
             return ['status' => 'milestone_not_found', 'taskId' => $taskId, 'milestoneId' => null];
         }

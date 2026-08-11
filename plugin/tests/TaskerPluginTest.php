@@ -878,15 +878,15 @@ final class TaskerPluginTest extends TestCase
      * updateMilestone) used to read milestone_id/index straight off a bare
      * `json_decode($request->getBody(), true)` rather than through
      * identifierFromRequest() — under this codebase's `strict_types=1`, a
-     * non-scalar value (e.g. `{"milestone_id":{"x":1}}`) reached
-     * `IdentifierResolver::resolveMilestone(..., string|int|null $raw)` as a
-     * PHP array and threw an uncaught TypeError instead of a controlled 400.
-     * `deleteMilestone()` already read both identifiers correctly (required
-     * anyway, since DELETE bodies never survive the MCP transport); this
-     * extraction generalises deleteMilestone()'s own approach to all five
-     * milestone-mutation routes and gives the whole two-stage
-     * task-then-milestone composition a Reflection test seam, the same way
-     * resolveOptionalParentId()/resolveMoveDestinationId()/
+     * non-scalar value (e.g. `{"milestone_id":{"x":1}}`) reached what was then
+     * a single `IdentifierResolver::resolveMilestone(..., string|int|null
+     * $raw)` as a PHP array and threw an uncaught TypeError instead of a
+     * controlled 400. `deleteMilestone()` already read both identifiers
+     * correctly (required anyway, since DELETE bodies never survive the MCP
+     * transport); this extraction generalises deleteMilestone()'s own
+     * approach to all five milestone-mutation routes and gives the whole
+     * two-stage task-then-milestone composition a Reflection test seam, the
+     * same way resolveOptionalParentId()/resolveMoveDestinationId()/
      * resolveCreateTaskSectionId() already do above —
      * resolveMilestoneTarget() is unreachable any other way, since every one
      * of its five callers calls resolvePdo(), which needs the live host
@@ -895,9 +895,11 @@ final class TaskerPluginTest extends TestCase
      * Only the TASK resolver is injected (IdentifierResolver::resolveTask()
      * in production) — it calls OuScopeResolver::whereFragment()
      * unconditionally, which SQLite's PDO::prepare() rejects outright.
-     * IdentifierResolver::resolveMilestone() itself carries no such
+     * IdentifierResolver::resolveMilestoneById()/resolveMilestoneByIndex()
+     * (D1b Task 12b — the id-first `resolveMilestone()` above was split into
+     * these two; see resolveMilestoneTarget()'s own docblock) carry no such
      * restriction (plain tenant/task-scoped SQL, no OU join), so these tests
-     * call the REAL one against a bare SQLite tasker_milestones fixture,
+     * call the REAL ones against a bare SQLite tasker_milestones fixture,
      * never a spy.
      */
     private function invokeResolveMilestoneTarget(
@@ -923,11 +925,11 @@ final class TaskerPluginTest extends TestCase
      * (CreateTaskerMilestonesTable) — a type SQLite does not recognise as its
      * own rowid alias (only the literal string "INTEGER" qualifies; see
      * MilestonesApiHandler::idColumn()'s own docblock for the full
-     * explanation). IdentifierResolver::resolveMilestone() selects the
-     * literal `id` column (never rowid), so a fixture that lets SQLite
-     * autogenerate it would leave every row's `id` NULL and every lookup
-     * silently fail. This helper always supplies `id` explicitly for that
-     * reason.
+     * explanation). Both resolveMilestoneById() and resolveMilestoneByIndex()
+     * select the literal `id` column (never rowid), so a fixture that lets
+     * SQLite autogenerate it would leave every row's `id` NULL and every
+     * lookup silently fail. This helper always supplies `id` explicitly for
+     * that reason.
      */
     private function insertMilestoneWithExplicitId(PDO $pdo, int $id, int $tenantId, int $taskId, int $sortOrder = 0): void
     {
@@ -1091,6 +1093,168 @@ final class TaskerPluginTest extends TestCase
             $seen,
             'the task resolver must receive the same pdo, tenantId, callerOuId, and raw identifier untouched'
         );
+    }
+
+    /**
+     * D1b Task 12b — parity-allowlist.php's `complete_milestone` entry,
+     * discharged by this test existing and actually proving the fix (the
+     * allowlist's own staleness guard rejects an empty stub: it greps for
+     * this exact method name, so the assertions inside are what make the
+     * discharge honest).
+     *
+     * THE COLLISION, constructed deliberately per the brief: a milestone
+     * with id 1 exists under the task but sits at position 2 (sort_order 2),
+     * NOT position 1. Under the old id-first resolveMilestone(),
+     * `complete_milestone({task_id, index: 1})` would find "id = 1 AND
+     * task_id = ..." and complete the WRONG milestone (id 1) silently. The
+     * fixed resolveMilestoneByIndex() never consults `id` at all, so it must
+     * resolve to the milestone genuinely at position 1.
+     *
+     * The request is shaped exactly like complete_milestone's own route
+     * (POST /api/tasker/milestones/complete, JSON body) — this proves the
+     * fix through the same composition completeMilestone() itself calls,
+     * not just through IdentifierResolver in isolation.
+     */
+    public function testCompleteMilestoneTreatsIndexAsAPositionNotAnId(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        (new CreateTaskerMilestonesTable())->up($pdo);
+
+        $atPositionZero = 50;
+        $collidingId    = 1; // Exists under this task, but at position 2 — NOT position 1.
+        $atPositionOne  = 77;
+        $this->insertMilestoneWithExplicitId($pdo, $atPositionZero, 7, 700, 0);
+        $this->insertMilestoneWithExplicitId($pdo, $collidingId, 7, 700, 2);
+        $this->insertMilestoneWithExplicitId($pdo, $atPositionOne, 7, 700, 1);
+
+        $indexRequest = new Request(
+            'POST',
+            '/api/tasker/milestones/complete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'index' => 1])
+        );
+        $indexResult = $this->invokeResolveMilestoneTarget($indexRequest, $pdo, 7, null, fn () => 700);
+
+        self::assertSame('resolved', $indexResult['status']);
+        self::assertSame(
+            $atPositionOne,
+            $indexResult['milestoneId'],
+            'index:1 must resolve to the milestone genuinely at position 1, never to the milestone whose id '
+                . 'happens to be 1'
+        );
+
+        // milestone_id must still resolve by id, unaffected by the split —
+        // and, mirroring the collision above, must NOT fall back to treating
+        // a non-existent id as a position (id 77 is a real milestone id
+        // here, at position 1, so this also confirms milestone_id ignores
+        // position entirely and matches by id alone).
+        $idRequest = new Request(
+            'POST',
+            '/api/tasker/milestones/complete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'milestone_id' => $collidingId])
+        );
+        $idResult = $this->invokeResolveMilestoneTarget($idRequest, $pdo, 7, null, fn () => 700);
+
+        self::assertSame('resolved', $idResult['status']);
+        self::assertSame($collidingId, $idResult['milestoneId'], 'milestone_id must resolve the real id even though it sits at position 2, not position 1');
+    }
+
+    /**
+     * D1b Task 12b — parity-allowlist.php's `uncomplete_milestone` entry,
+     * same collision as testCompleteMilestoneTreatsIndexAsAPositionNotAnId()
+     * but shaped as uncomplete_milestone's own route
+     * (POST /api/tasker/milestones/uncomplete) — the two tools share
+     * resolveMilestoneTarget() but are separate allowlist entries and each
+     * needs its own named, non-stub proof.
+     */
+    public function testUncompleteMilestoneTreatsIndexAsAPositionNotAnId(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        (new CreateTaskerMilestonesTable())->up($pdo);
+
+        $collidingId   = 1; // Exists under this task, but at position 2 — NOT position 1.
+        $atPositionOne = 88;
+        $this->insertMilestoneWithExplicitId($pdo, 60, 7, 701, 0);
+        $this->insertMilestoneWithExplicitId($pdo, $collidingId, 7, 701, 2);
+        $this->insertMilestoneWithExplicitId($pdo, $atPositionOne, 7, 701, 1);
+
+        $indexRequest = new Request(
+            'POST',
+            '/api/tasker/milestones/uncomplete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'index' => 1])
+        );
+        $indexResult = $this->invokeResolveMilestoneTarget($indexRequest, $pdo, 7, null, fn () => 701);
+
+        self::assertSame('resolved', $indexResult['status']);
+        self::assertSame(
+            $atPositionOne,
+            $indexResult['milestoneId'],
+            'index:1 must resolve to the milestone genuinely at position 1, never to the milestone whose id '
+                . 'happens to be 1'
+        );
+
+        $idRequest = new Request(
+            'POST',
+            '/api/tasker/milestones/uncomplete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'milestone_id' => $collidingId])
+        );
+        $idResult = $this->invokeResolveMilestoneTarget($idRequest, $pdo, 7, null, fn () => 701);
+
+        self::assertSame('resolved', $idResult['status']);
+        self::assertSame($collidingId, $idResult['milestoneId'], 'milestone_id must resolve the real id even though it sits at position 2, not position 1');
+    }
+
+    /**
+     * D1b Task 12b — parity-allowlist.php's `delete_milestone` entry, the
+     * most destructive of the three (it deletes, not just toggles). Shaped
+     * as delete_milestone's own route: task_id/milestone_id/index arrive via
+     * the QUERY STRING only, with an EMPTY body — the real shape of a DELETE
+     * over the MCP transport, per resolveMilestoneTarget()'s own docblock
+     * ("task_id/milestone_id/index all arrive via ... identifierFromRequest()
+     * (body then query) rather than the body alone — required for a
+     * DELETE"). Deliberately more faithful than the POST-with-body shape of
+     * the two tests above, so this one also proves the query-string path.
+     */
+    public function testDeleteMilestoneTreatsIndexAsAPositionNotAnId(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        (new CreateTaskerMilestonesTable())->up($pdo);
+
+        $collidingId   = 1; // Exists under this task, but at position 2 — NOT position 1.
+        $atPositionOne = 99;
+        $this->insertMilestoneWithExplicitId($pdo, 70, 7, 702, 0);
+        $this->insertMilestoneWithExplicitId($pdo, $collidingId, 7, 702, 2);
+        $this->insertMilestoneWithExplicitId($pdo, $atPositionOne, 7, 702, 1);
+
+        $previousGet = $_GET;
+        try {
+            $_GET = ['task_id' => 'TDE-1', 'index' => '1'];
+            $indexRequest = new Request('DELETE', '/api/tasker/milestones', [], '');
+            $indexResult = $this->invokeResolveMilestoneTarget($indexRequest, $pdo, 7, null, fn () => 702);
+
+            self::assertSame('resolved', $indexResult['status']);
+            self::assertSame(
+                $atPositionOne,
+                $indexResult['milestoneId'],
+                'index:1 must resolve to the milestone genuinely at position 1, never to the milestone whose id '
+                    . 'happens to be 1'
+            );
+
+            $_GET = ['task_id' => 'TDE-1', 'milestone_id' => (string) $collidingId];
+            $idRequest = new Request('DELETE', '/api/tasker/milestones', [], '');
+            $idResult = $this->invokeResolveMilestoneTarget($idRequest, $pdo, 7, null, fn () => 702);
+
+            self::assertSame('resolved', $idResult['status']);
+            self::assertSame($collidingId, $idResult['milestoneId'], 'milestone_id must resolve the real id even though it sits at position 2, not position 1');
+        } finally {
+            $_GET = $previousGet;
+        }
     }
 
     public function testResolveMilestoneTargetSkipsMilestoneResolutionWhenNotRequired(): void

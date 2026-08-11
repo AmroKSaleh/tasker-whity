@@ -29,10 +29,12 @@ use Whity\Sdk\MigrationInterface;
  * same row is not something to rely on getting right by accident. The
  * "don't let someone accidentally nuke a non-empty section" protection
  * therefore lives in the API layer instead — SectionsApiHandler::delete()
- * (Task 3) only ever guards against deleting a project's LAST section, and
- * deliberately does not guard against deleting a non-empty one; deleting a
- * section always deletes its tasks, the same way deleting a project already
- * implies deleting everything under it.
+ * guards against BOTH deleting a project's LAST section AND (D1b Task 12b,
+ * contract parity with the original app) deleting a non-empty one, unless
+ * the caller explicitly passes delete_tasks: true. Only then does this FK
+ * cascade actually run for a section delete; deleting a whole PROJECT still
+ * always implies deleting everything under it (ProjectsApiHandler::delete()
+ * carries no equivalent per-section guard).
  */
 final class CreateTaskerTasksTable implements MigrationInterface
 {

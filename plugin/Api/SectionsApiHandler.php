@@ -36,11 +36,21 @@ use Whity\Sdk\Http\Response;
  * delete() refuses to remove a project's last remaining section — every
  * project must always have at least one, the invariant ProjectsApiHandler's
  * atomic Backlog-section creation exists to guarantee (design spec §4).
- * Deleting a non-last section still cascades to that section's own groups
- * and tasks; there is no separate non-empty guard for that case, the same
- * way deleting a whole project already implies deleting everything under it
- * — a confirmation prompt for a destructive delete is the frontend's job
- * (D2), not this API's.
+ *
+ * D1b Task 12b FIX (contract parity with the original app): delete() used to
+ * ALSO cascade unconditionally to a non-last section's own groups and tasks,
+ * with no guard at all — the original app's own delete_section instead
+ * REFUSES a non-empty section unless the caller explicitly passes
+ * delete_tasks: true. Because tasker_tasks.section_id and
+ * tasker_groups.section_id are both ON DELETE CASCADE (see
+ * CreateTaskerTasksTable/CreateTaskerGroupsTable), the identical
+ * `delete_section({project_id, section_id})` call an original-app agent
+ * makes routinely — a REFUSAL there — silently destroyed every task and
+ * group in the section here. $deleteTasks now gates that cascade: false (the
+ * default) refuses with a count of what would be destroyed when the section
+ * still has tasks or groups; true proceeds and lets the FK cascade do its
+ * work, exactly like deleting a whole project already implies deleting
+ * everything under it.
  */
 final class SectionsApiHandler
 {
@@ -178,7 +188,12 @@ final class SectionsApiHandler
         }
     }
 
-    public function delete(int $tenantId, int $sectionId): Response
+    /**
+     * $deleteTasks defaults to false, matching the original app's own
+     * delete_section default — see this class's own docblock for why that
+     * default changed here (it used to always cascade).
+     */
+    public function delete(int $tenantId, int $sectionId, bool $deleteTasks = false): Response
     {
         $row = $this->findScoped($sectionId, $tenantId);
         if ($row === null) {
@@ -193,6 +208,23 @@ final class SectionsApiHandler
             return Response::error('Cannot delete a project\'s last remaining section', 409);
         }
 
+        if (!$deleteTasks) {
+            $taskCount = $this->countIn('tasker_tasks', $sectionId, $tenantId);
+            $groupCount = $this->countIn('tasker_groups', $sectionId, $tenantId);
+            if ($taskCount > 0 || $groupCount > 0) {
+                return Response::error(
+                    sprintf(
+                        'Refused: section has %d task(s) and %d group(s). Move them to another section first '
+                            . '(e.g. via update_task/move_task_to_group), or pass delete_tasks: true to delete the '
+                            . 'section together with all its tasks and groups.',
+                        $taskCount,
+                        $groupCount
+                    ),
+                    409
+                );
+            }
+        }
+
         try {
             $stmt = $this->db->prepare("DELETE FROM tasker_sections WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id");
             $stmt->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
@@ -201,6 +233,23 @@ final class SectionsApiHandler
         } catch (\Throwable) {
             return Response::error('Failed to delete section', 500);
         }
+    }
+
+    /**
+     * Row count in $table for $sectionId, tenant-scoped. $table is never
+     * caller-supplied (only 'tasker_tasks'/'tasker_groups' from delete()
+     * above), so interpolating it into the static SQL text is safe — the
+     * same "column/table name comes from code, never from input" rule this
+     * codebase applies everywhere else (see e.g. idColumn()'s own use above).
+     */
+    private function countIn(string $table, int $sectionId, int $tenantId): int
+    {
+        $stmt = $this->db->prepare(
+            "SELECT COUNT(*) FROM {$table} WHERE section_id = :section_id AND tenant_id = :tenant_id"
+        );
+        $stmt->execute([':section_id' => $sectionId, ':tenant_id' => $tenantId]);
+
+        return (int) $stmt->fetchColumn();
     }
 
     /**

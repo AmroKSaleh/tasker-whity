@@ -379,17 +379,23 @@ final class IdentifierResolver
     }
 
     /**
-     * Milestones accept an INDEX (positional, 0-based, within the task's
-     * ordered milestones) as well as an id or UUID.
+     * Resolve a milestone by ID/UUID ONLY — never positionally.
      *
-     * The index form exists because the original stored milestones as a jsonb
-     * array and its tools address them positionally
-     * (uncomplete_milestone { task_id, index }). It is inherently racy under
-     * concurrent reordering — two agents can have the same index land on
-     * different rows — so tool descriptions state that ids are preferred.
-     * Supported for compatibility, not recommended.
+     * D1b Task 12b FIX: this used to be one method (`resolveMilestone()`)
+     * that tried an id lookup FIRST and fell back to the ordinal position
+     * only when no milestone with that integer id existed under the task.
+     * That made `index` and `milestone_id` share one ambiguous resolution
+     * path, and for any task whose milestone ids land in the low integers —
+     * the normal case for early rows — an original-shaped positional call
+     * (`complete_milestone({task_id, index: 1})`) silently completed the
+     * milestone with id 1 instead of the second milestone. Split into two
+     * methods with NO cross-fallback in either direction: this one only ever
+     * matches `id` or `public_id`, so `milestone_id` is unambiguous and
+     * stable under reordering — the property this backend recommends over
+     * `index` in the first place. See {@see self::resolveMilestoneByIndex()}
+     * for the positional counterpart.
      */
-    public static function resolveMilestone(
+    public static function resolveMilestoneById(
         PDO $db,
         int $tenantId,
         int $taskId,
@@ -398,32 +404,47 @@ final class IdentifierResolver
         $form  = self::classify($raw);
         $value = trim((string) ($raw ?? ''));
 
-        if ($form === 'uuid') {
-            $stmt = $db->prepare(
-                'SELECT id FROM tasker_milestones
-                 WHERE public_id = :value AND task_id = :task_id AND tenant_id = :tenant_id LIMIT 1'
-            );
-            $stmt->execute([':value' => $value, ':task_id' => $taskId, ':tenant_id' => $tenantId]);
-            $id = $stmt->fetchColumn();
-
-            return $id === false ? null : (int) $id;
-        }
-
-        if ($form !== 'integer') {
+        if ($form !== 'uuid' && $form !== 'integer') {
             return null;
         }
 
-        // An integer is ambiguous: a milestone id, or a position? Prefer the
-        // id — it is stable — and fall back to the index only if no milestone
-        // with that id belongs to this task.
-        $byId = $db->prepare(
-            'SELECT id FROM tasker_milestones
-             WHERE id = :value AND task_id = :task_id AND tenant_id = :tenant_id LIMIT 1'
+        $column = $form === 'uuid' ? 'public_id' : 'id';
+        $stmt = $db->prepare(
+            "SELECT id FROM tasker_milestones
+             WHERE {$column} = :value AND task_id = :task_id AND tenant_id = :tenant_id LIMIT 1"
         );
-        $byId->execute([':value' => (int) $value, ':task_id' => $taskId, ':tenant_id' => $tenantId]);
-        $found = $byId->fetchColumn();
-        if ($found !== false) {
-            return (int) $found;
+        $stmt->execute([':value' => $value, ':task_id' => $taskId, ':tenant_id' => $tenantId]);
+        $id = $stmt->fetchColumn();
+
+        return $id === false ? null : (int) $id;
+    }
+
+    /**
+     * Resolve a milestone by POSITION ONLY — never by id.
+     *
+     * D1b Task 12b FIX: the positional counterpart of
+     * {@see self::resolveMilestoneById()}, split out of the same formerly
+     * id-first `resolveMilestone()` — see that method's docblock for why the
+     * old combined resolution was unsafe. `index` is 0-based, matching the
+     * original app's own documented convention exactly (its milestones lived
+     * in a jsonb array addressed positionally); this never consults `id` at
+     * all, so a value that happens to also be a real milestone id under this
+     * task is not treated specially — it is purely an offset into the task's
+     * milestones ordered by (sort_order, id).
+     *
+     * Inherently racy under concurrent reordering — two callers can have the
+     * same index land on different rows after a third reorders between their
+     * calls — so tool descriptions state that `milestone_id` is preferred.
+     * Supported for compatibility, not recommended.
+     */
+    public static function resolveMilestoneByIndex(
+        PDO $db,
+        int $tenantId,
+        int $taskId,
+        string|int|null $raw
+    ): ?int {
+        if (self::classify($raw) !== 'integer') {
+            return null;
         }
 
         $ordered = $db->prepare(
@@ -435,6 +456,6 @@ final class IdentifierResolver
         /** @var list<int> $ids */
         $ids = array_map('intval', $ordered->fetchAll(PDO::FETCH_COLUMN));
 
-        return $ids[(int) $value] ?? null;
+        return $ids[(int) trim((string) $raw)] ?? null;
     }
 }
