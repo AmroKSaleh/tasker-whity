@@ -160,4 +160,37 @@ final class MilestonesApiHandlerTest extends TestCase
 
         self::assertSame(404, $response->getStatusCode());
     }
+
+    /**
+     * D1 implemented complete_milestone as a toggle. That was wrong: the
+     * original app has separate complete_milestone and uncomplete_milestone
+     * tools, so a toggle makes complete_milestone non-idempotent — calling it
+     * twice un-completes. setChecked() replaces toggle() on the route surface
+     * for exactly this reason.
+     *
+     * NOTE: uses insertMilestoneDirect() rather than handler->create(), like
+     * every other fixture in this class — create()'s task-existence check is
+     * now OU-aware (whole-branch review finding C1) and requires a real
+     * PostgreSQL connection, per this class's own docblock.
+     */
+    public function testCompleteIsIdempotentRatherThanAToggle(): void
+    {
+        $id = $this->insertMilestoneDirect(7, 1, 'Idempotent');
+
+        $first  = json_decode($this->handler->setChecked(7, $id, true)->getBody(), true);
+        $second = json_decode($this->handler->setChecked(7, $id, true)->getBody(), true);
+
+        self::assertTrue($first['data']['checked']);
+        self::assertTrue($second['data']['checked'], 'complete_milestone twice must stay complete, not flip back');
+    }
+
+    public function testUncompleteSetsCheckedFalse(): void
+    {
+        $id = $this->insertMilestoneDirect(7, 1, 'Reopen me');
+        $this->handler->setChecked(7, $id, true);
+
+        $payload = json_decode($this->handler->setChecked(7, $id, false)->getBody(), true);
+
+        self::assertFalse($payload['data']['checked']);
+    }
 }

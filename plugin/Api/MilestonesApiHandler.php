@@ -173,19 +173,24 @@ final class MilestonesApiHandler
     }
 
     /**
-     * POST /api/tasker/milestones/{id}/toggle — flips checked, does not set it
-     * to a caller-supplied value, matching the original app's own toggle
-     * semantics (complete_milestone / uncomplete_milestone were always a pair
-     * of opposite actions, never an arbitrary set).
+     * Set a milestone's checked state explicitly.
+     *
+     * Replaces D1's toggle(). The original exposes complete_milestone AND
+     * uncomplete_milestone as separate tools, so a toggle cannot express the
+     * contract — and it makes complete_milestone non-idempotent, which is
+     * worse than merely inconvenient for an agent that retries.
      */
-    public function toggle(int $tenantId, int $milestoneId): Response
+    public function setChecked(int $tenantId, int $milestoneId, bool $checked): Response
     {
         try {
             $stmt = $this->db->prepare(
-                "UPDATE tasker_milestones SET checked = NOT checked
+                "UPDATE tasker_milestones SET checked = :checked
                  WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id"
             );
-            $stmt->execute([':id' => $milestoneId, ':tenant_id' => $tenantId]);
+            $stmt->bindValue(':checked', $checked, PDO::PARAM_BOOL);
+            $stmt->bindValue(':id', $milestoneId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->execute();
 
             if ($stmt->rowCount() === 0) {
                 return Response::error('Milestone not found', 404);
@@ -198,8 +203,28 @@ final class MilestonesApiHandler
 
             return Response::json(['data' => $this->toPublicMilestone($row)], 200);
         } catch (\Throwable) {
-            return Response::error('Failed to toggle milestone', 500);
+            return Response::error('Failed to update milestone', 500);
         }
+    }
+
+    /**
+     * POST /api/tasker/milestones/{id}/toggle — flips checked, does not set it
+     * to a caller-supplied value.
+     *
+     * Kept as a thin wrapper over {@see self::setChecked()} purely so nothing
+     * already calling toggle() breaks; the route surface itself no longer
+     * uses it (complete_milestone/uncomplete_milestone call setChecked()
+     * directly — see this class's own doc for why a toggle cannot express
+     * that pair of tools).
+     */
+    public function toggle(int $tenantId, int $milestoneId): Response
+    {
+        $row = $this->findScoped($milestoneId, $tenantId);
+        if ($row === null) {
+            return Response::error('Milestone not found', 404);
+        }
+
+        return $this->setChecked($tenantId, $milestoneId, !self::dbTruthy($row['checked']));
     }
 
     /**

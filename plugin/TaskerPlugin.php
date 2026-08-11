@@ -783,7 +783,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
-                'path' => '/api/tasker/projects/{id:\d+}/board',
+                'path' => '/api/tasker/board',
                 'handler' => [$this, 'getBoard'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_project:view',
@@ -791,15 +791,18 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'get_board',
                     'summary' => 'Get a project\'s full board: sections, groups, tasks, milestones',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'project_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The composed board'],
-                        404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
+                        404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
                     ],
                 ],
             ],
             [
                 'method' => 'GET',
-                'path' => '/api/tasker/tasks/{taskId:\d+}/milestones',
+                'path' => '/api/tasker/milestones',
                 'handler' => [$this, 'listMilestones'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_milestone:edit',
@@ -807,6 +810,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'list_milestones',
                     'summary' => 'List a task\'s milestones',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'task_id', 'in' => 'query', 'required' => true, 'schema' => ['type' => 'string'], 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The milestone list'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -815,7 +821,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/tasks/{taskId:\d+}/milestones',
+                'path' => '/api/tasker/milestones',
                 'handler' => [$this, 'addMilestone'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_milestone:edit',
@@ -823,6 +829,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'add_milestone',
                     'summary' => 'Add a milestone to a task',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id', 'summary'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'summary' => ['type' => 'string'],
+                            'sort_order' => ['type' => 'integer'],
+                        ],
+                    ],
                     'responses' => [
                         201 => ['description' => 'The created milestone'],
                         400 => ['description' => 'summary missing, empty, or too long'],
@@ -832,23 +847,57 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/milestones/{id:\d+}/toggle',
-                'handler' => [$this, 'toggleMilestone'],
+                'path' => '/api/tasker/milestones/complete',
+                'handler' => [$this, 'completeMilestone'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_milestone:edit',
                 'schema' => [
                     'operationId' => 'complete_milestone',
-                    'summary' => 'Toggle a milestone\'s checked state',
+                    'summary' => 'Mark a milestone complete',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'milestone_id' => ['type' => 'string', 'description' => 'Milestone UUID or id. Preferred over index — stable under reordering.'],
+                            'index' => ['type' => 'integer', 'description' => 'Zero-based position within the task\'s milestones. Supported for compatibility; racy if milestones are being reordered concurrently.'],
+                        ],
+                    ],
                     'responses' => [
-                        200 => ['description' => 'The updated milestone'],
-                        404 => ['description' => 'Milestone not found in the caller\'s tenant'],
+                        200 => ['description' => 'The completed milestone'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/milestones/uncomplete',
+                'handler' => [$this, 'uncompleteMilestone'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_milestone:edit',
+                'schema' => [
+                    'operationId' => 'uncomplete_milestone',
+                    'summary' => 'Restore a completed milestone to incomplete',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'milestone_id' => ['type' => 'string', 'description' => 'Milestone UUID or id. Preferred over index — stable under reordering.'],
+                            'index' => ['type' => 'integer', 'description' => 'Zero-based position within the task\'s milestones. Supported for compatibility; racy if milestones are being reordered concurrently.'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The reopened milestone'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
                     ],
                 ],
             ],
             [
                 'method' => 'PATCH',
-                'path' => '/api/tasker/milestones/{id:\d+}',
+                'path' => '/api/tasker/milestones',
                 'handler' => [$this, 'updateMilestone'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_milestone:edit',
@@ -856,16 +905,28 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'update_milestone',
                     'summary' => 'Update a milestone\'s summary, detail, or sort_order',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'milestone_id' => ['type' => 'string', 'description' => 'Milestone UUID or id. Preferred over index — stable under reordering.'],
+                            'index' => ['type' => 'integer', 'description' => 'Zero-based position within the task\'s milestones. Supported for compatibility; racy if milestones are being reordered concurrently.'],
+                            'summary' => ['type' => 'string'],
+                            'detail' => ['type' => ['string', 'null']],
+                            'sort_order' => ['type' => 'integer'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The updated milestone'],
                         400 => ['description' => 'summary empty or too long'],
-                        404 => ['description' => 'Milestone not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
                     ],
                 ],
             ],
             [
                 'method' => 'DELETE',
-                'path' => '/api/tasker/milestones/{id:\d+}',
+                'path' => '/api/tasker/milestones',
                 'handler' => [$this, 'deleteMilestone'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_milestone:edit',
@@ -873,15 +934,24 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'delete_milestone',
                     'summary' => 'Delete a milestone',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'milestone_id' => ['type' => 'string', 'description' => 'Milestone UUID or id. Preferred over index — stable under reordering.'],
+                            'index' => ['type' => 'integer', 'description' => 'Zero-based position within the task\'s milestones. Supported for compatibility; racy if milestones are being reordered concurrently.'],
+                        ],
+                    ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
-                        404 => ['description' => 'Milestone not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
                     ],
                 ],
             ],
             [
                 'method' => 'GET',
-                'path' => '/api/tasker/tasks/{id:\d+}/discussion',
+                'path' => '/api/tasker/tasks/discussion',
                 'handler' => [$this, 'getDiscussion'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:view',
@@ -889,6 +959,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'get_task_discussion',
                     'summary' => 'Read a task\'s AI discussion and focus reason',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'task_id', 'in' => 'query', 'required' => true, 'schema' => ['type' => 'string'], 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The discussion (empty shape if none yet)'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -897,7 +970,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'PUT',
-                'path' => '/api/tasker/tasks/{id:\d+}/discussion',
+                'path' => '/api/tasker/tasks/discussion',
                 'handler' => [$this, 'putDiscussion'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:edit',
@@ -905,6 +978,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'set_task_discussion',
                     'summary' => 'Save a task\'s AI discussion and focus reason',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'messages' => ['type' => 'array'],
+                            'reason' => ['type' => ['string', 'null']],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The saved discussion'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -2101,7 +2183,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * GET /api/tasker/projects/{id}/board
+     * GET /api/tasker/board?project_id=
+     *
+     * project_id is optional and falls back to the caller's default project —
+     * mirrors listSections()'s own shape exactly.
      *
      * @param array<string, string> $params
      */
@@ -2115,15 +2200,37 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $pdo = $this->resolvePdo();
         $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new BoardApiHandler($pdo))
-            ->get($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
+        $raw = $this->queryParam($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $callerOu['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        return (new BoardApiHandler($pdo))->get($tenantId, $callerOu['ouId'], $projectId);
     }
 
     /**
-     * GET /api/tasker/tasks/{taskId}/milestones
+     * GET /api/tasker/milestones?task_id=
+     *
+     * task_id is required — a task's milestones have no "default" fallback
+     * the way a project does. Resolved via IdentifierResolver::resolveTask(),
+     * which is OU-scoped; listForTask() itself stays tenant-scoped only
+     * (whole-branch review finding I7 — see MilestonesApiHandler's own doc),
+     * so this route adds the OU check the flattened surface now needs, on
+     * top of (not instead of) that existing handler-level check.
      *
      * @param array<string, string> $params
      */
@@ -2134,11 +2241,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new MilestonesApiHandler($this->resolvePdo()))->listForTask($tenantId, (int) ($params['taskId'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->queryParam($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new MilestonesApiHandler($pdo))->listForTask($tenantId, $taskId);
     }
 
     /**
-     * POST /api/tasker/tasks/{taskId}/milestones
+     * POST /api/tasker/milestones
      *
      * @param array<string, string> $params
      */
@@ -2152,30 +2275,112 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $pdo = $this->resolvePdo();
         $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $callerOu['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
         }
 
         return (new MilestonesApiHandler($pdo))
-            ->create($tenantId, $callerOu['ouId'], (int) ($params['taskId'] ?? 0), $request->getBody());
+            ->create($tenantId, $callerOu['ouId'], $taskId, $request->getBody());
     }
 
     /**
-     * POST /api/tasker/milestones/{id}/toggle
+     * POST /api/tasker/milestones/complete
+     *
+     * task_id resolves the milestone's parent task first (OU-scoped);
+     * milestone_id/index then resolves within that task's own milestones via
+     * IdentifierResolver::resolveMilestone(). setChecked(true) is called
+     * directly rather than toggle() — see MilestonesApiHandler's own doc for
+     * why a toggle cannot express the complete/uncomplete pair.
      *
      * @param array<string, string> $params
      */
-    public function toggleMilestone(Request $request, array $params = []): Response
+    public function completeMilestone(Request $request, array $params = []): Response
     {
         $tenantId = $this->requireTenantId();
         if ($tenantId === null) {
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new MilestonesApiHandler($this->resolvePdo()))->toggle($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        $rawMilestone = is_array($decoded) ? ($decoded['milestone_id'] ?? $decoded['index'] ?? null) : null;
+
+        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
+        if ($milestoneId === null) {
+            return Response::error('Milestone not found', 404);
+        }
+
+        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, $milestoneId, true);
     }
 
     /**
-     * PATCH /api/tasker/milestones/{id}
+     * POST /api/tasker/milestones/uncomplete
+     *
+     * Mirrors completeMilestone() exactly, except it sets checked to false —
+     * see that method's own doc.
+     *
+     * @param array<string, string> $params
+     */
+    public function uncompleteMilestone(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        $rawMilestone = is_array($decoded) ? ($decoded['milestone_id'] ?? $decoded['index'] ?? null) : null;
+
+        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
+        if ($milestoneId === null) {
+            return Response::error('Milestone not found', 404);
+        }
+
+        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, $milestoneId, false);
+    }
+
+    /**
+     * PATCH /api/tasker/milestones
      *
      * @param array<string, string> $params
      */
@@ -2186,12 +2391,41 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new MilestonesApiHandler($this->resolvePdo()))
-            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        $rawMilestone = is_array($decoded) ? ($decoded['milestone_id'] ?? $decoded['index'] ?? null) : null;
+
+        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
+        if ($milestoneId === null) {
+            return Response::error('Milestone not found', 404);
+        }
+
+        return (new MilestonesApiHandler($pdo))->update($tenantId, $milestoneId, $request->getBody());
     }
 
     /**
-     * DELETE /api/tasker/milestones/{id}
+     * DELETE /api/tasker/milestones
+     *
+     * NOTE: reads BOTH task_id and milestone_id/index via
+     * identifierFromRequest() rather than the body alone — see
+     * {@see self::identifierFromRequest()}'s docblock for why a DELETE
+     * request's arguments arrive as query parameters over the MCP transport,
+     * never in the body.
      *
      * @param array<string, string> $params
      */
@@ -2202,11 +2436,35 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new MilestonesApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $rawMilestone = $this->identifierFromRequest($request, 'milestone_id')
+            ?? $this->identifierFromRequest($request, 'index');
+
+        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
+        if ($milestoneId === null) {
+            return Response::error('Milestone not found', 404);
+        }
+
+        return (new MilestonesApiHandler($pdo))->delete($tenantId, $milestoneId);
     }
 
     /**
-     * GET /api/tasker/tasks/{id}/discussion
+     * GET /api/tasker/tasks/discussion?task_id=
      *
      * @param array<string, string> $params
      */
@@ -2220,14 +2478,24 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $pdo = $this->resolvePdo();
         $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new TaskDiscussionsApiHandler($pdo))->get($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
+        $rawTaskId = $this->queryParam($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $callerOu['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TaskDiscussionsApiHandler($pdo))->get($tenantId, $callerOu['ouId'], $taskId);
     }
 
     /**
-     * PUT /api/tasker/tasks/{id}/discussion
+     * PUT /api/tasker/tasks/discussion
      *
      * @param array<string, string> $params
      */
@@ -2241,11 +2509,21 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $pdo = $this->resolvePdo();
         $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $callerOu['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
         }
 
         return (new TaskDiscussionsApiHandler($pdo))
-            ->put($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0), $request->getBody());
+            ->put($tenantId, $callerOu['ouId'], $taskId, $request->getBody());
     }
 
     /**
