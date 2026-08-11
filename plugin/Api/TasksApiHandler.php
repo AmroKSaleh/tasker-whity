@@ -16,21 +16,28 @@ use Whity\Sdk\Http\Response;
  * Tenant-scoped CRUD, move, pin/unpin, complete/uncomplete, and entity-tag
  * attachment for tasker_tasks, plus the OU-scoped readyWork() ranked query.
  *
- * update()/move()/delete()/complete()/uncomplete()/pin()/unpin()/tag() are
- * tenant-scoped only — a caller only ever reaches an individual task's id
- * after already holding it from an OU-scoped list (listForSection() or a
- * future get_board), so re-checking OU scope on every single-task mutation
- * would be redundant. readyWork() is the one exception: it is reached
- * directly by project id, not through a task the caller already holds, so
- * it re-derives and checks OU visibility itself, exactly like get_board.
+ * create()/update()/move()/delete()/complete()/uncomplete()/pin()/unpin()/
+ * tag() are ALL tenant-scoped only — a caller only ever reaches an
+ * individual section or task id after already holding it from an OU-scoped
+ * lookup upstream, so re-checking OU scope again down here would be
+ * redundant. readyWork() is the one exception: it is reached directly by
+ * project id, not through a value the caller already holds, so it
+ * re-derives and checks OU visibility itself, exactly like get_board.
  *
- * create()'s section-existence check is ALSO OU-aware (whole-branch review
- * finding C1): {sectionId} is a path parameter, not a discovered value, so
- * that one check (unlike the single-task-id mutations above) must confirm
- * the section's own project is within the caller's OU scope, not merely
- * their tenant — see create()'s own inline comment. listForSection() by
- * contrast stays tenant-scoped only (finding I7): it is explicitly out of
- * C1's approved scope.
+ * HISTORICAL NOTE (whole-branch review finding C1, superseded by D1b Task 6):
+ * create()'s section-existence check used to be OU-aware in its own right,
+ * because {sectionId} arrived as a raw, un-checked path parameter
+ * (/sections/{sectionId}/tasks) — a value the caller could iterate, not one
+ * they had already been granted. D1b's route flattening removed that path
+ * parameter: POST /api/tasker/tasks now resolves section_id via
+ * {@see \Tasker\Access\IdentifierResolver::resolveSection()} in
+ * TaskerPlugin::createTask() BEFORE this method ever runs, and that resolver
+ * is itself OU-aware. $sectionId arriving here is therefore already a
+ * discovered, OU-safe value — exactly like every other single-task method
+ * above — so the redundant second check (and the $callerOuId parameter it
+ * needed) was removed. listForSection()/listFiltered() were never part of
+ * C1's scope to begin with (finding I7) and stay tenant-scoped only, as
+ * always.
  */
 final class TasksApiHandler
 {
@@ -49,19 +56,54 @@ final class TasksApiHandler
     }
 
     /**
-     * REGRESSION FIX (whole-branch review finding I7): this used to have NO
-     * existence check on its parent {sectionId} at all — a nonexistent or
-     * cross-tenant section returned `200 []` instead of 404, unlike
-     * SectionsApiHandler::list()/GroupsApiHandler::list(). Tenant-scoped
-     * only, matching the established parent-existence-check pattern
-     * (list_tasks by section id is explicitly NOT part of finding C1's
-     * OU-scoping fix — only its sibling create_task route is).
+     * GET /api/tasker/tasks — the original's list_tasks contract.
+     *
+     * project_id, section_id and group_id are all optional filters; status
+     * defaults to excluding done. The tenant predicate is unconditional text
+     * and is never part of the optional conditions.
+     *
+     * DEVIATION FROM THE BRIEF: the SELECT list keys off {@see self::idColumn()}
+     * (`rowid` under the SQLite unit-test double, `id` on real PostgreSQL)
+     * rather than a literal `id`, and orders by the same dynamic column —
+     * exactly like every other read path in this class (findScoped(), the old
+     * listForSection()). A literal `id` would silently return NULL for every
+     * row under SQLite (see idColumn()'s own docblock for why: a row inserted
+     * without specifying `id` gets a permanent NULL there, and
+     * PDO::lastInsertId() only ever reports SQLite's own rowid) — divergent,
+     * untested behaviour from production Postgres that no test in this file
+     * happens to catch today, but is exactly the kind of gap this task's
+     * other carry-over fixes exist to close.
+     *
+     * @param 'pending'|'in_progress'|'done'|'all' $status
      */
-    public function listForSection(int $tenantId, int $sectionId): Response
-    {
-        if (!$this->sectionExistsInTenant($tenantId, $sectionId)) {
-            return Response::error('Section not found', 404);
+    public function listFiltered(
+        int $tenantId,
+        ?int $projectId,
+        ?int $sectionId,
+        ?int $groupId,
+        string $status = 'pending'
+    ): Response {
+        $conditions = [];
+        $params     = [':tenant_id' => $tenantId];
+
+        if ($projectId !== null) {
+            $conditions[] = 'project_id = :project_id';
+            $params[':project_id'] = $projectId;
         }
+        if ($sectionId !== null) {
+            $conditions[] = 'section_id = :section_id';
+            $params[':section_id'] = $sectionId;
+        }
+        if ($groupId !== null) {
+            $conditions[] = 'group_id = :group_id';
+            $params[':group_id'] = $groupId;
+        }
+        if ($status !== 'all') {
+            $conditions[] = 'status = :status';
+            $params[':status'] = $status;
+        }
+
+        $extra = $conditions === [] ? '' : ' AND ' . implode(' AND ', $conditions);
 
         try {
             $idCol = $this->idColumn();
@@ -69,10 +111,10 @@ final class TasksApiHandler
                 "SELECT {$idCol} AS id, public_id, tenant_id, project_id, section_id, group_id, text, detail, status, priority,
                         due_date, pinned, pinned_at, sort_order, completed_at, short_id, created_by, created_at, updated_at
                  FROM tasker_tasks
-                 WHERE tenant_id = :tenant_id AND section_id = :section_id
+                 WHERE tenant_id = :tenant_id{$extra}
                  ORDER BY sort_order ASC, {$idCol} ASC"
             );
-            $stmt->execute([':tenant_id' => $tenantId, ':section_id' => $sectionId]);
+            $stmt->execute($params);
 
             /** @var array<int, array<string, mixed>> $rows */
             $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
@@ -83,7 +125,30 @@ final class TasksApiHandler
         }
     }
 
-    public function create(int $tenantId, ?int $callerOuId, int $sectionId, int $createdBy, string $body): Response
+    /**
+     * REGRESSION FIX (whole-branch review finding I7): this used to have NO
+     * existence check on its parent {sectionId} at all — a nonexistent or
+     * cross-tenant section returned `200 []` instead of 404, unlike
+     * SectionsApiHandler::list()/GroupsApiHandler::list(). Tenant-scoped
+     * only, matching the established parent-existence-check pattern
+     * (list_tasks by section id is explicitly NOT part of finding C1's
+     * OU-scoping fix — only its sibling create_task route is).
+     *
+     * Kept as a thin wrapper around {@see self::listFiltered()} — introduced
+     * by D1b Task 6, which generalised list_tasks into project/section/
+     * group/status filters rather than a section-only listing — so nothing
+     * that already calls listForSection() breaks.
+     */
+    public function listForSection(int $tenantId, int $sectionId): Response
+    {
+        if (!$this->sectionExistsInTenant($tenantId, $sectionId)) {
+            return Response::error('Section not found', 404);
+        }
+
+        return $this->listFiltered($tenantId, null, $sectionId, null, 'all');
+    }
+
+    public function create(int $tenantId, int $sectionId, int $createdBy, string $body): Response
     {
         $decoded = json_decode($body, true);
         $text = is_array($decoded) ? trim((string) ($decoded['text'] ?? '')) : '';
@@ -108,26 +173,24 @@ final class TasksApiHandler
             }
         }
 
-        // REGRESSION FIX (whole-branch review finding C1): {sectionId} is a
-        // path parameter, not a discovered value, and tasker_sections.id is a
-        // plain sequential id — so this existence check must be OU-aware, not
-        // merely tenant-scoped, exactly like SectionsApiHandler/
-        // GroupsApiHandler's own list()/create() fixes. tasker_sections
-        // carries no ou_id column, so this joins up to tasker_projects (the
-        // only table that does) and applies OuScopeResolver there. Confines
-        // create() to a real PostgreSQL connection — see TenantIsolationOuTest.
-        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
-        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+        // detail/due_date are optional, free-form pass-through fields —
+        // mirrors update()'s own treatment of the same two columns (no format
+        // validation on due_date beyond a plain string cast).
+        $detail = is_array($decoded) && array_key_exists('detail', $decoded) && $decoded['detail'] !== null
+            ? (string) $decoded['detail']
+            : null;
+        $dueDate = is_array($decoded) && array_key_exists('due_date', $decoded) && $decoded['due_date'] !== null
+            ? (string) $decoded['due_date']
+            : null;
+
+        // Tenant-scoped only — see this class's own docblock for why: by the
+        // time this runs, $sectionId has already been resolved (and its
+        // OU-visibility checked) by IdentifierResolver::resolveSection() in
+        // TaskerPlugin::createTask().
         $section = $this->db->prepare(
-            "SELECT s.id, s.project_id FROM tasker_sections s
-             JOIN tasker_projects p ON p.id = s.project_id
-             WHERE s.id = :id AND s.tenant_id = :tenant_id AND {$ouClause}"
+            'SELECT id, project_id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id'
         );
-        $section->bindValue(':id', $sectionId, PDO::PARAM_INT);
-        $section->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
-        $section->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
-        $section->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
-        $section->execute();
+        $section->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
         $sectionRow = $section->fetch(PDO::FETCH_ASSOC);
         if (!is_array($sectionRow)) {
             return Response::error('Section not found', 404);
@@ -146,13 +209,13 @@ final class TasksApiHandler
                 $this->db,
                 $tenantId,
                 (int) $sectionRow['project_id'],
-                function (int $candidate) use ($publicId, $tenantId, $sectionRow, $sectionId, $text, $priority, $createdBy): void {
+                function (int $candidate) use ($publicId, $tenantId, $sectionRow, $sectionId, $text, $detail, $priority, $dueDate, $createdBy): void {
                     $insert = $this->db->prepare(
                         'INSERT INTO tasker_tasks
-                            (public_id, tenant_id, project_id, section_id, text, priority, status,
+                            (public_id, tenant_id, project_id, section_id, text, detail, priority, due_date, status,
                              short_id, created_by, created_at, updated_at)
                          VALUES
-                            (:public_id, :tenant_id, :project_id, :section_id, :text, :priority, :status,
+                            (:public_id, :tenant_id, :project_id, :section_id, :text, :detail, :priority, :due_date, :status,
                              :short_id, :created_by, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
                     );
                     $insert->execute([
@@ -161,7 +224,9 @@ final class TasksApiHandler
                         ':project_id' => $sectionRow['project_id'],
                         ':section_id' => $sectionId,
                         ':text'       => $text,
+                        ':detail'     => $detail,
                         ':priority'   => $priority,
+                        ':due_date'   => $dueDate,
                         ':status'     => 'pending',
                         ':short_id'   => $candidate,
                         ':created_by' => $createdBy,
@@ -287,6 +352,16 @@ final class TasksApiHandler
      * TARGET section (the new section_id if this same request is also
      * changing it, otherwise the task's current section_id) — 422 if it
      * doesn't belong there.
+     *
+     * CARRY-OVER BUG FIX (D1b Task 6): $sectionChanging used to be set from
+     * `array_key_exists('section_id', $decoded)` alone — SUPPLIED, not
+     * CHANGED, contradicting this very docblock's "when section_id changes"
+     * wording above. A plain reorder that echoes the task's CURRENT
+     * section_id (`{"task_id": ..., "section_id": <same>, "sort_order": 5}`)
+     * — exactly what a drag-and-drop client sends — was silently treated as a
+     * section change, which cleared group_id via the `elseif` branch below
+     * and un-grouped an already-grouped task. Comparing against the row's
+     * actual current value closes that.
      */
     public function move(int $tenantId, int $taskId, string $body): Response
     {
@@ -304,7 +379,8 @@ final class TasksApiHandler
         $fields = [];
         $params = [':id' => $taskId, ':tenant_id' => $tenantId];
 
-        $sectionChanging = array_key_exists('section_id', $decoded);
+        $sectionChanging = array_key_exists('section_id', $decoded)
+            && (int) $decoded['section_id'] !== (int) $row['section_id'];
         $groupProvided = array_key_exists('group_id', $decoded);
         // The section a supplied group_id must belong to: the NEW section_id
         // if this same request is also changing it, otherwise the task's
@@ -385,8 +461,15 @@ final class TasksApiHandler
 
     /**
      * DELETE /api/tasker/tasks/{id} — cascades to the task's own milestones
-     * and discussion (Tasks 6-7's FKs). entity_tags rows referencing this
-     * task become orphaned — accepted, see §6/the project delete() docblock.
+     * and discussion (Tasks 6-7's FKs).
+     *
+     * CARRY-OVER FIX (D1b Task 6): entity_tags rows referencing this task
+     * used to be left behind as orphans (entity_tags carries no FK to
+     * tasker_tasks). Now cleaned up via core's own
+     * {@see EntityTagRepository::detachAll()} — the canonical writer for
+     * entity_tags, same as tag()'s own attach() call above — BEFORE the
+     * DELETE, since the row still needs to exist for the earlier
+     * findScoped() 404 check but detachAll() itself does not depend on it.
      */
     public function delete(int $tenantId, int $taskId): Response
     {
@@ -396,6 +479,12 @@ final class TasksApiHandler
         }
 
         try {
+            // Core's opt-in cleanup. Without it a deleted task leaves
+            // entity_tags rows pointing at an id that no longer exists —
+            // harmless today, but it accumulates and would confuse any later
+            // tag-usage reporting.
+            (new EntityTagRepository($this->db))->detachAll($tenantId, 'tasker_task', $taskId);
+
             $stmt = $this->db->prepare("DELETE FROM tasker_tasks WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id");
             $stmt->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
 

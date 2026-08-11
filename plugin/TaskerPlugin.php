@@ -518,40 +518,58 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
-                'path' => '/api/tasker/sections/{sectionId:\d+}/tasks',
-                'handler' => [$this, 'listTasksForSection'],
+                'path' => '/api/tasker/tasks',
+                'handler' => [$this, 'listTasks'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:view',
                 'schema' => [
                     'operationId' => 'list_tasks',
-                    'summary' => 'List a section\'s tasks',
+                    'summary' => 'List tasks, filtered by project, section, group or status',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'project_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
+                        ['name' => 'section_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Section UUID or id.'],
+                        ['name' => 'group_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Group UUID or id.'],
+                        ['name' => 'status', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string', 'enum' => ['pending', 'in_progress', 'done', 'all']], 'description' => 'Defaults to excluding done tasks. Pass "all" to include everything.'],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The task list'],
-                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                        404 => ['description' => 'A supplied filter did not resolve in scope'],
                     ],
                 ],
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/sections/{sectionId:\d+}/tasks',
+                'path' => '/api/tasker/tasks',
                 'handler' => [$this, 'createTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:edit',
                 'schema' => [
                     'operationId' => 'create_task',
-                    'summary' => 'Create a task in a section',
+                    'summary' => 'Create a task',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['text'],
+                        'properties' => [
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix, slug, UUID or id. Omit to use your default project.'],
+                            'section_id' => ['type' => 'string', 'description' => 'Optional. Defaults to the project\'s Backlog section.'],
+                            'text' => ['type' => 'string', 'description' => 'Task title'],
+                            'detail' => ['type' => 'string', 'description' => 'Context. Write so a cold reader with no chat history can act on this task alone.'],
+                            'priority' => ['type' => 'string', 'enum' => ['rush', 'high', 'medium', 'low']],
+                            'due_date' => ['type' => 'string', 'description' => 'ISO date YYYY-MM-DD'],
+                        ],
+                    ],
                     'responses' => [
                         201 => ['description' => 'The created task'],
-                        400 => ['description' => 'text missing, empty, too long, or priority invalid'],
-                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                        400 => ['description' => 'text missing/empty/too long, or priority invalid'],
+                        404 => ['description' => 'Project or section not found in scope'],
                     ],
                 ],
             ],
             [
                 'method' => 'PATCH',
-                'path' => '/api/tasker/tasks/{id:\d+}',
+                'path' => '/api/tasker/tasks',
                 'handler' => [$this, 'updateTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:edit',
@@ -559,6 +577,17 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'update_task',
                     'summary' => 'Update a task\'s text, detail, priority, or due_date',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'text' => ['type' => 'string'],
+                            'detail' => ['type' => ['string', 'null']],
+                            'priority' => ['type' => ['string', 'null'], 'enum' => ['rush', 'high', 'medium', 'low', null]],
+                            'due_date' => ['type' => ['string', 'null'], 'description' => 'ISO date YYYY-MM-DD, or null to clear.'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The updated task'],
                         400 => ['description' => 'text empty/too long, or priority invalid'],
@@ -568,7 +597,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/tasks/{id:\d+}/move',
+                'path' => '/api/tasker/tasks/move',
                 'handler' => [$this, 'moveTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:edit',
@@ -576,6 +605,16 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'move_task',
                     'summary' => 'Move a task to a different section/group, or reorder it',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'section_id' => ['type' => 'string'],
+                            'group_id' => ['type' => ['string', 'null']],
+                            'sort_order' => ['type' => 'integer'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The moved task'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -585,7 +624,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'DELETE',
-                'path' => '/api/tasker/tasks/{id:\d+}',
+                'path' => '/api/tasker/tasks',
                 'handler' => [$this, 'deleteTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:delete',
@@ -593,6 +632,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'delete_task',
                     'summary' => 'Delete a task',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                        ],
+                    ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -601,7 +647,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/tasks/{id:\d+}/complete',
+                'path' => '/api/tasker/tasks/complete',
                 'handler' => [$this, 'completeTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:complete',
@@ -609,6 +655,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'complete_task',
                     'summary' => 'Mark a task complete',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The completed task'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -617,7 +670,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/tasks/{id:\d+}/uncomplete',
+                'path' => '/api/tasker/tasks/uncomplete',
                 'handler' => [$this, 'uncompleteTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:complete',
@@ -625,6 +678,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'uncomplete_task',
                     'summary' => 'Restore a completed task to pending',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The reopened task'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -633,7 +693,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/tasks/{id:\d+}/pin',
+                'path' => '/api/tasker/tasks/pin',
                 'handler' => [$this, 'pinTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:edit',
@@ -641,6 +701,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'pin_task',
                     'summary' => 'Pin a task',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The pinned task'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -649,7 +716,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/tasks/{id:\d+}/unpin',
+                'path' => '/api/tasker/tasks/unpin',
                 'handler' => [$this, 'unpinTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:edit',
@@ -657,6 +724,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'unpin_task',
                     'summary' => 'Unpin a task',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The unpinned task'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
@@ -665,7 +739,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'POST',
-                'path' => '/api/tasker/tasks/{id:\d+}/tags',
+                'path' => '/api/tasker/tasks/tags',
                 'handler' => [$this, 'tagTask'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:edit',
@@ -673,6 +747,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'tag_task',
                     'summary' => 'Attach an existing tag to a task',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id', 'tag_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'tag_id' => ['type' => 'integer'],
+                        ],
+                    ],
                     'responses' => [
                         201 => ['description' => 'Tag attached'],
                         400 => ['description' => 'tag_id missing or not a positive integer'],
@@ -682,7 +764,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             ],
             [
                 'method' => 'GET',
-                'path' => '/api/tasker/projects/{id:\d+}/ready-work',
+                'path' => '/api/tasker/ready-work',
                 'handler' => [$this, 'getReadyWork'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_task:view',
@@ -690,6 +772,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'get_ready_work',
                     'summary' => 'List a project\'s non-done tasks, ranked by what to work on next',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'project_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The ranked task list'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
@@ -1508,22 +1593,92 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * GET /api/tasker/sections/{sectionId}/tasks
+     * GET /api/tasker/tasks?project_id=&section_id=&group_id=&status=
+     *
+     * project_id follows listSections()'s own shape exactly (optional,
+     * falling back to the caller's default project, 404 if neither
+     * resolves). section_id and group_id have no such default (there is no
+     * "default section/group" concept) — they stay pure optional filters,
+     * resolved only when supplied, each scoped to whichever parent was
+     * already resolved above it (section_id under project_id, group_id
+     * under section_id) so a slug form remains unambiguous. status defaults
+     * to 'pending', matching the original's own default of excluding done
+     * tasks.
      *
      * @param array<string, string> $params
      */
-    public function listTasksForSection(Request $request, array $params = []): Response
+    public function listTasks(Request $request, array $params = []): Response
     {
         $tenantId = $this->requireTenantId();
         if ($tenantId === null) {
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))->listForSection($tenantId, (int) ($params['sectionId'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawProject = $this->queryParam($request, 'project_id');
+        if (IdentifierResolver::classify($rawProject) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $rawProject,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $rawSection = $this->queryParam($request, 'section_id');
+        if (IdentifierResolver::classify($rawSection) === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+        $sectionId = null;
+        if (IdentifierResolver::classify($rawSection) !== 'empty') {
+            $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSection, $projectId);
+            if ($sectionId === null) {
+                return Response::error('Section not found', 404);
+            }
+        }
+
+        $rawGroup = $this->queryParam($request, 'group_id');
+        if (IdentifierResolver::classify($rawGroup) === 'malformed_short_id') {
+            return Response::error('group_id looks like a short id but is malformed', 400);
+        }
+        $groupId = null;
+        if (IdentifierResolver::classify($rawGroup) !== 'empty') {
+            $groupId = IdentifierResolver::resolveGroup($pdo, $tenantId, $ou['ouId'], $rawGroup, $sectionId);
+            if ($groupId === null) {
+                return Response::error('Group not found', 404);
+            }
+        }
+
+        $status = $this->queryParam($request, 'status') ?? 'pending';
+        if (!in_array($status, ['pending', 'in_progress', 'done', 'all'], true)) {
+            return Response::error('status must be one of: pending, in_progress, done, all', 400);
+        }
+
+        return (new TasksApiHandler($pdo))->listFiltered($tenantId, $projectId, $sectionId, $groupId, $status);
     }
 
     /**
-     * POST /api/tasker/sections/{sectionId}/tasks
+     * POST /api/tasker/tasks
+     *
+     * project_id is optional (falls back to the caller's default project,
+     * like createSection()). section_id is ALSO optional here — new
+     * behaviour for D1b: when omitted, the task defaults into the resolved
+     * project's Backlog section (slug 'backlog'), since tasker_tasks.section_id
+     * is NOT NULL by design (the original's "ungrouped if omitted" has no
+     * literal equivalent). 404s if the resolved project has no backlog
+     * section at all — impossible for a project created through
+     * create_project (which always seeds one), but reachable for an
+     * imported project that never got one.
      *
      * @param array<string, string> $params
      */
@@ -1535,18 +1690,50 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
         }
+
+        $rawProject = $this->identifierFromRequest($request, 'project_id');
+        if (IdentifierResolver::classify($rawProject) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $rawProject,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $rawSection = $this->identifierFromRequest($request, 'section_id');
+        if (IdentifierResolver::classify($rawSection) === 'malformed_short_id') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+
+        if (IdentifierResolver::classify($rawSection) === 'empty') {
+            $sectionId = $this->backlogSectionIdFor($pdo, $tenantId, $projectId);
+            if ($sectionId === null) {
+                return Response::error('Project has no backlog section', 404);
+            }
+        } else {
+            $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSection, $projectId);
+            if ($sectionId === null) {
+                return Response::error('Section not found', 404);
+            }
+        }
+
         $createdBy = $this->callerProfileId($request) ?? 0;
 
-        return (new TasksApiHandler($pdo))
-            ->create($tenantId, $callerOu['ouId'], (int) ($params['sectionId'] ?? 0), $createdBy, $request->getBody());
+        return (new TasksApiHandler($pdo))->create($tenantId, $sectionId, $createdBy, $request->getBody());
     }
 
     /**
-     * PATCH /api/tasker/tasks/{id}
+     * PATCH /api/tasker/tasks
      *
      * @param array<string, string> $params
      */
@@ -1557,12 +1744,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))
-            ->update($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->update($tenantId, $taskId, $request->getBody());
     }
 
     /**
-     * POST /api/tasker/tasks/{id}/move
+     * POST /api/tasker/tasks/move
      *
      * @param array<string, string> $params
      */
@@ -1573,12 +1780,38 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))
-            ->move($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->move($tenantId, $taskId, $request->getBody());
     }
 
     /**
-     * DELETE /api/tasker/tasks/{id}
+     * DELETE /api/tasker/tasks
+     *
+     * NOTE: deliberately does NOT require the body to decode as a JSON
+     * object — see {@see self::identifierFromRequest()}'s docblock for why a
+     * DELETE request here may legitimately carry no body at all, and reads
+     * task_id via identifierFromRequest() (body-then-query) rather than the
+     * body alone for the same reason.
      *
      * @param array<string, string> $params
      */
@@ -1589,11 +1822,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))->delete($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->delete($tenantId, $taskId);
     }
 
     /**
-     * POST /api/tasker/tasks/{id}/complete
+     * POST /api/tasker/tasks/complete
      *
      * @param array<string, string> $params
      */
@@ -1604,11 +1853,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))->complete($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->complete($tenantId, $taskId);
     }
 
     /**
-     * POST /api/tasker/tasks/{id}/uncomplete
+     * POST /api/tasker/tasks/uncomplete
      *
      * @param array<string, string> $params
      */
@@ -1619,11 +1884,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))->uncomplete($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->uncomplete($tenantId, $taskId);
     }
 
     /**
-     * POST /api/tasker/tasks/{id}/pin
+     * POST /api/tasker/tasks/pin
      *
      * @param array<string, string> $params
      */
@@ -1634,11 +1915,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))->pin($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->pin($tenantId, $taskId);
     }
 
     /**
-     * POST /api/tasker/tasks/{id}/unpin
+     * POST /api/tasker/tasks/unpin
      *
      * @param array<string, string> $params
      */
@@ -1649,11 +1946,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))->unpin($tenantId, (int) ($params['id'] ?? 0));
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->unpin($tenantId, $taskId);
     }
 
     /**
-     * POST /api/tasker/tasks/{id}/tags
+     * POST /api/tasker/tasks/tags
      *
      * @param array<string, string> $params
      */
@@ -1664,11 +1977,31 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
-        return (new TasksApiHandler($this->resolvePdo()))->tag($tenantId, (int) ($params['id'] ?? 0), $request->getBody());
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->tag($tenantId, $taskId, $request->getBody());
     }
 
     /**
-     * GET /api/tasker/projects/{id}/ready-work
+     * GET /api/tasker/ready-work?project_id=
+     *
+     * project_id follows listSections()'s own shape exactly (optional,
+     * falling back to the caller's default project, 404 if neither
+     * resolves).
      *
      * @param array<string, string> $params
      */
@@ -1680,13 +2013,28 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new TasksApiHandler($pdo))
-            ->readyWork($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
+        $raw = $this->queryParam($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        return (new TasksApiHandler($pdo))->readyWork($tenantId, $ou['ouId'], $projectId);
     }
 
     /**
@@ -2071,6 +2419,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         return $profileId === null
             ? null
             : SessionApiHandler::defaultProjectId($this->resolvePdo(), $tenantId, $profileId);
+    }
+
+    /**
+     * The Backlog section id for $projectId, or null when the project has
+     * none — used by createTask() as the fallback when section_id is
+     * omitted (D1b: our tasker_tasks.section_id is NOT NULL, so "ungrouped
+     * if omitted" from the original becomes "goes to Backlog" here instead).
+     * Every project created through create_project always seeds a 'backlog'
+     * section (see ProjectsApiHandler::create()); this only returns null for
+     * a project that reached this state some other way, e.g. imported
+     * without one.
+     *
+     * Tenant-scoped only, matching the class docblock's reasoning on
+     * TasksApiHandler: $projectId arriving here has already been resolved
+     * (and OU-checked) by IdentifierResolver::resolveProject() above in
+     * createTask(), so this is a discovered value, not a raw path parameter.
+     */
+    private function backlogSectionIdFor(\PDO $pdo, int $tenantId, int $projectId): ?int
+    {
+        $stmt = $pdo->prepare(
+            "SELECT id FROM tasker_sections WHERE project_id = :project_id AND tenant_id = :tenant_id AND slug = 'backlog' LIMIT 1"
+        );
+        $stmt->execute([':project_id' => $projectId, ':tenant_id' => $tenantId]);
+        $id = $stmt->fetchColumn();
+
+        return $id === false ? null : (int) $id;
     }
 
     /**

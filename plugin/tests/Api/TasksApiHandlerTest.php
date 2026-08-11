@@ -11,23 +11,26 @@ use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Tests\Support\SqlitePolyfills;
 
 /**
- * NOTE ON WHAT MOVED (whole-branch review finding C1): create()'s
- * section-existence check used to be tenant-scoped only; it is now OU-aware,
- * joining tasker_sections to tasker_projects and calling
- * OuScopeResolver::whereFragment() UNCONDITIONALLY — PostgreSQL's
- * `= ANY(:scope)`, which SQLite's PDO::prepare() rejects outright regardless
- * of runtime branching. The four tests that exercised create() directly
- * (testCreateStampsTenantAndDefaultsStatusToPending,
- * testCreateRejectsASectionOutsideTheCallersTenant,
- * testCreateAcceptsAValidPriority, testCreateRejectsAnInvalidPriority) moved
- * to TenantIsolationOuTest.php (Postgres-backed), alongside new OU-boundary
- * regression tests proving the fix. Every OTHER test below only ever used
- * create() as a convenience fixture-builder for some other method under
- * test (update/move/delete/complete/pin/tag/listForSection) — those now
- * build their task fixture via insertTaskDirect() (a raw INSERT bypassing
- * create() entirely) so they stay on SQLite unchanged in every other
- * respect. listForSection() itself remains tenant-scoped only (finding I7)
- * and has no Postgres-only syntax, so it keeps its SQLite coverage as-is.
+ * NOTE ON WHAT MOVED, AND WHAT MOVED BACK (whole-branch review finding C1,
+ * superseded by D1b Task 6): create()'s section-existence check was OU-aware
+ * for a while — joining tasker_sections to tasker_projects and calling
+ * OuScopeResolver::whereFragment() UNCONDITIONALLY, PostgreSQL's
+ * `= ANY(:scope)`, which SQLite's PDO::prepare() rejects outright — so its
+ * direct tests lived in TenantIsolationOuTest.php (Postgres-backed) instead
+ * of here. D1b's route flattening removed the reason: POST /api/tasker/tasks
+ * now resolves section_id via IdentifierResolver::resolveSection() (itself
+ * OU-aware) in TaskerPlugin::createTask() BEFORE create() ever runs, so
+ * create() dropped its own $callerOuId parameter and OU check entirely — see
+ * TasksApiHandler::create()'s own docblock. Its tenant-scoped tests
+ * (testCreateStampsTenantAndDefaultsStatusToPending et al.) are back on
+ * SQLite here; only the OU-boundary regression test stayed retired, since
+ * IdentifierResolver::resolveSection()'s own sibling-OU coverage in
+ * TenantIsolationOuTest.php already proves that boundary.
+ *
+ * Every OTHER test below that predates this task still uses
+ * insertTaskDirect() (a raw INSERT bypassing create()) purely as a
+ * convenience fixture-builder for some other method under test
+ * (update/move/delete/complete/pin/tag/listForSection) — left unchanged.
  */
 final class TasksApiHandlerTest extends TestCase
 {
@@ -137,6 +140,91 @@ final class TasksApiHandlerTest extends TestCase
                 PRIMARY KEY (entity_type, entity_id, tag_id)
             )
         ');
+    }
+
+    /**
+     * D1b Task 6: list_tasks generalises listForSection() into project/
+     * section/group/status filters. The original defaults to excluding done
+     * tasks and accepts 'all' to include everything.
+     */
+    public function testListFilteredExcludesDoneByDefaultAndIncludesItOnAll(): void
+    {
+        $open = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Open']))->getBody(), true);
+        $done = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Done']))->getBody(), true);
+        $this->handler->complete(7, (int) $done['data']['id']);
+
+        $default = json_decode($this->handler->listFiltered(7, null, 1, null, 'pending')->getBody(), true);
+        self::assertCount(1, $default['data']);
+        self::assertSame('Open', $default['data'][0]['text']);
+
+        $all = json_decode($this->handler->listFiltered(7, null, 1, null, 'all')->getBody(), true);
+        self::assertCount(2, $all['data']);
+    }
+
+    public function testListFilteredByProjectSpansEverySectionOfThatProject(): void
+    {
+        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
+        $this->handler->create(7, 1, 3, json_encode(['text' => 'In section 1']));
+        $this->handler->create(7, 3, 3, json_encode(['text' => 'In section 3']));
+
+        $payload = json_decode($this->handler->listFiltered(7, 100, null, null, 'all')->getBody(), true);
+
+        self::assertCount(2, $payload['data']);
+    }
+
+    /**
+     * D1b Task 6: create()'s section-existence check dropped its OU-awareness
+     * (moved to IdentifierResolver::resolveSection() at the route layer — see
+     * TasksApiHandler::create()'s own docblock), so it now runs happily
+     * against this file's plain SQLite double with a tenant-scoped-only
+     * signature: (tenantId, sectionId, createdBy, body).
+     */
+    public function testCreateStampsTenantAndDefaultsStatusToPending(): void
+    {
+        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Ship it']));
+
+        self::assertSame(201, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('pending', $payload['data']['status']);
+        self::assertSame('Ship it', $payload['data']['text']);
+        self::assertSame(100, $payload['data']['projectId']);
+    }
+
+    public function testCreateAcceptsDetailAndDueDate(): void
+    {
+        $response = $this->handler->create(7, 1, 3, json_encode([
+            'text' => 'With extras',
+            'detail' => 'Cold-reader context',
+            'due_date' => '2026-09-01',
+        ]));
+
+        self::assertSame(201, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Cold-reader context', $payload['data']['detail']);
+        self::assertSame('2026-09-01', $payload['data']['dueDate']);
+    }
+
+    public function testCreateRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        // Section 2 belongs to tenant 9, not the caller's tenant 7.
+        $response = $this->handler->create(7, 2, 3, json_encode(['text' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testCreateAcceptsAValidPriority(): void
+    {
+        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Urgent', 'priority' => 'rush']));
+
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('rush', $payload['data']['priority']);
+    }
+
+    public function testCreateRejectsAnInvalidPriority(): void
+    {
+        $response = $this->handler->create(7, 1, 3, json_encode(['text' => 'Bad', 'priority' => 'urgent-ish']));
+
+        self::assertSame(400, $response->getStatusCode());
     }
 
     public function testCompleteSetsStatusAndCompletedAt(): void
@@ -254,6 +342,29 @@ final class TasksApiHandlerTest extends TestCase
         self::assertNull($payload['data']['groupId'], 'a group from the OLD section must not silently survive a move to a new section');
     }
 
+    /**
+     * CARRY-OVER BUG FIX (D1b Task 6): $sectionChanging used to be set from
+     * `array_key_exists('section_id', $decoded)` alone -- SUPPLIED, not
+     * CHANGED. A reorder that echoes the task's CURRENT section_id (exactly
+     * what a drag-and-drop client sends) was silently treated as a section
+     * change, which cleared group_id via the sibling `elseif` branch and
+     * un-grouped an already-grouped task.
+     */
+    public function testMoveKeepsTheGroupWhenSectionIdIsEchoedUnchanged(): void
+    {
+        $this->pdo->exec('CREATE TABLE IF NOT EXISTS tasker_groups (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, section_id INTEGER NOT NULL)');
+        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (1, 7, 1)');
+        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Grouped']))->getBody(), true);
+        $taskId = (int) $created['data']['id'];
+        $this->handler->move(7, $taskId, json_encode(['section_id' => 1, 'group_id' => 1]));
+
+        // A reorder that echoes the CURRENT section must not un-group.
+        $payload = json_decode($this->handler->move(7, $taskId, json_encode(['section_id' => 1, 'sort_order' => 5]))->getBody(), true);
+
+        self::assertSame(1, $payload['data']['groupId'], 'echoing the current section_id must not clear group_id');
+        self::assertSame(5, $payload['data']['sortOrder']);
+    }
+
     public function testMoveRejectsASectionFromADifferentProject(): void
     {
         $this->pdo->exec("INSERT INTO tasker_projects (id, tenant_id) VALUES (200, 7)");
@@ -331,6 +442,11 @@ final class TasksApiHandlerTest extends TestCase
 
     public function testDeleteRemovesTheTask(): void
     {
+        // delete() now also calls EntityTagRepository::detachAll() (D1b
+        // Task 6's carry-over fix), which issues a DELETE against
+        // entity_tags unconditionally — that table must exist even when
+        // this particular task was never tagged.
+        $this->createEntityTagsTable();
         $taskId = $this->insertTaskDirect(7, 100, 1, 'Doomed');
 
         $response = $this->handler->delete(7, $taskId);
@@ -346,6 +462,30 @@ final class TasksApiHandlerTest extends TestCase
         $response = $this->handler->delete(9, 999);
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * CARRY-OVER FIX (D1b Task 6): deleting a tagged task used to orphan its
+     * entity_tags rows (entity_tags carries no FK to tasker_tasks). Now
+     * cleaned up via core's EntityTagRepository::detachAll().
+     */
+    public function testDeleteRemovesTheTasksEntityTagRows(): void
+    {
+        $this->pdo->exec('
+            CREATE TABLE entity_tags (
+                tenant_id INTEGER NOT NULL, entity_type VARCHAR(128) NOT NULL, entity_id BIGINT NOT NULL,
+                tag_id BIGINT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                PRIMARY KEY (entity_type, entity_id, tag_id)
+            )
+        ');
+        $created = json_decode($this->handler->create(7, 1, 3, json_encode(['text' => 'Tagged then deleted']))->getBody(), true);
+        $taskId = (int) $created['data']['id'];
+        $this->pdo->exec("INSERT INTO entity_tags (tenant_id, entity_type, entity_id, tag_id) VALUES (7, 'tasker_task', {$taskId}, 11)");
+
+        $this->handler->delete(7, $taskId);
+
+        $orphans = (int) $this->pdo->query("SELECT COUNT(*) FROM entity_tags WHERE entity_type = 'tasker_task' AND entity_id = {$taskId}")->fetchColumn();
+        self::assertSame(0, $orphans);
     }
 
     public function testUncompleteRestoresPendingStatusAndClearsCompletedAt(): void
