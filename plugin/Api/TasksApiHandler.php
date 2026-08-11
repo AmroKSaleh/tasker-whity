@@ -14,16 +14,23 @@ use Whity\Sdk\Http\Response;
 
 /**
  * Tenant-scoped CRUD, move, pin/unpin, complete/uncomplete, and entity-tag
- * attachment for tasker_tasks, plus the OU-scoped readyWork() ranked query.
+ * attachment for tasker_tasks, plus the OU-scoped readyWork()/getOne()/
+ * moveToGroup() queries.
  *
  * update()/move()/delete()/complete()/uncomplete()/pin()/unpin()/tag() are
  * tenant-scoped only — a caller only ever reaches an individual task's id
  * after already holding it from an OU-scoped list (listForSection()/
  * listFiltered() or get_board), so re-checking OU scope on every
- * single-task mutation would be redundant. readyWork() is the one
- * exception: it is reached directly by project id, not through a task the
- * caller already holds, so it re-derives and checks OU visibility itself,
- * exactly like get_board.
+ * single-task mutation would be redundant. readyWork() is one exception: it
+ * is reached directly by project id, not through a task the caller already
+ * holds, so it re-derives and checks OU visibility itself, exactly like
+ * get_board. getOne() (D1b Task 8) and moveToGroup() (D1b Task 9) are two
+ * more: both are the caller's FIRST hop straight to a task by identifier —
+ * a get and, more seriously, a MUTATION — reachable by simply guessing a
+ * sequential BIGSERIAL id, so both re-derive and check OU visibility via
+ * {@see self::findVisible()} rather than trusting the task id the way
+ * update()/move()/etc. do. See getOne()'s own docblock for the full
+ * reasoning, which moveToGroup()'s docblock refers back to.
  *
  * create()'s section-existence check is ALSO OU-aware (whole-branch review
  * finding C1): {sectionId} is a discovered value with its own separate
@@ -421,11 +428,7 @@ final class TasksApiHandler
 
         if ($sectionChanging) {
             $sectionId = (int) $decoded['section_id'];
-            $section = $this->db->prepare(
-                'SELECT id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id AND project_id = :project_id'
-            );
-            $section->execute([':id' => $sectionId, ':tenant_id' => $tenantId, ':project_id' => $projectId]);
-            if ($section->fetch() === false) {
+            if (!$this->sectionBelongsToProject($tenantId, $sectionId, $projectId)) {
                 return Response::error('section_id must belong to the task\'s own project', 422);
             }
             $fields[] = 'section_id = :section_id';
@@ -435,18 +438,12 @@ final class TasksApiHandler
 
         if ($groupProvided) {
             $groupId = $decoded['group_id'] !== null ? (int) $decoded['group_id'] : null;
-            if ($groupId !== null) {
-                // Validated against the TARGET section directly (tasker_groups
-                // already stores section_id) — not merely the task's project —
-                // so a group_id from a different section can never be attached,
-                // even if that section belongs to the same project.
-                $group = $this->db->prepare(
-                    'SELECT id FROM tasker_groups WHERE id = :id AND tenant_id = :tenant_id AND section_id = :section_id'
-                );
-                $group->execute([':id' => $groupId, ':tenant_id' => $tenantId, ':section_id' => $targetSectionId]);
-                if ($group->fetch() === false) {
-                    return Response::error('group_id must belong to the target section', 422);
-                }
+            // Validated against the TARGET section directly (tasker_groups
+            // already stores section_id) — not merely the task's project —
+            // so a group_id from a different section can never be attached,
+            // even if that section belongs to the same project.
+            if ($groupId !== null && !$this->groupBelongsToSection($tenantId, $groupId, $targetSectionId)) {
+                return Response::error('group_id must belong to the target section', 422);
             }
             $fields[] = 'group_id = :group_id';
             $params[':group_id'] = $groupId;
@@ -488,6 +485,134 @@ final class TasksApiHandler
             return Response::json(['data' => $this->toPublicTask($updated)], 200);
         } catch (\Throwable) {
             return Response::error('Failed to move task', 500);
+        }
+    }
+
+    /**
+     * Whether $sectionId exists, belongs to $tenantId, AND to $projectId —
+     * the project-membership check {@see self::move()}'s own $sectionChanging
+     * branch has always run. Extracted (D1b Task 9) so
+     * {@see self::moveToGroup()} reuses the identical, already-reviewed SQL
+     * rather than a second, subtly different copy of it.
+     */
+    private function sectionBelongsToProject(int $tenantId, int $sectionId, int $projectId): bool
+    {
+        $section = $this->db->prepare(
+            'SELECT id FROM tasker_sections WHERE id = :id AND tenant_id = :tenant_id AND project_id = :project_id'
+        );
+        $section->execute([':id' => $sectionId, ':tenant_id' => $tenantId, ':project_id' => $projectId]);
+
+        return $section->fetch() !== false;
+    }
+
+    /**
+     * Whether $groupId exists, belongs to $tenantId, AND to $sectionId
+     * (tasker_groups already stores section_id directly, so this is never
+     * merely a project-membership check) — the cross-section-grouping check
+     * {@see self::move()}'s own $groupProvided branch has always run.
+     * Extracted (D1b Task 9 brief resolution #4) so
+     * {@see self::moveToGroup()} reuses move()'s own already-reviewed logic
+     * rather than a second convention for the identical rule.
+     */
+    private function groupBelongsToSection(int $tenantId, int $groupId, int $sectionId): bool
+    {
+        $group = $this->db->prepare(
+            'SELECT id FROM tasker_groups WHERE id = :id AND tenant_id = :tenant_id AND section_id = :section_id'
+        );
+        $group->execute([':id' => $groupId, ':tenant_id' => $tenantId, ':section_id' => $sectionId]);
+
+        return $group->fetch() !== false;
+    }
+
+    /**
+     * POST /api/tasker/tasks/group — the original's move_task_to_group:
+     * dedicated to group membership only, deliberately narrower than
+     * move()'s combined section/group/sort_order scope. section_id is
+     * accepted alongside group_id only to let a caller re-target the
+     * group's OWN section in the same call (see the cross-section
+     * validation below) — when supplied, it is written to the task exactly
+     * like move()'s own $sectionChanging branch, keeping the task's
+     * section_id and its group's actual section in agreement (the same
+     * invariant move()'s own docblock — whole-branch review finding I1 —
+     * exists to protect).
+     *
+     * OU-AWARE — DEVIATION FROM THE BRIEF (D1b Task 9 brief resolution #2):
+     * the brief's own stated interface is
+     * `moveToGroup(int $tenantId, int $taskId, ?int $groupId, ?int $sectionId): Response`,
+     * tenant-scoped only, matching move()'s own single-task-id mutations
+     * (see this class's own docblock for why those stay tenant-scoped:
+     * a caller only ever reaches an individual task id after already
+     * holding it from an OU-scoped list/get_board). This method is a
+     * mutation reachable by guessing a sequential BIGSERIAL task id — a
+     * strictly STRONGER case than {@see self::getOne()}'s own OU-aware read
+     * (D1b Task 8), which was made OU-aware for the identical reason. Its
+     * coverage therefore lives entirely in TenantIsolationOuTest.php
+     * (Postgres), never in TasksApiHandlerTest.php (SQLite) — see that
+     * file's own docblock for the full reasoning every other OU-aware
+     * method in this class already documents.
+     *
+     * group_id ABSENT and group_id EXPLICIT NULL are IDENTICAL at this
+     * layer: both arrive here as a plain `null` (D1b Task 9 brief
+     * resolution #3 — the route layer, TaskerPlugin::moveTaskToGroup(),
+     * collapses the two statuses via its own resolveGroupMembership()
+     * before ever calling this method). move_task_to_group exists SOLELY to
+     * set group membership, so there is no "leave unchanged" form the way
+     * move()'s own array_key_exists()-based group_id handling has — and
+     * that is a deliberate divergence, not an oversight: it is exactly what
+     * keeps this method from reproducing move()'s own known carry-over
+     * defect (see move()'s docblock) of conflating "supplied" with
+     * "changed".
+     */
+    public function moveToGroup(int $tenantId, ?int $callerOuId, int $taskId, ?int $groupId, ?int $sectionId): Response
+    {
+        $row = $this->findVisible($tenantId, $callerOuId, $taskId);
+        if ($row === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $projectId = (int) $row['project_id'];
+
+        if ($sectionId !== null && !$this->sectionBelongsToProject($tenantId, $sectionId, $projectId)) {
+            return Response::error('section_id must belong to the task\'s own project', 422);
+        }
+
+        // The section a supplied group_id must belong to: the NEW section_id
+        // when this same request is also changing it, otherwise the task's
+        // current (unchanged) section_id — identical rule to move()'s own
+        // $targetSectionId.
+        $targetSectionId = $sectionId ?? (int) $row['section_id'];
+
+        if ($groupId !== null && !$this->groupBelongsToSection($tenantId, $groupId, $targetSectionId)) {
+            return Response::error('group_id must belong to the target section', 422);
+        }
+
+        $fields = ['group_id = :group_id'];
+        $params = [':id' => $taskId, ':tenant_id' => $tenantId, ':group_id' => $groupId];
+        if ($sectionId !== null) {
+            $fields[] = 'section_id = :section_id';
+            $params[':section_id'] = $sectionId;
+        }
+        $fields[] = 'updated_at = CURRENT_TIMESTAMP';
+
+        try {
+            $sql = 'UPDATE tasker_tasks SET ' . implode(', ', $fields) . " WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id";
+            $stmt = $this->db->prepare($sql);
+            $stmt->execute($params);
+
+            $updated = $this->findScoped($taskId, $tenantId);
+            if ($updated === null) {
+                return Response::error('Task not found', 404);
+            }
+
+            (new AuditLogger($this->db))->record('tasker_task.moved_to_group', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_task',
+                'target_id' => $taskId,
+            ]);
+
+            return Response::json(['data' => $this->toPublicTask($updated)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to move task to group', 500);
         }
     }
 

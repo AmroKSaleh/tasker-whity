@@ -1839,4 +1839,197 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(400, $response->getStatusCode());
     }
+
+    // ==================== ProjectsApiHandler::updateContext() (D1b Task 9: update_project_context) ====================
+    //
+    // ProjectsApiHandler has no SQLite-backed unit test file at all (see this
+    // class's own header docblock) — every one of its methods needs a real
+    // PostgreSQL connection (RETURNING id, OuScopeResolver::whereFragment()'s
+    // `= ANY(:scope)`), and updateContext() additionally needs the jsonb `||`
+    // operator, itself PostgreSQL-only. All of its coverage lives here.
+
+    /**
+     * The brief's own Step 1 test (D1b Task 9), adapted to the real 5-arg
+     * handler signature — merge is the default (an absent `replace`), and
+     * preserves keys the write does not touch; `$merge = false` replaces the
+     * whole document instead.
+     */
+    public function testUpdateContextMergesByDefaultAndReplacesWhenAsked(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Context Project');
+        $handler = new ProjectsApiHandler($this->pdo);
+
+        $handler->updateContext(7, null, $projectId, ['goal' => 'First goal', 'why' => 'Because'], true);
+        $merged = json_decode($handler->updateContext(7, null, $projectId, ['goal' => 'Second goal'], true)->getBody(), true);
+
+        self::assertSame('Second goal', $merged['data']['context']['goal']);
+        self::assertSame('Because', $merged['data']['context']['why'], 'merge must preserve keys not being written');
+
+        $replaced = json_decode($handler->updateContext(7, null, $projectId, ['goal' => 'Only goal'], false)->getBody(), true);
+        self::assertArrayNotHasKey('why', $replaced['data']['context'], 'merge=false must discard everything not in the new document');
+        self::assertSame('Only goal', $replaced['data']['context']['goal']);
+    }
+
+    /**
+     * D1b Task 9 brief resolution #6: the merge uses jsonb `||`, which is a
+     * SHALLOW merge — a nested object is replaced wholesale, not deep-merged
+     * key-by-key. Pins that behaviour directly, since a caller could
+     * otherwise reasonably assume the opposite.
+     */
+    public function testUpdateContextMergeIsShallowNotDeep(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Shallow Merge Project');
+        $handler = new ProjectsApiHandler($this->pdo);
+
+        $handler->updateContext(7, null, $projectId, ['scope' => ['in' => ['a'], 'out' => ['b']]], true);
+        $merged = json_decode(
+            $handler->updateContext(7, null, $projectId, ['scope' => ['in' => ['a', 'c']]], true)->getBody(),
+            true
+        );
+
+        self::assertSame(['a', 'c'], $merged['data']['context']['scope']['in']);
+        self::assertArrayNotHasKey(
+            'out',
+            $merged['data']['context']['scope'],
+            'jsonb || replaces the WHOLE "scope" value, it does not merge nested keys — a deep merge would keep "out"'
+        );
+    }
+
+    public function testUpdateContextRejects404ForAProjectOutsideTheCallersTenant(): void
+    {
+        $otherTenantProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->updateContext(7, null, $otherTenantProjectId, ['goal' => 'Should fail'], true);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testUpdateContextRejects404ForAProjectOutsideTheCallersOuScope(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        // Caller is scoped to OU 2; OU 3 is a sibling, outside their scope.
+        $response = $handler->updateContext(7, 2, $siblingProjectId, ['goal' => 'Should fail'], true);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== TasksApiHandler::moveToGroup() (D1b Task 9: move_task_to_group) ====================
+    //
+    // moveToGroup() is OU-aware (D1b Task 9 brief resolution #2 — see that
+    // method's own docblock in TasksApiHandler and TasksApiHandlerTest's own
+    // note on why it has no SQLite coverage). All of its coverage lives here.
+
+    public function testMoveToGroupSetsTheGroupThenExplicitNullUngroups(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Group Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId = $this->makeGroupDirect(7, $sectionId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Groupable');
+
+        $handler = new TasksApiHandler($this->pdo);
+
+        $grouped = json_decode($handler->moveToGroup(7, null, $taskId, $groupId, null)->getBody(), true);
+        self::assertSame($groupId, $grouped['data']['groupId']);
+
+        $ungrouped = json_decode($handler->moveToGroup(7, null, $taskId, null, null)->getBody(), true);
+        self::assertNull($ungrouped['data']['groupId'], 'group_id null must un-group, per the original contract');
+    }
+
+    public function testMoveToGroupRejectsAGroupIdFromADifferentSection(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Cross Section Project');
+        $taskSectionId = $this->makeSectionDirect(7, $projectId);
+        $otherSectionStmt = $this->pdo->prepare(
+            "INSERT INTO tasker_sections (public_id, tenant_id, project_id, name, slug, created_at)
+             VALUES (gen_random_uuid(), 7, :project_id, 'Other', 'other', CURRENT_TIMESTAMP) RETURNING id"
+        );
+        $otherSectionStmt->execute([':project_id' => $projectId]);
+        $otherSectionId = (int) $otherSectionStmt->fetchColumn();
+        $groupInOtherSection = $this->makeGroupDirect(7, $otherSectionId, 'Elsewhere');
+        $taskId = $this->makeTaskDirect(7, $projectId, $taskSectionId, 'Movable');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToGroup(7, null, $taskId, $groupInOtherSection, null);
+
+        self::assertSame(422, $response->getStatusCode());
+    }
+
+    /**
+     * When section_id is supplied alongside group_id, the group is validated
+     * against — and the task is actually moved into — the NEW section, and
+     * the write is atomic: both columns land in the same UPDATE.
+     */
+    public function testMoveToGroupMovesTheTasksSectionWhenSectionIdIsSupplied(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Move With Group Project');
+        $sourceSectionId = $this->makeSectionDirect(7, $projectId);
+        $targetSectionStmt = $this->pdo->prepare(
+            "INSERT INTO tasker_sections (public_id, tenant_id, project_id, name, slug, created_at)
+             VALUES (gen_random_uuid(), 7, :project_id, 'Target', 'target', CURRENT_TIMESTAMP) RETURNING id"
+        );
+        $targetSectionStmt->execute([':project_id' => $projectId]);
+        $targetSectionId = (int) $targetSectionStmt->fetchColumn();
+        $groupInTargetSection = $this->makeGroupDirect(7, $targetSectionId, 'Target Group');
+        $taskId = $this->makeTaskDirect(7, $projectId, $sourceSectionId, 'Moving with its new group');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToGroup(7, null, $taskId, $groupInTargetSection, $targetSectionId);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame($targetSectionId, $payload['data']['sectionId']);
+        self::assertSame($groupInTargetSection, $payload['data']['groupId']);
+    }
+
+    public function testMoveToGroupRejectsASectionIdFromADifferentProject(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Own Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $otherProjectId = $this->makeProjectDirect(7, null, 'Other Project');
+        $foreignSectionId = $this->makeSectionDirect(7, $otherProjectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Movable');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToGroup(7, null, $taskId, null, $foreignSectionId);
+
+        self::assertSame(422, $response->getStatusCode());
+    }
+
+    public function testMoveToGroupRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToGroup(7, null, $otherTaskId, null, null);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * The stronger of the two boundary tests, mirroring
+     * testTasksGetOneRejects404ForASiblingOusTask() above: a caller scoped to
+     * OU 2 must not be able to mutate OU 3's task simply by supplying its id.
+     */
+    public function testMoveToGroupRejects404ForASiblingOusTask(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToGroup(7, 2, $siblingTaskId, null, null);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
 }

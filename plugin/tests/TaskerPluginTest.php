@@ -627,6 +627,126 @@ final class TaskerPluginTest extends TestCase
     }
 
     /**
+     * D1b Task 9 (move_task_to_group): unlike resolveMoveDestinationId()
+     * above — whose FIVE outcomes keep 'absent' and 'explicit_null' distinct
+     * because move_task's own group_id has a genuine "leave unchanged"
+     * meaning for the first — move_task_to_group has no such meaning at all:
+     * it exists SOLELY to set group membership (brief resolution #3), so an
+     * absent key and an explicit null must produce the IDENTICAL outcome.
+     * resolveGroupMembership() collapses resolveMoveDestinationId()'s five
+     * outcomes into four for exactly that reason. Exercised via Reflection
+     * for the same reason as every other composition helper in this file:
+     * moveTaskToGroup() itself calls resolvePdo(), unreachable from PHPUnit.
+     */
+    private function invokeResolveGroupMembership(
+        array $decoded,
+        PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        callable $resolver
+    ): array {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveGroupMembership');
+        $method->setAccessible(true);
+
+        /** @var array{status: string, value: ?int} $result */
+        $result = $method->invoke($plugin, $decoded, $pdo, $tenantId, $callerOuId, $resolver);
+
+        return $result;
+    }
+
+    public function testResolveGroupMembershipTreatsAnAbsentKeyAsUngroup(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveGroupMembership(['task_id' => 'TDE-1'], $pdo, 7, null, $resolver);
+
+        self::assertSame('ungroup', $result['status']);
+        self::assertNull($result['value']);
+        self::assertFalse($called, 'an absent group_id must un-group without ever calling the resolver');
+    }
+
+    public function testResolveGroupMembershipTreatsAnExplicitNullAsUngroupIdentically(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveGroupMembership(['group_id' => null], $pdo, 7, null, $resolver);
+
+        self::assertSame(
+            'ungroup',
+            $result['status'],
+            'explicit null must produce the IDENTICAL outcome as an absent key -- there is no "leave unchanged" form here'
+        );
+        self::assertNull($result['value']);
+        self::assertFalse($called);
+    }
+
+    public function testResolveGroupMembershipRejectsAMalformedShortIdWithoutCallingTheResolver(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveGroupMembership(['group_id' => 'AB-xyz'], $pdo, 7, null, $resolver);
+
+        self::assertSame('malformed', $result['status']);
+        self::assertNull($result['value']);
+        self::assertFalse($called);
+    }
+
+    public function testResolveGroupMembershipReportsUnresolvedWhenTheResolverFindsNothingRatherThanUngrouping(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $resolver = fn (PDO $pdo, int $tenantId, ?int $callerOuId, $raw): ?int => null;
+
+        $result = $this->invokeResolveGroupMembership(['group_id' => 999], $pdo, 7, null, $resolver);
+
+        self::assertSame(
+            'unresolved',
+            $result['status'],
+            'a supplied group_id that does not resolve must 404 -- it must NEVER be silently treated as "ungroup"'
+        );
+        self::assertNull($result['value']);
+    }
+
+    public function testResolveGroupMembershipCallsTheResolverWithTheExactTupleWhenSupplied(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $seen = null;
+        $resolver = function (PDO $calledPdo, int $tenantId, ?int $callerOuId, $raw) use (&$seen, $pdo): ?int {
+            $seen = [$calledPdo === $pdo, $tenantId, $callerOuId, $raw];
+
+            return 42;
+        };
+
+        $result = $this->invokeResolveGroupMembership(['group_id' => 'TDE'], $pdo, 7, 3, $resolver);
+
+        self::assertSame('resolved', $result['status']);
+        self::assertSame(42, $result['value']);
+        self::assertSame(
+            [true, 7, 3, 'TDE'],
+            $seen,
+            'the resolver must receive the SAME pdo, tenantId, callerOuId, and raw identifier untouched'
+        );
+    }
+
+    /**
      * Task review finding #4 (D1b Task 6): createTask()'s "section_id
      * omitted -> default to the project's Backlog section" composition,
      * extracted the same way — and for the same reason — Task 5 extracted
@@ -986,5 +1106,105 @@ final class TaskerPluginTest extends TestCase
         self::assertSame('resolved', $result['status']);
         self::assertSame(55, $result['taskId']);
         self::assertNull($result['milestoneId']);
+    }
+
+    /**
+     * D1b Task 9 brief resolution #8: update_project_context's `context`
+     * must be a genuine JSON OBJECT — a scalar, a string, or a JSON array
+     * must be rejected with 422, never stored. isJsonObject() is the pure
+     * (no database) predicate updateProjectContext() checks before ever
+     * calling ProjectsApiHandler::updateContext() — extracted so this rule
+     * gets a direct PHPUnit test, since updateProjectContext() itself calls
+     * resolvePdo() and is otherwise unreachable from PHPUnit, the same
+     * reason every other composition helper in this file is Reflection-tested.
+     */
+    private function invokeIsJsonObject(mixed $value): bool
+    {
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'isJsonObject');
+        $method->setAccessible(true);
+
+        /** @var bool $result */
+        $result = $method->invoke(null, $value);
+
+        return $result;
+    }
+
+    public function testIsJsonObjectAcceptsAnAssociativeArray(): void
+    {
+        self::assertTrue($this->invokeIsJsonObject(['goal' => 'Ship it', 'why' => 'Because']));
+    }
+
+    /**
+     * `{}` and `[]` are INDISTINGUISHABLE once json_decode(..., true) has
+     * already run -- PHP represents both as the same empty array -- so an
+     * empty array is accepted here rather than guessed at.
+     */
+    public function testIsJsonObjectAcceptsAnEmptyArray(): void
+    {
+        self::assertTrue($this->invokeIsJsonObject([]));
+    }
+
+    public function testIsJsonObjectRejectsANonEmptyList(): void
+    {
+        self::assertFalse($this->invokeIsJsonObject(['a', 'b', 'c']), 'a non-empty JSON array must be rejected, not silently accepted as an object');
+    }
+
+    public function testIsJsonObjectRejectsScalarsAndNull(): void
+    {
+        self::assertFalse($this->invokeIsJsonObject('just a string'));
+        self::assertFalse($this->invokeIsJsonObject(42));
+        self::assertFalse($this->invokeIsJsonObject(3.14));
+        self::assertFalse($this->invokeIsJsonObject(true));
+        self::assertFalse($this->invokeIsJsonObject(null));
+    }
+
+    /**
+     * D1b Task 9 brief resolution #5: `replace` is a BODY field (unlike
+     * queryParamBool()'s query-string parsing above), but the same
+     * naive-truthy-cast risk applies if a caller sends a STRING "false"
+     * rather than a genuine JSON boolean -- bodyParamBool() applies the same
+     * accepted-falsy-string set as queryParamBool()/dbTruthy() for that
+     * defensive case, while using a real JSON boolean directly (the
+     * overwhelmingly common case) with no string parsing at all.
+     */
+    private function invokeBodyParamBool(array $decoded, string $key, bool $default): bool
+    {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'bodyParamBool');
+        $method->setAccessible(true);
+
+        /** @var bool $result */
+        $result = $method->invoke($plugin, $decoded, $key, $default);
+
+        return $result;
+    }
+
+    public function testBodyParamBoolUsesTheDefaultWhenTheKeyIsAbsent(): void
+    {
+        self::assertFalse($this->invokeBodyParamBool([], 'replace', false));
+        self::assertTrue($this->invokeBodyParamBool([], 'replace', true));
+    }
+
+    public function testBodyParamBoolReadsAGenuineJsonBooleanDirectly(): void
+    {
+        self::assertTrue($this->invokeBodyParamBool(['replace' => true], 'replace', false));
+        self::assertFalse($this->invokeBodyParamBool(['replace' => false], 'replace', true));
+    }
+
+    public function testBodyParamBoolTreatsFalseyStringFormsAsFalse(): void
+    {
+        foreach (['false', 'False', '0', 'f', 'no', ''] as $falsey) {
+            self::assertFalse(
+                $this->invokeBodyParamBool(['replace' => $falsey], 'replace', true),
+                "replace: \"{$falsey}\" must parse as false, not PHP's naive truthy non-empty-string cast"
+            );
+        }
+    }
+
+    public function testBodyParamBoolTreatsTruthyStringFormsAsTrue(): void
+    {
+        foreach (['true', '1', 'yes'] as $truthy) {
+            self::assertTrue($this->invokeBodyParamBool(['replace' => $truthy], 'replace', false));
+        }
     }
 }

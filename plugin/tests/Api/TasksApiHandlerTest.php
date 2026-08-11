@@ -50,6 +50,21 @@ use Tasker\Tests\Support\SqlitePolyfills;
  * getOne()" section for the full reasoning and a survey of every other
  * whereFragment() call site in this codebase confirming none has SQLite
  * coverage either, including calls made with a null caller OU.
+ *
+ * NO SQLite COVERAGE FOR moveToGroup() EITHER (D1b Task 9, move_task_to_group):
+ * the brief for that task sketched this method as tenant-scoped only
+ * (`moveToGroup(int $tenantId, int $taskId, ?int $groupId, ?int $sectionId)`),
+ * which would have belonged in THIS file, matching move()'s own single-task-id
+ * shape above. D1b Task 9's own resolution #2 made it OU-aware instead — for
+ * the identical BIGSERIAL-guessing reason that made getOne() OU-aware in
+ * D1b Task 8, only stronger here because moveToGroup() is a MUTATION, not a
+ * read. It calls {@see \Tasker\Api\TasksApiHandler::findVisible()} for its
+ * own pre-check, the same OU-aware, PostgreSQL-only join getOne() uses, so
+ * every one of its outcomes — the plain group-set/un-group cases, the
+ * cross-section/cross-project 422s, the cross-tenant 404, and the
+ * sibling-OU 404 the OU-aware shape specifically requires — lives in
+ * TenantIsolationOuTest.php's own "TasksApiHandler::moveToGroup()" section,
+ * never here.
  */
 final class TasksApiHandlerTest extends TestCase
 {

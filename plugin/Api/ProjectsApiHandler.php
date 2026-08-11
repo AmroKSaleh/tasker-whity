@@ -255,6 +255,84 @@ final class ProjectsApiHandler
     }
 
     /**
+     * PATCH /api/tasker/project/context — the original's
+     * update_project_context: merges (default) or replaces a project's
+     * accumulated Foundation context. project_id is resolved by the caller
+     * before this is reached (see TaskerPlugin::updateProjectContext()),
+     * exactly like update()/delete() above; $context has already been
+     * validated there as a genuine JSON object (never a scalar, string, or
+     * JSON array — D1b Task 9 brief resolution #8).
+     *
+     * SINGLE ATOMIC STATEMENT (D1b Task 9 brief resolution #6): the merge
+     * uses PostgreSQL's jsonb `||` operator directly in SQL —
+     * `context = context || :context::jsonb` — rather than a PHP-side
+     * read-modify-write (SELECT the current context, decode + merge in PHP,
+     * UPDATE the whole document back). A read-modify-write is a lost-update
+     * race: two agents writing DIFFERENT keys concurrently (one sends
+     * `{"goal": "..."}`, the other, before the first write lands, sends
+     * `{"why": "..."}`) would have the second write's SELECT observe the
+     * pre-first-write context and overwrite the first agent's change
+     * entirely when it writes the merged document back. Doing the merge
+     * INSIDE the single UPDATE statement closes that window completely.
+     *
+     * `||` IS A SHALLOW MERGE ONLY: merging `{"scope": {"in": [...]}}` when
+     * the stored context already has a DIFFERENT `scope.out` key replaces
+     * `scope` wholesale, it does not merge nested objects key-by-key. This
+     * is called out on the route's own schema
+     * (see TaskerPlugin::getRoutes()) so a caller nesting objects does not
+     * assume deep-merge semantics.
+     *
+     * $merge false (`replace: true` from the route's own body — see
+     * TaskerPlugin::updateProjectContext()'s docblock for the inversion)
+     * sets `context` to $context outright, discarding whatever was there.
+     * The two branches interpolate one of exactly two hardcoded SQL
+     * literals chosen by a strictly-typed bool, never caller-supplied text —
+     * the same fixed-internal-literal pattern already established by
+     * {@see \Tasker\Api\TasksApiHandler::setPinned()}'s $pinnedAtClause.
+     *
+     * @param array<string, mixed> $context
+     */
+    public function updateContext(int $tenantId, ?int $callerOuId, int $projectId, array $context, bool $merge): Response
+    {
+        $row = $this->findScoped($projectId, $tenantId, $callerOuId);
+        if ($row === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $encoded = json_encode($context);
+        if ($encoded === false) {
+            return Response::error('context could not be encoded as JSON', 400);
+        }
+
+        $assignment = $merge ? 'context = context || :context::jsonb' : 'context = :context::jsonb';
+
+        try {
+            $stmt = $this->db->prepare(
+                "UPDATE tasker_projects SET {$assignment} WHERE id = :id AND tenant_id = :tenant_id"
+            );
+            $stmt->bindValue(':context', $encoded, PDO::PARAM_STR);
+            $stmt->bindValue(':id', $projectId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->execute();
+
+            $updated = $this->findScoped($projectId, $tenantId, $callerOuId);
+            if ($updated === null) {
+                return Response::error('Project not found', 404);
+            }
+
+            (new AuditLogger($this->db))->record('tasker_project.context_updated', [
+                'tenant_id' => $tenantId,
+                'target_type' => 'tasker_project',
+                'target_id' => $projectId,
+            ]);
+
+            return Response::json(['data' => $this->toPublicProject($updated)], 200);
+        } catch (\Throwable) {
+            return Response::error('Failed to update project context', 500);
+        }
+    }
+
+    /**
      * DELETE /api/tasker/projects — project_id resolved by the caller before
      * this is reached (see TaskerPlugin::deleteProject()). Cascades to the
      * project's sections, groups, tasks, milestones, and task discussions via

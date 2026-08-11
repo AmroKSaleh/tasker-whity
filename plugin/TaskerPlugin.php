@@ -280,6 +280,39 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 ],
             ],
             [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/project/context',
+                'handler' => [$this, 'updateProjectContext'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:manage',
+                'schema' => [
+                    'operationId' => 'update_project_context',
+                    'summary' => 'Merge or replace a project\'s Foundation context',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['context'],
+                        'properties' => [
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
+                            'context' => [
+                                'type' => 'object',
+                                'description' => 'The keys to write — goal, why, scope, definition_of_done and related Foundation keys. Merged into the existing context by default (a shallow merge: a nested object you supply replaces the corresponding nested object wholesale, it does not deep-merge inner keys). Pass replace: true to discard the existing context entirely instead.',
+                            ],
+                            'replace' => [
+                                'type' => 'boolean',
+                                'description' => 'When true, context replaces the whole document instead of merging into it. Defaults to false (merge) — the original tool is used to add Foundation keys incrementally.',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The project, with its updated context'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed, or context is missing'],
+                        404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
+                        422 => ['description' => 'context is not a JSON object'],
+                    ],
+                ],
+            ],
+            [
                 'method' => 'GET',
                 'path' => '/api/tasker/sections',
                 'handler' => [$this, 'listSections'],
@@ -638,6 +671,39 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The moved task'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        422 => ['description' => 'section_id does not belong to the task\'s own project, or group_id does not belong to the target section'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/group',
+                'handler' => [$this, 'moveTaskToGroup'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'move_task_to_group',
+                    'summary' => 'Move a task into a group, or un-group it',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
+                            'group_id' => [
+                                'type' => ['string', 'null'],
+                                'description' => 'Group UUID, id, or slug. Omitting this key un-groups the task, exactly like passing null explicitly — there is no "leave unchanged" form.',
+                            ],
+                            'section_id' => [
+                                'type' => 'string',
+                                'description' => 'Optional. Also moves the task into this section, and is the section group_id is validated against. Defaults to the task\'s current section.',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The task, in its new group'],
+                        400 => ['description' => 'task_id, group_id, or section_id looks like a short id but is malformed'],
+                        404 => ['description' => 'Task, group, or section not found in the caller\'s tenant or OU scope'],
                         422 => ['description' => 'section_id does not belong to the task\'s own project, or group_id does not belong to the target section'],
                     ],
                 ],
@@ -1395,6 +1461,78 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
+     * PATCH /api/tasker/project/context — the original's
+     * update_project_context.
+     *
+     * project_id is optional (D1b Task 9 brief resolution #9), matching
+     * getProject()/getBoard()/listSections()'s own shape exactly — resolved
+     * via identifierFromRequest() (body-then-query) rather than
+     * queryParam(), since this is a body-carrying PATCH like updateProject()
+     * above, not a bare GET.
+     *
+     * `replace` (this route's own body field) is the INVERSE of
+     * ProjectsApiHandler::updateContext()'s `$merge` parameter (D1b Task 9
+     * brief resolution #5): `replace: true` -> `$merge = false`; an ABSENT
+     * `replace` -> `$merge = true`. Merge is the default because the
+     * original's tool is used to add Foundation keys incrementally, one call
+     * at a time, not to overwrite the whole document on every call.
+     *
+     * `context` must be a genuine JSON object (D1b Task 9 brief resolution
+     * #8) — checked via the pure {@see self::isJsonObject()} BEFORE
+     * project_id is even resolved, so a malformed context 422s regardless of
+     * which project it would have targeted.
+     *
+     * @param array<string, string> $params
+     */
+    public function updateProjectContext(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        if (!array_key_exists('context', $decoded)) {
+            return Response::error('context is required', 400);
+        }
+        if (!self::isJsonObject($decoded['context'])) {
+            return Response::error('context must be a JSON object', 422);
+        }
+        /** @var array<string, mixed> $context */
+        $context = $decoded['context'];
+
+        $raw = $this->identifierFromRequest($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $replace = $this->bodyParamBool($decoded, 'replace', false);
+
+        return (new ProjectsApiHandler($pdo))->updateContext($tenantId, $ou['ouId'], $projectId, $context, !$replace);
+    }
+
+    /**
      * GET /api/tasker/sections?project_id=
      *
      * project_id is optional and falls back to the caller's default project —
@@ -2033,6 +2171,95 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new TasksApiHandler($pdo))->move($tenantId, $taskId, $reencoded);
+    }
+
+    /**
+     * POST /api/tasker/tasks/group — the original's move_task_to_group:
+     * group membership only, deliberately narrower than moveTask()'s
+     * combined section/group/sort_order scope above.
+     *
+     * group_id ABSENT and group_id EXPLICIT NULL both un-group (D1b Task 9
+     * brief resolution #3) — see {@see self::resolveGroupMembership()}'s own
+     * docblock for why this is a deliberate divergence from moveTask()'s own
+     * 'absent' handling right above, which must keep "absent" and "explicit
+     * null" distinct for move_task's different (and separately carry-over-
+     * buggy — see {@see \Tasker\Api\TasksApiHandler::move()}'s own docblock)
+     * group_id semantics.
+     *
+     * Delegates to {@see \Tasker\Api\TasksApiHandler::moveToGroup()}, which
+     * is OU-aware (D1b Task 9 brief resolution #2) — this route resolves
+     * $ou['ouId'] the same way every other OU-aware route in this class
+     * does, and passes it straight through.
+     *
+     * @param array<string, string> $params
+     */
+    public function moveTaskToGroup(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        // Optional: no "leave unchanged" meaning is lost by collapsing
+        // 'absent'/'explicit_null' to the same null value here the way
+        // resolveGroupMembership() must for group_id below — a task simply
+        // stays in its current section when this key is not supplied.
+        $section = $this->resolveMoveDestinationId(
+            $decoded,
+            'section_id',
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            [IdentifierResolver::class, 'resolveSection']
+        );
+        if ($section['status'] === 'malformed') {
+            return Response::error('section_id looks like a short id but is malformed', 400);
+        }
+        if ($section['status'] === 'unresolved') {
+            return Response::error('Section not found', 404);
+        }
+        $sectionId = $section['status'] === 'resolved' ? $section['value'] : null;
+
+        $group = $this->resolveGroupMembership(
+            $decoded,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            [IdentifierResolver::class, 'resolveGroup']
+        );
+        if ($group['status'] === 'malformed') {
+            return Response::error('group_id looks like a short id but is malformed', 400);
+        }
+        if ($group['status'] === 'unresolved') {
+            return Response::error('Group not found', 404);
+        }
+        // 'ungroup' (absent OR explicit null) and 'resolved' both carry the
+        // right value directly — null for the former, a real id for the
+        // latter — with no further mapping needed here.
+        $groupId = $group['value'];
+
+        return (new TasksApiHandler($pdo))->moveToGroup($tenantId, $ou['ouId'], $taskId, $groupId, $sectionId);
     }
 
     /**
@@ -2789,6 +3016,63 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
+     * Parse an OPTIONAL BOOLEAN out of an already-decoded JSON BODY (D1b
+     * Task 9: update_project_context's `replace`) — the body-field
+     * counterpart to {@see self::queryParamBool()} above, not a duplicate of
+     * it: json_decode() already turns a genuine JSON `true`/`false` into a
+     * real PHP bool, used directly with no string parsing at all for that —
+     * overwhelmingly common — case. The same accepted-falsy-string set as
+     * queryParamBool()/dbTruthy() is applied only defensively, in case a
+     * caller sends `"replace": "false"` as a STRING rather than a genuine
+     * JSON boolean.
+     *
+     * $default applies only when the key is absent entirely, matching
+     * queryParamBool()'s own reasoning.
+     *
+     * @param array<string, mixed> $decoded
+     */
+    private function bodyParamBool(array $decoded, string $key, bool $default): bool
+    {
+        if (!array_key_exists($key, $decoded)) {
+            return $default;
+        }
+
+        $raw = $decoded[$key];
+        if (is_bool($raw)) {
+            return $raw;
+        }
+        if (is_string($raw)) {
+            $normalised = strtolower(trim($raw));
+
+            return !in_array($normalised, ['', '0', 'f', 'false', 'no'], true);
+        }
+
+        return (bool) $raw;
+    }
+
+    /**
+     * Whether $value is a genuine JSON OBJECT (D1b Task 9 brief resolution
+     * #8: update_project_context's `context` must be one — a scalar, a
+     * string, or a JSON array must be rejected with 422, never stored).
+     * Pure — no database — so it gets a direct Reflection test in
+     * TaskerPluginTest rather than living inline in
+     * updateProjectContext(), which calls resolvePdo() and is otherwise
+     * unreachable from PHPUnit, the same reason every other composition
+     * helper in this file is extracted.
+     *
+     * An empty JSON object (`{}`) and an empty JSON array (`[]`) are
+     * INDISTINGUISHABLE once json_decode(..., true) has already run — PHP
+     * represents both as the same empty array — so an empty array is
+     * accepted here rather than guessed at; only a NON-EMPTY list
+     * (sequential, 0-based integer keys — the shape json_decode() gives a
+     * genuine JSON array) is rejected.
+     */
+    private static function isJsonObject(mixed $value): bool
+    {
+        return is_array($value) && ($value === [] || !array_is_list($value));
+    }
+
+    /**
      * Resolve an OPTIONAL parent identifier supplied alongside a slug-form
      * child identifier — project_id for a section (updateSection()/
      * deleteSection()), section_id for a group (updateGroup()/
@@ -3000,6 +3284,56 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         return $resolved === null
             ? ['status' => 'unresolved', 'value' => null]
             : ['status' => 'resolved', 'value' => $resolved];
+    }
+
+    /**
+     * Resolve move_task_to_group's own group_id (D1b Task 9): unlike
+     * {@see self::resolveMoveDestinationId()} (move_task's group_id, where
+     * ABSENT means "leave unchanged" — see
+     * {@see \Tasker\Api\TasksApiHandler::move()}'s own docblock),
+     * move_task_to_group has no "unchanged" concept at all — it exists
+     * SOLELY to set group membership (brief resolution #3), so an absent key
+     * and an explicit null must behave IDENTICALLY: both un-group. Delegates
+     * every other distinction (malformed/unresolved/resolved) straight to
+     * resolveMoveDestinationId(), then collapses its 'absent' and
+     * 'explicit_null' statuses into one 'ungroup' outcome.
+     *
+     * FOUR outcomes (one fewer than resolveMoveDestinationId()'s five,
+     * because 'absent' and 'explicit_null' are no longer distinguishable
+     * here):
+     *   - 'malformed': looks like a short id but is not one. Callers 400.
+     *   - 'unresolved': supplied, classifies as a real form, but $resolver
+     *     found nothing (wrong tenant/OU, or genuinely absent). Callers
+     *     404 — this must NEVER collapse into 'ungroup': a caller who named
+     *     a specific, wrong group must not silently have their task
+     *     un-grouped instead of seeing an error.
+     *   - 'ungroup': the key was absent OR explicitly null. value is
+     *     always null.
+     *   - 'resolved': present, resolves to a real id. value carries it.
+     *
+     * $resolver is IdentifierResolver::resolveGroup(), injected for the same
+     * Reflection-testability reason resolveMoveDestinationId()'s own
+     * $resolver is — see TaskerPluginTest.
+     *
+     * @param array<string, mixed> $decoded
+     * @param callable(\PDO, int, ?int, string|int|null): ?int $resolver
+     * @return array{status: 'malformed'|'unresolved'|'ungroup'|'resolved', value: ?int}
+     */
+    private function resolveGroupMembership(
+        array $decoded,
+        \PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        callable $resolver
+    ): array {
+        $destination = $this->resolveMoveDestinationId($decoded, 'group_id', $pdo, $tenantId, $callerOuId, $resolver);
+
+        if ($destination['status'] === 'absent' || $destination['status'] === 'explicit_null') {
+            return ['status' => 'ungroup', 'value' => null];
+        }
+
+        /** @var array{status: 'malformed'|'unresolved'|'resolved', value: ?int} $destination */
+        return $destination;
     }
 
     /**
