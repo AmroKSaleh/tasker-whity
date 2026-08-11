@@ -4,8 +4,16 @@ title: Re-add drag-and-drop reorder to the editorial board
 status: done
 priority: medium
 section: core-app
-order: 20
-updated_at: 2026-07-14T23:09:51.590Z
+order: 22
+updated_at: 2026-07-25T07:41:59.616Z
+milestones:
+  - { "text": "Reorder task cards within a column/group (sort_order) via drag", "done": true }
+  - { "text": "Move tasks between sections/groups by dragging (moveTask)", "done": true }
+  - { "text": "Preserve keyboard-drag accessibility (PointerSensor + KeyboardSensor)", "done": true }
+  - { "text": "Reorder sections (columns) by dragging (reorderSections)", "done": true }
+  - { "text": "Apply design-system drag visuals: shadow-drag ring + hover grip on card left edge (DESIGN_DECISIONS §3.5)", "done": true }
+  - { "text": "Precise cross-list drop position (insert at cursor, not append to end)", "done": true }
+  - { "text": "Have the task ID show up in the UI", "done": true }
 ---
 
 Drag-and-drop was dropped when the project board was rebuilt into the editorial 2D layout (2026-05-27 redesign). Re-wire @dnd-kit into the new structure.

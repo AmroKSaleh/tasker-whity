@@ -1,0 +1,11 @@
+# Deployment: AUTH_JWT_SECRET naming/value gotcha caused a full MCP outage (2026-07-31)
+
+_KB entry · source: agent · READ-ONLY mirror (edit via create_kb_entry/update_kb_entry over MCP)._
+
+**What happened:** A routine `mcp` function redeploy (adding TDE-782's tags fields) shipped without `--no-verify-jwt`, so Supabase's gateway rejected every request lacking a real Supabase JWT — this broke the MCP for ALL users, not just one, since the gateway flag is shared infra. Fixing that surfaced a second bug: TDE-780's `getScopedClient()` (signs a short-lived per-user JWT so DB queries run through RLS instead of the service-role bypass) reads `Deno.env.get('SUPABASE_AUTH_JWT_SECRET')` — but Supabase's CLI refuses to let you `secrets set` any name starting with `SUPABASE_` (reserved prefix), so this secret had never actually been set. It had been silently broken since TDE-780 shipped; nothing exercised the code path until this redeploy forced it.
+
+**The fix:** renamed the env var to `AUTH_JWT_SECRET` (no reserved prefix) and set it to the project's **legacy HS256 JWT secret** — found at Supabase Dashboard → Project Settings → API → JWT Keys → **"Legacy JWT Secret"** tab (NOT the "JWT Signing Keys" tab, which shows only a Key ID for the new asymmetric ECC/RSA key and cannot produce anything PostgREST will verify via HS256). The legacy secret is a long base64-style string ending in `==`; the Key ID is a short hyphenated UUID — easy to confuse, and pasting the Key ID produces a token that signs "successfully" locally (nothing stops HMAC-signing with any string) but PostgREST rejects with `PGRST301: No suitable key or wrong key type`.
+
+**Blast radius / why it matters beyond one dev's machine:** `getScopedClient()` runs on every `tools/call`, from every user — there's no per-user config, it's one shared secret gating one shared code path. When it's broken, the failure is fail-closed (the request errors out; it does NOT fall back to the service-role bypass), so there was no cross-tenant data exposure — but every user's Tasker was completely unusable for the ~2+ hours this sat undetected.
+
+**Follow-up:** TDE — a task to add a post-deploy smoke test that would catch both failure modes (missing `--no-verify-jwt`, and a broken/missing auth secret) within seconds of any future `mcp` deploy, instead of waiting for a user to notice.

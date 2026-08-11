@@ -4,8 +4,8 @@ title: Repo picker in New Project flow (for GitHub-connected users)
 status: done
 priority: medium
 section: core-app
-order: 12
-updated_at: 2026-07-14T23:09:51.590Z
+order: 16
+updated_at: 2026-07-25T07:41:59.616Z
 ---
 
 When a user creates a new project and they're connected to GitHub (either via OAuth login or a saved PAT), present their repos as a selectable list. Picking a repo creates a project linked to that repo and triggers issue import (same flow as the existing github_import_project MCP tool, but from the UI instead of MCP).

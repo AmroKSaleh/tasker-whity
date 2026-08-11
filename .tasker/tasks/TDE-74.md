@@ -4,8 +4,8 @@ title: "Write a platform-agnostic AI primer: what Tasker is, what the MCP does, 
 status: done
 priority: low
 section: core-app
-order: 18
-updated_at: 2026-07-14T23:09:51.590Z
+order: 20
+updated_at: 2026-07-25T07:41:59.616Z
 ---
 
 A platform-agnostic primer any AI coding agent (Claude Code, Cursor, Windsurf, Roo Code, etc.) can be given — via CLAUDE.md, .cursorrules, a system prompt, or a Tasker IS entry — so it understands the system from zero and interacts correctly. Portable: no Claude-Code-only assumptions (per-platform install lives in TDE-33).
