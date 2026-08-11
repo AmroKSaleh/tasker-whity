@@ -1,0 +1,2916 @@
+{
+  "_meta": {
+    "generatedBy": "host/scripts/extract-original-schemas.ps1",
+    "doNotEditByHand": "Re-run the generator instead; the live-oracle corrections live in it.",
+    "source": "c:/Projects/tasker/V2/supabase/functions/mcp/index.ts (design repo, the original app’s deployed MCP edge function)",
+    "sourceCommit": "2f1826ea073fa62bee47000dae55bbd26c88c90b",
+    "sourceCommitDate": "2026-07-18T20:42:51+03:00",
+    "extractedAt": "2026-08-11T17:50:01.553Z",
+    "toolsFromSource": 131,
+    "liveOnlyToolCount": 12,
+    "originalSurfaceSize": 143,
+    "sourceIsStale": "index.ts is a SNAPSHOT and is behind the live server. Verified 2026-08-11: 131 tools here vs 143 live; the 12 extra live names are in liveOnlyToolNames; update_task/create_task were missing tags and current_state, applied from the live oracle (see liveOracleCorrections). The drift observed was purely additive - no tool or property present here has been removed upstream - so this file is a FLOOR on the original’s surface, not an exact image of it.",
+    "liveOracleCorrections": [
+      {
+        "tool": "create_task",
+        "property": "tags",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "note": "Live server declares tags on create_task; index.ts (2026-07-18) has no tags anywhere."
+      },
+      {
+        "tool": "update_task",
+        "property": "tags",
+        "schema": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "note": "Live server declares tags on update_task; index.ts has no tags anywhere."
+      },
+      {
+        "tool": "update_task",
+        "property": "current_state",
+        "schema": {
+          "type": "string"
+        },
+        "note": "Live server declares current_state on update_task; the string does not occur in index.ts at all."
+      }
+    ]
+  },
+  "tools": {
+    "__init_tasker_session": {
+      "type": "object",
+      "properties": {
+        "show_questionnaire": {
+          "type": "boolean",
+          "description": "If true, always show the questionnaire with current choices marked, even if preferences exist."
+        }
+      },
+      "required": []
+    },
+    "add_milestone": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "text": {
+          "type": "string",
+          "description": "Milestone text"
+        }
+      },
+      "required": [
+        "task_id",
+        "text"
+      ]
+    },
+    "advance_guide": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow."
+        },
+        "evidence": {
+          "type": "string",
+          "description": "Proof that the current step is done: a URL, confirmation message, description of what the user observed, or any verifiable artifact. Required."
+        }
+      }
+    },
+    "analyze_section": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID"
+        }
+      },
+      "required": [
+        "project_id",
+        "section_id"
+      ]
+    },
+    "append_session_activity": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "progress",
+            "action",
+            "question",
+            "result",
+            "error"
+          ],
+          "description": "The kind of entry."
+        },
+        "body": {
+          "type": "string",
+          "description": "What happened / what you are asking — one concise entry."
+        },
+        "actor": {
+          "type": "string",
+          "description": "Optional: the agent/client acting (e.g. \"Claude Code\"). The full provenance layer is completed in TDE-375."
+        }
+      },
+      "required": [
+        "task_id",
+        "type",
+        "body"
+      ]
+    },
+    "archive_kb_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the KB entry (from list_kb_entries or kb_health)."
+        },
+        "restore": {
+          "type": "boolean",
+          "description": "If true, un-archive (restore) the entry instead of archiving it."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "bootstrap_advance": {
+      "type": "object",
+      "properties": {
+        "draft_id": {
+          "type": "string",
+          "description": "The draft id from bootstrap_project."
+        },
+        "step": {
+          "type": "string",
+          "enum": [
+            "elicited",
+            "drafted",
+            "blessed"
+          ],
+          "description": "Which phase you are completing."
+        },
+        "answers": {
+          "type": "string",
+          "description": "Step \"elicited\": the user's VERBATIM free-text answers to your open Phase-1 questions."
+        },
+        "brief": {
+          "type": "object",
+          "description": "Steps \"drafted\"/\"blessed\": the Foundation brief object (core + extended + flexible keys — the project context shape)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Step \"blessed\": the final project name."
+        }
+      },
+      "required": [
+        "draft_id",
+        "step"
+      ]
+    },
+    "bootstrap_project": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Working name (optional — can be settled during the interview)."
+        },
+        "intent": {
+          "type": "string",
+          "description": "Optional one-line of what the user said they want, to seed the draft."
+        }
+      }
+    },
+    "build_new_flow": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID the flow belongs to"
+        },
+        "goal": {
+          "type": "string",
+          "description": "The end goal of the flow in the user's words (the final deliverable). Optional — if omitted, the playbook tells you to elicit it first."
+        },
+        "seed_id": {
+          "type": "string",
+          "description": "Optional. The FLOW seed this build resolves (UUID or short ID). When given, the response includes the seed pre-brief + checklist and surfaces any unmet prerequisites (soft gate). Mark the seed done after name_flow."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "clear_task_output": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31) — the PRODUCER"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "complete_milestone": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "index": {
+          "type": "number",
+          "description": "Zero-based index of the milestone to complete"
+        }
+      },
+      "required": [
+        "task_id",
+        "index"
+      ]
+    },
+    "complete_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "confirm_contract": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        },
+        "contract_type": {
+          "type": "string",
+          "enum": [
+            "output",
+            "input"
+          ],
+          "description": "Which contract to confirm: \"output\" (this task's own quality bar) or \"input\" (the gate rules on an incoming edge). Default: \"output\"."
+        },
+        "source_task_id": {
+          "type": "string",
+          "description": "Required when contract_type is \"input\" and the task has multiple input edges — identifies which edge's contract to confirm."
+        },
+        "confirmed_by": {
+          "type": "string",
+          "description": "Who confirmed it. Default: \"human\"."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "create_default_is_entry": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "description": "Short title for the directive"
+        },
+        "content": {
+          "type": "string",
+          "description": "The instruction content (markdown supported)"
+        },
+        "universal": {
+          "type": "boolean",
+          "description": "If true, seeded entries apply even inside flows with their own IS. Default false."
+        }
+      },
+      "required": [
+        "title",
+        "content"
+      ]
+    },
+    "create_environment": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Environment name, e.g. \"Work\"."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "create_flow_is_entry": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow"
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows a flow-name lookup"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short title for the directive"
+        },
+        "content": {
+          "type": "string",
+          "description": "The instruction content (markdown supported)"
+        }
+      },
+      "required": [
+        "title",
+        "content"
+      ]
+    },
+    "create_flow_kb_entry": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow"
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows a flow-name lookup"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short title for the entry"
+        },
+        "content": {
+          "type": "string",
+          "description": "The content to save (markdown supported)"
+        }
+      },
+      "required": [
+        "title",
+        "content"
+      ]
+    },
+    "create_group": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Group name"
+        }
+      },
+      "required": [
+        "project_id",
+        "section_id",
+        "name"
+      ]
+    },
+    "create_is_entry": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short title for the directive"
+        },
+        "content": {
+          "type": "string",
+          "description": "The instruction content (markdown supported)"
+        },
+        "universal": {
+          "type": "boolean",
+          "description": "If true, this rule always applies, even inside a flow with its own IS. Default false."
+        }
+      },
+      "required": [
+        "project_id",
+        "title",
+        "content"
+      ]
+    },
+    "create_kb_entry": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "title": {
+          "type": "string",
+          "description": "Short title for the entry"
+        },
+        "content": {
+          "type": "string",
+          "description": "The content to save (markdown supported)"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "user",
+            "agent"
+          ],
+          "description": "Who is creating this entry. Pass \"agent\" when writing a learning on task completion per the Dynamic KB rule. Defaults to \"agent\" when called by an AI agent."
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "architecture",
+            "database",
+            "deployment",
+            "mcp",
+            "flows",
+            "design",
+            "product",
+            "gtm",
+            "reference",
+            "other"
+          ],
+          "description": "Optional category (controlled vocab). A SOFT hint that prioritises this entry in KB title-scan retrieval — never a hard filter."
+        }
+      },
+      "required": [
+        "project_id",
+        "title",
+        "content"
+      ]
+    },
+    "create_project": {
+      "type": "object",
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "context": {
+          "type": "object",
+          "description": "The Foundation. Core: { goal, why, scope, definition_of_done, failure, quality_bar, assumptions }. Extended: { audience, success_metrics, constraints, risks, ai_behavior }. Plus any flexible keys that fit the project type."
+        },
+        "environment_id": {
+          "type": "string",
+          "description": "Optional Environment (UUID) to create the project in. Defaults to the active Environment reported by __init_tasker_session; if none resolves and the user has more than one Environment, this is required."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "create_section": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "name"
+      ]
+    },
+    "create_task": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Optional. Task is ungrouped if omitted."
+        },
+        "text": {
+          "type": "string",
+          "description": "Task title"
+        },
+        "detail": {
+          "type": "string",
+          "description": "Context/description. Write so a cold reader (no chat history, no session memory) can act on this task alone: goal/why, key decisions or open questions, pointers to relevant files/KB/decisions, and obvious next step. For a seed: the rough subject + why it is needed (the pre-brief)."
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "rush",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "due_date": {
+          "type": "string",
+          "description": "ISO date YYYY-MM-DD (optional)"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "normal",
+            "seed"
+          ],
+          "description": "Default \"normal\". \"seed\" = a placeholder resolved later into a real task or flow."
+        },
+        "seed_target": {
+          "type": "string",
+          "enum": [
+            "task",
+            "flow"
+          ],
+          "description": "Seeds only: what this resolves into — a concrete task (resolve_seed) or a flow (build_new_flow)."
+        },
+        "open_questions": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Seeds only: the SPECIFIC gaps blocking specification — things ANSWERED with the user during resolution. Stored as kind=\"question\" items in the seed's unified checklist (they do NOT gate resolution)."
+        },
+        "milestones": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Ordered milestone texts added in one call (no separate add_milestone needed). On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind=\"prerequisite\" checklist items that soft-gate resolve_seed / build_new_flow. On a normal task they are plain milestones."
+        },
+        "executor": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "user",
+            "external"
+          ],
+          "description": "Who executes this step. agent (default) = AI runs it; user = human executes, AI coaches; external = third party (web admin, client, etc.). A single flow can mix executor types."
+        },
+        "human_guidance": {
+          "type": "string",
+          "description": "For user/external steps only: the human-facing step instructions shown in guide mode. Distinct from detail (which is AI-facing context). Write as a clear action directive: what the person must do, where, and how to verify it worked."
+        },
+        "relay_context": {
+          "type": "string",
+          "description": "RELAY MODE (TDE-324): set this only when the user wants to relay/hand off this task to someone else. A CURATED rationale layer that lets the assignee act without coming back to ask — NOT a transcript dump. Distill from your discussion: who it is going to (free text, e.g. \"to: Sara (backend)\"), the key decision(s) and WHY, approaches considered and rejected and why-not, intent / how to treat it, open questions, and watch-outs. Setting this marks the task as a relay. Leave unset for normal tasks."
+        },
+        "allow_duplicate": {
+          "type": "boolean",
+          "description": "TDE-379 duplicate defense: creation is REFUSED if a near-identical open task already exists (the response lists the matches). Pass true to override and create anyway when it is genuinely distinct. Leave unset normally — if you see the guard, prefer working the existing task or merge_task_as_duplicate."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "required": [
+        "project_id",
+        "text"
+      ]
+    },
+    "delete_default_is_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the default IS entry."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "delete_environment": {
+      "type": "object",
+      "properties": {
+        "environment_id": {
+          "type": "string",
+          "description": "Environment UUID to delete."
+        },
+        "reassign_to_id": {
+          "type": "string",
+          "description": "Optional Environment UUID to move this one's projects into. Defaults to a \"Default\" Environment, else the next one."
+        },
+        "confirmed": {
+          "type": "boolean",
+          "description": "Must be true — deletion is permanent (projects are preserved and moved)."
+        }
+      },
+      "required": [
+        "environment_id"
+      ]
+    },
+    "delete_flow": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID, or flow name (partial match OK). Or pass task_id instead."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow (UUID or short ID) — alternative to flow_id."
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows a flow-name lookup; helpful with a short task_id."
+        }
+      },
+      "required": []
+    },
+    "delete_flow_is_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the flow IS entry to delete."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "delete_flow_kb_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the flow KB entry to delete."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "delete_group": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "description": "Group UUID"
+        },
+        "delete_tasks": {
+          "type": "boolean",
+          "description": "If true, delete all tasks in the group. If false (default), move tasks to ungrouped."
+        }
+      },
+      "required": [
+        "group_id"
+      ]
+    },
+    "delete_is_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the IS entry to delete."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "delete_kb_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the KB entry to delete."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "delete_milestone": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "index": {
+          "type": "number",
+          "description": "Zero-based index of the milestone to delete"
+        }
+      },
+      "required": [
+        "task_id",
+        "index"
+      ]
+    },
+    "delete_project": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "confirmed": {
+          "type": "boolean",
+          "description": "Must be true to confirm permanent deletion"
+        }
+      },
+      "required": [
+        "project_id",
+        "confirmed"
+      ]
+    },
+    "delete_section": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID"
+        },
+        "delete_tasks": {
+          "type": "boolean",
+          "description": "If true, delete the section AND every task/group in it. If false (default), the section must already be empty or the call is refused."
+        }
+      },
+      "required": [
+        "project_id",
+        "section_id"
+      ]
+    },
+    "delete_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "derive_output_contract": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "The PRODUCER task whose output contract to derive (UUID or short ID)."
+        },
+        "apply": {
+          "type": "boolean",
+          "description": "If true, persist the derived draft as this task's output contract. Default false — return the draft + assumptions only, for human review."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "disable_task_review": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID — the review-enabled task to release."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Optional short reason recorded in the cleared record (why review is being disabled). Recommended for the audit trail."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "drive_list_files": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "Optional: extra Drive query filter (e.g. \"name contains 'report'\"). Appended to the parent-folder filter."
+        }
+      },
+      "required": []
+    },
+    "drive_read_file": {
+      "type": "object",
+      "properties": {
+        "file_id": {
+          "type": "string",
+          "description": "Google Drive file ID (returned by drive_upload_file or drive_list_files)"
+        }
+      },
+      "required": [
+        "file_id"
+      ]
+    },
+    "drive_upload_file": {
+      "type": "object",
+      "properties": {
+        "filename": {
+          "type": "string",
+          "description": "Filename, e.g. \"report.md\" or \"Article Draft\". For docs/sheets the extension is cosmetic — Drive shows it as a native Doc/Sheet."
+        },
+        "content": {
+          "type": "string",
+          "description": "Text content of the file. For target_type \"doc\": pass HTML or Markdown. For \"sheet\": pass CSV."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Optional: task UUID or short ID. Places file in the right project/flow subfolder and records the Drive file ID on the task output."
+        },
+        "target_type": {
+          "type": "string",
+          "enum": [
+            "file",
+            "doc",
+            "sheet"
+          ],
+          "description": "What to create. \"file\" (default) = raw file as-is. \"doc\" = editable Google Doc (converts from HTML/Markdown). \"sheet\" = editable Google Sheet (converts from CSV)."
+        },
+        "mime_type": {
+          "type": "string",
+          "description": "Source content MIME. For \"file\": the file's own type (default text/plain; use text/markdown for .md). For \"doc\": text/html (default) or text/markdown. For \"sheet\": text/csv (default). This is the format Drive converts FROM, not the Google-apps type."
+        }
+      },
+      "required": [
+        "filename",
+        "content"
+      ]
+    },
+    "enable_task_review": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID — the task to enable review on (must NOT be in a flow)."
+        },
+        "bar": {
+          "type": "object",
+          "description": "The authored bar to freeze: { rules: [ { label, kind: check|judgment, rule, severity } ] }. Omit to get grounding + authoring instructions instead.",
+          "properties": {
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "description": "One quality-bar rule. Author these by discussing with the user, then have them confirm.",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Optional stable id; auto-assigned if omitted."
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Short human name (e.g. \"Cites enough sources\")."
+                  },
+                  "rule": {
+                    "type": "string",
+                    "description": "The rule itself — the assertion checked. For kind=judgment, a precise NL criterion. For kind=check, the check spec (e.g. \"min_length: 500\", \"command: npm test exits 0\")."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Optional context: why it matters / how to satisfy. Not itself a pass/fail target."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "check",
+                      "judgment"
+                    ],
+                    "description": "check = deterministic (counts, patterns, commands); judgment = semantic judgment by you, the agent."
+                  },
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "blocker",
+                      "warning"
+                    ],
+                    "description": "blocker fail reopens the producing task; warning fail is recorded but does not block. Default blocker."
+                  }
+                },
+                "required": [
+                  "rule"
+                ]
+              }
+            }
+          },
+          "required": [
+            "rules"
+          ]
+        },
+        "force": {
+          "type": "boolean",
+          "description": "Re-derive/overwrite an existing frozen bar. Default false (frozen snapshots are not mutated)."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "export_project": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "flush_local_project": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "Same device name used for pull_local_project."
+        },
+        "base_cursor": {
+          "type": "number",
+          "description": "The cursor from .sync.json written by your last pull/flush — the state your edits are based on."
+        },
+        "changed_files": {
+          "type": "array",
+          "description": "Task files you created or edited: [{ path: \"tasks/TDE-52.md\", content: \"<verbatim file text>\" }]. Only tasks/*.md entries are applied.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string"
+              },
+              "content": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "content"
+            ]
+          }
+        },
+        "deleted_short_ids": {
+          "type": "array",
+          "description": "Numeric short IDs of task files you deleted locally (e.g. [52] for TDE-52).",
+          "items": {
+            "type": "number"
+          }
+        }
+      },
+      "required": [
+        "project_id",
+        "device_id",
+        "base_cursor"
+      ]
+    },
+    "get_ai_instructions": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "get_flow_audit": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow (UUID or short ID). The tool finds all other tasks in the same flow automatically."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "get_flow_context": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "get_flow_is": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name (partial match OK)"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow (UUID or short ID) — alternative to flow_id"
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows a flow-name lookup"
+        }
+      },
+      "required": []
+    },
+    "get_flow_kb": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name (partial match OK)"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow"
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows a flow-name lookup"
+        }
+      },
+      "required": []
+    },
+    "get_flow_order": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Optional: task UUID or short ID (e.g. TDE-31) to focus on that task's specific flow. If omitted, returns all flows in the project."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "get_kb_entries": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "KB entry UUIDs (from the get_task index or list_kb_entries)."
+        },
+        "titles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Optional: case-insensitive partial title matches, as an alternative/supplement to ids."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "get_knowledge_base": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "user",
+            "agent",
+            "all"
+          ],
+          "description": "Filter by who created the entry. Defaults to \"all\"."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "get_my_attention": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Optional — scope to one project (prefix/slug/UUID). Omit for all your projects."
+        }
+      },
+      "required": []
+    },
+    "get_project": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "include_notes": {
+          "type": "boolean",
+          "description": "Include each task's Notes (detail field) inline. Default false — on a large project this can be very large. Prefer reading a specific task via get_task."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "get_project_foundation": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "get_project_is": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "get_ready_work": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Optional — scope to one project."
+        }
+      },
+      "required": []
+    },
+    "get_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "peek": {
+          "type": "boolean",
+          "description": "If true, just read the task without auto-setting it to in_progress. Use when inspecting/planning rather than starting work."
+        },
+        "refresh_context": {
+          "type": "boolean",
+          "description": "Force the full project context (Foundation, Instruction Set, KB index) back inline. It is normally sent only on the first task you open in a project each session and omitted (as a short pointer) thereafter to save tokens. Pass true to re-ground after your context was compacted/cleared."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "get_task_activity": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max activities per session (default 20, max 100)."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "get_task_connections": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. BPW-7)"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "get_task_critique": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "The producer task (UUID or short ID)"
+        },
+        "target_task_id": {
+          "type": "string",
+          "description": "Optional: which consumer edge's critique to show. Required only if the producer feeds more than one task."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "get_validation_feedback": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "github_connect": {
+      "type": "object",
+      "properties": {
+        "token": {
+          "type": "string",
+          "description": "GitHub Personal Access Token (PAT) with \"repo\" scope"
+        }
+      },
+      "required": [
+        "token"
+      ]
+    },
+    "github_disconnect": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "github_import_project": {
+      "type": "object",
+      "properties": {
+        "repo": {
+          "type": "string",
+          "description": "Repository in owner/repo format (e.g. \"octocat/hello-world\")"
+        },
+        "project_name": {
+          "type": "string",
+          "description": "Optional project name. Defaults to the repository name."
+        }
+      },
+      "required": [
+        "repo"
+      ]
+    },
+    "github_list_repos": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "github_push_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path within the repo, e.g. \".tasker/artifacts/BKT-F1/report.md\""
+        },
+        "content": {
+          "type": "string",
+          "description": "Text content to write"
+        },
+        "repo": {
+          "type": "string",
+          "description": "GitHub repo in \"owner/name\" format (e.g. \"acme/my-project\"). Falls back to the project's linked repo when task_id is provided."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Optional: any task in the flow — used to derive the repo and suggested artifact path when repo is omitted."
+        },
+        "message": {
+          "type": "string",
+          "description": "Commit message. Defaults to \"chore: store Tasker artifact\"."
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ]
+    },
+    "github_push_project": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "create_missing": {
+          "type": "boolean",
+          "description": "If true, also create new GitHub issues for tasks not yet linked to one. Defaults to false (update linked tasks only)."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "github_push_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "github_read_file": {
+      "type": "object",
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "File path within the repo, e.g. \".tasker/artifacts/BKT-F1/report.md\""
+        },
+        "repo": {
+          "type": "string",
+          "description": "GitHub repo in \"owner/name\" format. Falls back to the project's linked repo when task_id is provided."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Optional: any task in the flow — used to derive the repo when repo is omitted."
+        }
+      },
+      "required": [
+        "path"
+      ]
+    },
+    "github_sync_issues": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "guide_flow": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or flow name (partial match)."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow — server finds the whole flow."
+        }
+      }
+    },
+    "import_project": {
+      "type": "object",
+      "properties": {
+        "bundle": {
+          "type": "object",
+          "description": "The export bundle object (the JSON returned by export_project, parsed)."
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional name for the imported project. Defaults to the bundle's project name."
+        },
+        "reset_progress": {
+          "type": "boolean",
+          "description": "If true, all imported tasks are set to pending (a clean template copy). Default false — statuses and completion are preserved (a true backup)."
+        }
+      },
+      "required": [
+        "bundle"
+      ]
+    },
+    "instantiate_flow_template": {
+      "type": "object",
+      "properties": {
+        "template_id": {
+          "type": "string",
+          "description": "UUID of the template to instantiate."
+        },
+        "template_name": {
+          "type": "string",
+          "description": "Template name (partial match) — alternative to template_id."
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix, slug, or UUID to create the flow in."
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID to place tasks in. If omitted, a new section is created."
+        },
+        "flow_name": {
+          "type": "string",
+          "description": "Name for the new flow. Defaults to the template name."
+        },
+        "context": {
+          "type": "object",
+          "description": "Key/value pairs used to fill {{placeholders}} in step titles/details. E.g. { \"topic\": \"TDE-152 launch\" }."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "kb_health": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "list_default_is_entries": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "list_environments": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "list_flow_is_entries": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow"
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows a flow-name lookup"
+        }
+      },
+      "required": []
+    },
+    "list_flow_kb_entries": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow"
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows a flow-name lookup"
+        }
+      },
+      "required": []
+    },
+    "list_flow_templates": {
+      "type": "object",
+      "properties": {}
+    },
+    "list_flows": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "list_google_task_lists": {
+      "type": "object",
+      "properties": {},
+      "required": []
+    },
+    "list_google_tasks": {
+      "type": "object",
+      "properties": {
+        "list_id": {
+          "type": "string",
+          "description": "Google Task list ID (from list_google_task_lists)"
+        },
+        "include_completed": {
+          "type": "boolean",
+          "description": "Include completed tasks. Default false."
+        }
+      },
+      "required": [
+        "list_id"
+      ]
+    },
+    "list_groups": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID"
+        }
+      },
+      "required": [
+        "project_id",
+        "section_id"
+      ]
+    },
+    "list_is_entries": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "list_kb_entries": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "user",
+            "agent",
+            "all"
+          ],
+          "description": "Filter by who created the entry. Defaults to \"all\"."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "list_milestones": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "list_projects": {
+      "type": "object",
+      "properties": {
+        "environment_id": {
+          "type": "string",
+          "description": "Optional: show only projects in this Environment (UUID from list_environments). Omit to see every Environment."
+        }
+      },
+      "required": []
+    },
+    "list_sections": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "list_tasks": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID (optional — falls back to default project if set)"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID (optional)"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "in_progress",
+            "done",
+            "all"
+          ],
+          "description": "Filter by status. Defaults to excluding done tasks. Pass \"all\" to include everything."
+        },
+        "confirmed": {
+          "type": "boolean",
+          "description": "Set to true to list tasks across ALL projects (only needed when project_id is omitted AND no default project is set)."
+        },
+        "include_flow_steps": {
+          "type": "boolean",
+          "description": "EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks — TDE-320). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own."
+        }
+      },
+      "required": []
+    },
+    "merge_task_as_duplicate": {
+      "type": "object",
+      "properties": {
+        "duplicate_task_id": {
+          "type": "string",
+          "description": "The task to fold away (UUID or short ID). It gets closed as MERGED."
+        },
+        "canonical_task_id": {
+          "type": "string",
+          "description": "The task to keep (UUID or short ID). It receives the duplicate's milestones + context."
+        }
+      },
+      "required": [
+        "duplicate_task_id",
+        "canonical_task_id"
+      ]
+    },
+    "mint_device_token": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID — must be a Local Mode project."
+        },
+        "device_id": {
+          "type": "string",
+          "description": "Same stable device name used for pull_local_project (determines the ID lease block)."
+        },
+        "label": {
+          "type": "string",
+          "description": "Optional human hint stored with the token (e.g. \"desktop-repo watcher\")."
+        }
+      },
+      "required": [
+        "project_id",
+        "device_id"
+      ]
+    },
+    "move_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31) to move"
+        },
+        "target_project_id": {
+          "type": "string",
+          "description": "Destination project: prefix (e.g. WCP), slug, or UUID"
+        },
+        "target_section_id": {
+          "type": "string",
+          "description": "Optional: a section UUID in the TARGET project to drop the task into. If omitted (or not in the target project) the task lands with no section."
+        }
+      },
+      "required": [
+        "task_id",
+        "target_project_id"
+      ]
+    },
+    "move_task_to_group": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "group_id": {
+          "type": "string",
+          "description": "Group UUID to move to, or null to move to ungrouped"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Optional: new section UUID to move task to as well"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "name_flow": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix, slug, or UUID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Human name for the flow (e.g. \"Blog Post Publication Flow\")"
+        },
+        "task_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "All task IDs in the flow (UUIDs or short IDs)."
+        },
+        "context": {
+          "type": "string",
+          "description": "Optional shared context for the flow — background, goals, constraints, or instructions that apply to all tasks in this flow."
+        },
+        "short_id": {
+          "type": "string",
+          "description": "Optional custom short ID (e.g. \"BKT-F3\"). Must be unique across all your flows. Auto-generated if omitted."
+        },
+        "bypass": {
+          "type": "boolean",
+          "description": "TDE-287: finalize the flow even if the contract gate fails. Use ONLY on explicit human command — the flow is permanently recorded as gate-bypassed."
+        },
+        "bypass_reason": {
+          "type": "string",
+          "description": "Why the gate was bypassed (recorded on the flow). Provide when bypass:true."
+        }
+      },
+      "required": [
+        "project_id",
+        "name",
+        "task_ids"
+      ]
+    },
+    "pull_google_task": {
+      "type": "object",
+      "properties": {
+        "list_id": {
+          "type": "string",
+          "description": "Google Task list ID (from list_google_task_lists)"
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Google Task ID to pull (from list_google_tasks)"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Tasker section ID to create the task in"
+        }
+      },
+      "required": [
+        "list_id",
+        "task_id",
+        "section_id"
+      ]
+    },
+    "pull_intake_job": {
+      "type": "object",
+      "properties": {}
+    },
+    "pull_local_project": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "device_id": {
+          "type": "string",
+          "description": "Stable name for this machine/checkout (e.g. \"desktop-repo\"). Determines the ID lease block."
+        },
+        "cursor": {
+          "type": "number",
+          "description": "The cursor from this device's current .sync.json (omit on first pull). Used for the tombstone diff."
+        },
+        "inline": {
+          "type": "boolean",
+          "description": "If true, return the full file map in the tool response instead of the hydrate script (context-heavy fallback for environments without node)."
+        },
+        "watch": {
+          "type": "boolean",
+          "description": "If true, ALSO mint a scoped device token and return a watch_script (watch.mjs) for immediate two-way sync: `node watch.mjs` flushes edits within ~1s of a save and polls the hub every ~15s. Use when a human will hand-edit files or wants the web board to update live. Off by default (avoids accruing standing tokens on ordinary pulls)."
+        }
+      },
+      "required": [
+        "project_id",
+        "device_id"
+      ]
+    },
+    "rank_tasks": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Optional — falls back to default project if set."
+        },
+        "confirmed": {
+          "type": "boolean",
+          "description": "Set to true to rank tasks across ALL projects (only needed when project_id is omitted AND no default project is set)."
+        }
+      },
+      "required": []
+    },
+    "recompute_flow_steps": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or flow name (partial match OK). Preferred over task_id."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow — the server finds the flow from it."
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Narrows name or short-ID lookup."
+        }
+      }
+    },
+    "remove_task_input": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "The CONSUMER task (UUID or short ID)"
+        },
+        "source_task_id": {
+          "type": "string",
+          "description": "Optional: the upstream source whose edge to remove. Omit to remove all input edges."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "rename_environment": {
+      "type": "object",
+      "properties": {
+        "environment_id": {
+          "type": "string",
+          "description": "Environment UUID (from list_environments)."
+        },
+        "name": {
+          "type": "string",
+          "description": "New name."
+        }
+      },
+      "required": [
+        "environment_id",
+        "name"
+      ]
+    },
+    "rename_group": {
+      "type": "object",
+      "properties": {
+        "group_id": {
+          "type": "string",
+          "description": "Group UUID"
+        },
+        "name": {
+          "type": "string",
+          "description": "New group name"
+        }
+      },
+      "required": [
+        "group_id",
+        "name"
+      ]
+    },
+    "rename_section": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID"
+        },
+        "name": {
+          "type": "string",
+          "description": "New section name"
+        }
+      },
+      "required": [
+        "project_id",
+        "section_id",
+        "name"
+      ]
+    },
+    "resolve_seed": {
+      "type": "object",
+      "properties": {
+        "seed_id": {
+          "type": "string",
+          "description": "The seed task to resolve (UUID or short ID)."
+        },
+        "proceed_anyway": {
+          "type": "boolean",
+          "description": "Override the soft prerequisite gate. Default false. When false, resolving a seed that still has unchecked kind=\"prerequisite\" checklist items is refused with the list of unmet prerequisites — confirm with the user, then retry with true."
+        },
+        "task_spec": {
+          "type": "object",
+          "description": "The resolved concrete task.",
+          "properties": {
+            "text": {
+              "type": "string",
+              "description": "Task title."
+            },
+            "detail": {
+              "type": "string",
+              "description": "Resolved context/description. Write self-contained: goal/why, key decisions, pointers to load-bearing context, obvious next step — enough for a cold reader to act without the chat."
+            },
+            "priority": {
+              "type": "string",
+              "enum": [
+                "rush",
+                "high",
+                "medium",
+                "low"
+              ]
+            },
+            "section_id": {
+              "type": "string",
+              "description": "Where it belongs (UUID). Defaults to the seed's section if omitted."
+            },
+            "milestones": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Optional ordered milestones."
+            }
+          },
+          "required": [
+            "text"
+          ]
+        }
+      },
+      "required": [
+        "seed_id",
+        "task_spec"
+      ]
+    },
+    "resume_flow": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or (partial) name."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Or any task in the flow."
+        }
+      },
+      "required": []
+    },
+    "review_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "The review-enabled task to judge."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "revoke_device_token": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID."
+        },
+        "token_id": {
+          "type": "string",
+          "description": "UUID of a specific token to revoke (from revoke_device_token with neither field, or mint_device_token)."
+        },
+        "device_id": {
+          "type": "string",
+          "description": "Revoke ALL active tokens for this device."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "run_flow": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or flow name (partial match OK, e.g. \"define docs structure\"). Preferred over task_id."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow — the server will find the whole flow from it. Use when you only have a task reference."
+        },
+        "project_id": {
+          "type": "string",
+          "description": "Project slug, prefix, or UUID. Narrows name lookup when using flow name; required when using task_id with a short ID like TDE-12."
+        }
+      }
+    },
+    "save_flow_as_template": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or name to save as a template."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow — alternative to flow_id."
+        },
+        "name": {
+          "type": "string",
+          "description": "Name for the template (e.g. \"Blog Post Publication\")."
+        },
+        "description": {
+          "type": "string",
+          "description": "Optional description of what this template is for."
+        }
+      },
+      "required": [
+        "name"
+      ]
+    },
+    "section_insights": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Section UUID"
+        }
+      },
+      "required": [
+        "project_id",
+        "section_id"
+      ]
+    },
+    "set_local_mode": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID."
+        },
+        "on": {
+          "type": "boolean",
+          "description": "true = enable Local Mode, false = disable. Defaults to true."
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "set_task_input": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31) — the CONSUMER"
+        },
+        "source_task_id": {
+          "type": "string",
+          "description": "Upstream task whose output this task consumes (the producer for this edge)"
+        },
+        "contract": {
+          "type": "object",
+          "description": "A quality contract: an ordered list of rules the artifact must satisfy. Context-free / portable — describe the SHAPE of acceptable output, never this run's subject.",
+          "properties": {
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "description": "One quality-bar rule. Author these by discussing with the user, then have them confirm.",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Optional stable id; auto-assigned if omitted."
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Short human name (e.g. \"Cites enough sources\")."
+                  },
+                  "rule": {
+                    "type": "string",
+                    "description": "The rule itself — the assertion checked. For kind=judgment, a precise NL criterion. For kind=check, the check spec (e.g. \"min_length: 500\", \"command: npm test exits 0\")."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Optional context: why it matters / how to satisfy. Not itself a pass/fail target."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "check",
+                      "judgment"
+                    ],
+                    "description": "check = deterministic (counts, patterns, commands); judgment = semantic judgment by you, the agent."
+                  },
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "blocker",
+                      "warning"
+                    ],
+                    "description": "blocker fail reopens the producing task; warning fail is recorded but does not block. Default blocker."
+                  }
+                },
+                "required": [
+                  "rule"
+                ]
+              }
+            }
+          },
+          "required": [
+            "rules"
+          ]
+        },
+        "expected_type": {
+          "type": "string",
+          "enum": [
+            "string",
+            "document",
+            "code",
+            "decision",
+            "other"
+          ],
+          "description": "Optional coarse type hint for this input"
+        },
+        "replace": {
+          "type": "boolean",
+          "description": "If true, replace ALL input edges with just this one. Default false (upsert only this source's edge)."
+        }
+      },
+      "required": [
+        "task_id",
+        "source_task_id"
+      ]
+    },
+    "set_task_output": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31) — the PRODUCER"
+        },
+        "contract": {
+          "type": "object",
+          "description": "A quality contract: an ordered list of rules the artifact must satisfy. Context-free / portable — describe the SHAPE of acceptable output, never this run's subject.",
+          "properties": {
+            "rules": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "description": "One quality-bar rule. Author these by discussing with the user, then have them confirm.",
+                "properties": {
+                  "id": {
+                    "type": "string",
+                    "description": "Optional stable id; auto-assigned if omitted."
+                  },
+                  "label": {
+                    "type": "string",
+                    "description": "Short human name (e.g. \"Cites enough sources\")."
+                  },
+                  "rule": {
+                    "type": "string",
+                    "description": "The rule itself — the assertion checked. For kind=judgment, a precise NL criterion. For kind=check, the check spec (e.g. \"min_length: 500\", \"command: npm test exits 0\")."
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "Optional context: why it matters / how to satisfy. Not itself a pass/fail target."
+                  },
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "check",
+                      "judgment"
+                    ],
+                    "description": "check = deterministic (counts, patterns, commands); judgment = semantic judgment by you, the agent."
+                  },
+                  "severity": {
+                    "type": "string",
+                    "enum": [
+                      "blocker",
+                      "warning"
+                    ],
+                    "description": "blocker fail reopens the producing task; warning fail is recorded but does not block. Default blocker."
+                  }
+                },
+                "required": [
+                  "rule"
+                ]
+              }
+            }
+          },
+          "required": [
+            "rules"
+          ]
+        }
+      },
+      "required": [
+        "task_id",
+        "contract"
+      ]
+    },
+    "stop_flow": {
+      "type": "object",
+      "properties": {
+        "flow_id": {
+          "type": "string",
+          "description": "Flow UUID or (partial) name."
+        },
+        "task_id": {
+          "type": "string",
+          "description": "Or any task in the flow (short ID or UUID)."
+        },
+        "reason": {
+          "type": "string",
+          "description": "Why you are stopping — shown to the agent when it tries to proceed."
+        }
+      },
+      "required": []
+    },
+    "store_artifact": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID — the PRODUCER"
+        },
+        "content": {
+          "type": "string",
+          "description": "The actual produced output — verbatim, not a summary. This is exactly what the independent validator will grade."
+        },
+        "format": {
+          "type": "string",
+          "enum": [
+            "text",
+            "markdown",
+            "code",
+            "json"
+          ],
+          "description": "Optional format hint for the validator. Default: text."
+        },
+        "commit_to_repo": {
+          "type": "boolean",
+          "description": "If true, also commit the artifact to the project's linked GitHub repo. Requires the project to have a linked repo (github_import_project) and a connected GitHub account."
+        },
+        "filename": {
+          "type": "string",
+          "description": "Filename for the committed file (e.g. \"report.md\"). Required when commit_to_repo is true. The path in the repo will be .tasker/artifacts/{flow-short-id or task-short-id}/{filename}."
+        },
+        "upload_to_drive": {
+          "type": "boolean",
+          "description": "If true, also upload the artifact to the user's Tasker folder in Google Drive. Requires Google Drive connected via the app Connectors page."
+        },
+        "drive_filename": {
+          "type": "string",
+          "description": "Filename for the Drive file (e.g. \"report.md\"). Required when upload_to_drive is true."
+        },
+        "drive_target_type": {
+          "type": "string",
+          "enum": [
+            "file",
+            "doc",
+            "sheet"
+          ],
+          "description": "When upload_to_drive is true: \"file\" (default) keeps the raw artifact; \"doc\" creates an editable Google Doc (artifact should be HTML/Markdown); \"sheet\" creates an editable Google Sheet (artifact should be CSV)."
+        }
+      },
+      "required": [
+        "task_id",
+        "content"
+      ]
+    },
+    "submit_intake_result": {
+      "type": "object",
+      "properties": {
+        "job_id": {
+          "type": "string",
+          "description": "The job id returned by pull_intake_job."
+        },
+        "analysis": {
+          "type": "string",
+          "description": "Short plain-language analysis of the source: what it is and what it asks for."
+        },
+        "tasks": {
+          "type": "array",
+          "description": "Proposed tasks for the human to review/edit/import.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string",
+                "description": "Task title."
+              },
+              "context": {
+                "type": "string",
+                "description": "Task detail/context."
+              },
+              "section": {
+                "type": "string",
+                "description": "Suggested section name (optional)."
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "rush",
+                  "high",
+                  "medium",
+                  "low"
+                ]
+              },
+              "milestones": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Optional ordered milestone texts."
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        "error": {
+          "type": "string",
+          "description": "If the job could not be processed, the reason (instead of tasks)."
+        }
+      },
+      "required": [
+        "job_id"
+      ]
+    },
+    "submit_task_review": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "The reviewed task (same as review_task)."
+        },
+        "validator": {
+          "type": "string",
+          "description": "Who graded — use \"independent-subagent\" when judgment rules were graded by a fresh subagent."
+        },
+        "results": {
+          "type": "array",
+          "description": "Per-rule results.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "description": "id of the bar rule"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pass",
+                  "fail"
+                ]
+              },
+              "observed_value": {
+                "type": "string",
+                "description": "Required for check rules — the raw datum."
+              },
+              "note": {
+                "type": "string",
+                "description": "Required for any fail — the specific deficiency."
+              }
+            },
+            "required": [
+              "rule_id",
+              "status"
+            ]
+          }
+        },
+        "narrative": {
+          "type": "object",
+          "description": "GUIDED REVIEW (TDE-382): a human-facing narrative of the verdict, structured so the human gate is ~30s of judgment, not error-hunting. Provide on any fail/escalation. Verdict logic is unchanged — this is presentation.",
+          "properties": {
+            "core": {
+              "type": "string",
+              "description": "The single most important thing the human must judge."
+            },
+            "sections": {
+              "type": "array",
+              "description": "Consequence-ordered points.",
+              "items": {
+                "type": "object",
+                "properties": {
+                  "point": {
+                    "type": "string"
+                  },
+                  "consequence": {
+                    "type": "string"
+                  }
+                }
+              }
+            },
+            "secondary": {
+              "type": "string",
+              "description": "Minor / glue notes, separated out."
+            }
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "results"
+      ]
+    },
+    "submit_validation_result": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID — the PRODUCER (same as validate_output)"
+        },
+        "target_task_id": {
+          "type": "string",
+          "description": "Optional: the CONSUMER edge validated against (required only if the producer feeds more than one task)"
+        },
+        "validator": {
+          "type": "string",
+          "description": "Who ran this validation. Required when judgment rules are present. Use \"independent-subagent\" (fresh Claude session with the artifact), \"human\" (human reviewed), or \"self\" (you graded your own work — discloses conflict). Omitting when judgment rules exist flags the ledger as unverified."
+        },
+        "results": {
+          "type": "array",
+          "description": "Per-rule results from your evaluation.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "rule_id": {
+                "type": "string",
+                "description": "id of the rule (from validate_output's output)"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "pass",
+                  "fail"
+                ],
+                "description": "Did the output meet this rule?"
+              },
+              "observed_value": {
+                "type": "string",
+                "description": "REQUIRED for kind=check rules. The raw datum from actually running the check — not an interpretation, the value itself. Examples: \"1,542 words\" (word count), \"exit 0 — All 24 tests passed\" (command), \"/src/index.ts found\" (file exists), \"keyword 'authentication' found at line 47\" (pattern). If you cannot produce a concrete observed value, you have not run the check."
+              },
+              "note": {
+                "type": "string",
+                "description": "REQUIRED for any fail (any kind): the specific deficiency — what did not meet the rule and why. REQUIRED for kind=check rules: interpretation of the observed_value (e.g. \"1,542 words — exceeds 1,000-word minimum\"). For kind=judgment pass: reasoning recommended."
+              }
+            },
+            "required": [
+              "rule_id",
+              "status"
+            ]
+          }
+        }
+      },
+      "required": [
+        "task_id",
+        "results"
+      ]
+    },
+    "uncomplete_milestone": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "index": {
+          "type": "number",
+          "description": "Zero-based index of the milestone to uncomplete"
+        }
+      },
+      "required": [
+        "task_id",
+        "index"
+      ]
+    },
+    "uncomplete_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "update_ai_instructions": {
+      "type": "object",
+      "properties": {
+        "task_list_format": {
+          "type": "string",
+          "enum": [
+            "plain_text",
+            "markdown_table",
+            "numbered_list"
+          ]
+        },
+        "show_completed_tasks": {
+          "type": "boolean"
+        },
+        "rank_tasks_by": {
+          "type": "string",
+          "enum": [
+            "sorting_order",
+            "task_priority"
+          ]
+        },
+        "communication_style": {
+          "type": "string",
+          "enum": [
+            "terse",
+            "detailed",
+            "conversational"
+          ]
+        },
+        "multiple_tasks_handling": {
+          "type": "string",
+          "enum": [
+            "collaborative",
+            "autonomous"
+          ]
+        },
+        "show_project_context": {
+          "type": "boolean"
+        }
+      },
+      "required": []
+    },
+    "update_default_is_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the default IS entry (from list_default_is_entries)."
+        },
+        "title": {
+          "type": "string"
+        },
+        "content": {
+          "type": "string"
+        },
+        "universal": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "update_flow_context": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow"
+        },
+        "context": {
+          "type": "string",
+          "description": "New shared context (replaces existing)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional: rename the flow"
+        },
+        "short_id": {
+          "type": "string",
+          "description": "Optional: set or change the flow short ID (e.g. \"BKT-F2\"). Must be unique across all your flows."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "update_flow_is_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the flow IS entry (from list_flow_is_entries)"
+        },
+        "title": {
+          "type": "string",
+          "description": "New title (optional)"
+        },
+        "content": {
+          "type": "string",
+          "description": "New content (optional)"
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "update_flow_kb_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the flow KB entry (from list_flow_kb_entries)"
+        },
+        "title": {
+          "type": "string",
+          "description": "New title (optional)"
+        },
+        "content": {
+          "type": "string",
+          "description": "New content (optional)"
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "update_is_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the IS entry. Get it via list_is_entries or get_project_is."
+        },
+        "title": {
+          "type": "string",
+          "description": "New title (optional)"
+        },
+        "content": {
+          "type": "string",
+          "description": "New content (optional, markdown supported)"
+        },
+        "universal": {
+          "type": "boolean",
+          "description": "Set true so this rule applies even inside flows with their own IS; false to scope it to non-flow / fallback only."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "update_kb_entry": {
+      "type": "object",
+      "properties": {
+        "entry_id": {
+          "type": "string",
+          "description": "UUID of the KB entry. Get it via list_kb_entries or get_knowledge_base."
+        },
+        "title": {
+          "type": "string",
+          "description": "New title (optional)"
+        },
+        "content": {
+          "type": "string",
+          "description": "New content (optional, markdown supported)"
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "architecture",
+            "database",
+            "deployment",
+            "mcp",
+            "flows",
+            "design",
+            "product",
+            "gtm",
+            "reference",
+            "other"
+          ],
+          "description": "Set/change the category (controlled vocab); pass null to clear. Soft retrieval hint, not a filter."
+        }
+      },
+      "required": [
+        "entry_id"
+      ]
+    },
+    "update_project": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix, slug, or UUID"
+        },
+        "name": {
+          "type": "string",
+          "description": "New project name (optional)"
+        },
+        "prefix": {
+          "type": "string",
+          "description": "New prefix, 2–5 uppercase letters e.g. \"BPW\" (optional)"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
+    "update_project_context": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string"
+        },
+        "context": {
+          "type": "object",
+          "description": "Fields to update: goal, why, scope, risks, done_looks_like"
+        }
+      },
+      "required": [
+        "project_id",
+        "context"
+      ]
+    },
+    "update_task": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "text": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string",
+          "description": "Task context. Replaces the existing detail unless append:true is also passed."
+        },
+        "append": {
+          "type": "boolean",
+          "description": "If true, the provided detail is appended to the existing detail (separated by a blank line) instead of replacing it. Default false. Lets you add notes/context without resending the whole field."
+        },
+        "priority": {
+          "type": "string",
+          "enum": [
+            "rush",
+            "high",
+            "medium",
+            "low"
+          ]
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "in_progress",
+            "done"
+          ]
+        },
+        "due_date": {
+          "type": "string"
+        },
+        "section_id": {
+          "type": "string",
+          "description": "Move task to a different section (use section UUID)"
+        },
+        "group_id": {
+          "type": "string",
+          "description": "Move task to a different group (use group UUID), or null to remove from group"
+        },
+        "pinned": {
+          "type": "boolean",
+          "description": "Pin or unpin the task"
+        },
+        "executor": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "user",
+            "external"
+          ],
+          "description": "Who executes this step. agent = AI; user = human (AI coaches); external = third party."
+        },
+        "human_guidance": {
+          "type": "string",
+          "description": "Human-facing step instructions for guide mode (user/external steps). Replaces existing."
+        },
+        "relay_context": {
+          "type": "string",
+          "description": "RELAY MODE (TDE-324): set/replace the curated relay rationale layer on an EXISTING task (e.g. when the user decides to hand off a task already created). Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump. Setting it marks the task as a relay."
+        },
+        "delegated_to": {
+          "type": "string",
+          "description": "TDE-375: who the task is delegated to (free text — an agent or teammate). You (the owner) REMAIN responsible and still own the quality gate; delegation is NOT reassignment. Pass an empty string to clear."
+        },
+        "agent_ready": {
+          "type": "boolean",
+          "description": "Mark this task \"ready for the agent\" — it enters the autonomous work queue (get_ready_work). Usually set by the human in the web app (\"Hand to agent\"); set false to pull it back."
+        },
+        "agent_proposal": {
+          "type": "string",
+          "description": "Prepare→confirm→execute: record the agent's PREPARED proposal for this task (a concise summary of what it will do). Setting it makes the task appear in the web Agent Queue \"Awaiting confirmation\" tab. Clear it (empty string) once the human confirms and you execute, or if declined."
+        },
+        "agent_proposal_confirmed": {
+          "type": "boolean",
+          "description": "Usually set by the HUMAN in the web app (the \"Confirm\" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. The agent normally only clears the proposal after executing (which resets this to false)."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "current_state": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "validate_output": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31) — the PRODUCER whose output to validate"
+        },
+        "target_task_id": {
+          "type": "string",
+          "description": "Optional: which CONSUMER edge to validate against. Required only if the producer feeds more than one task."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    }
+  },
+  "liveOnlyToolNames": [
+    "add_task_link",
+    "create_phase",
+    "delete_phase",
+    "get_flow_exceptions",
+    "get_project_delta",
+    "get_task_history",
+    "list_phases",
+    "post_project_update",
+    "resolve_reference",
+    "set_active_phase",
+    "set_task_phase",
+    "update_phase"
+  ]
+}

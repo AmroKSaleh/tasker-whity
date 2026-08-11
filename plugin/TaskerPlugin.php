@@ -1130,20 +1130,28 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_milestone:edit',
                 'schema' => [
                     'operationId' => 'add_milestone',
-                    'summary' => 'Add a milestone to a task',
+                    'summary' => 'Add a milestone to a task. The milestone text is passed as text (the original '
+                        . 'app\'s argument name); summary is accepted as an alias for it, and is the name this '
+                        . 'backend uses for the same field in responses and in update_milestone.',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
-                        'required' => ['task_id', 'summary'],
+                        // PARITY (D1b Task 12): neither name is declared required,
+                        // because either satisfies the call and core's
+                        // InputSchemaValidator enforces `required` literally —
+                        // naming one would reject every call that used the other.
+                        // The handler 400s when both are absent.
+                        'required' => ['task_id'],
                         'properties' => [
                             'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
-                            'summary' => ['type' => 'string'],
+                            'text' => ['type' => 'string', 'description' => 'Milestone text.'],
+                            'summary' => ['type' => 'string', 'description' => 'Alias of text, kept because it is this backend\'s own field name. text wins if both are sent.'],
                             'sort_order' => ['type' => 'integer'],
                         ],
                     ],
                     'responses' => [
                         201 => ['description' => 'The created milestone'],
-                        400 => ['description' => 'summary missing, empty, or too long'],
+                        400 => ['description' => 'text (and its summary alias) missing, empty, or too long'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
                     ],
                 ],

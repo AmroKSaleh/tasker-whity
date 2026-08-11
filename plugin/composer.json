@@ -35,7 +35,8 @@
       "../host/.core/src/Http/InputLimits.php",
       "../host/.core/src/Http/JsonBody.php",
       "../host/.core/src/Http/PaginationParams.php",
-      "../host/.core/src/Api/OusApiHandler.php"
+      "../host/.core/src/Api/OusApiHandler.php",
+      "../host/.core/src/Mcp/Tools/ToolDeriver.php"
     ],
     "files": ["../host/.core/src/helpers.php"]
   }

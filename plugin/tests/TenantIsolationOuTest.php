@@ -1306,6 +1306,33 @@ final class TenantIsolationOuTest extends TestCase
         self::assertFalse($payload['data']['checked']);
     }
 
+    /**
+     * PARITY REGRESSION TEST (D1b Task 12). The original app's add_milestone
+     * takes `text`, not `summary`, and requires it — so before this, every
+     * original-shaped call was rejected by core's InputSchemaValidator for a
+     * missing `summary` it had no reason to send. Both spellings must work, and
+     * `text` must win when both are present.
+     */
+    public function testMilestonesCreateAcceptsTheOriginalsTextArgumentAndPrefersItOverSummary(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Milestone parity project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Task with milestones');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+
+        $viaText = $handler->create(7, null, $taskId, json_encode(['text' => 'Written as text']));
+        self::assertSame(201, $viaText->getStatusCode());
+        self::assertSame('Written as text', json_decode($viaText->getBody(), true)['data']['summary']);
+
+        $bothSent = $handler->create(7, null, $taskId, json_encode(['text' => 'text wins', 'summary' => 'summary loses']));
+        self::assertSame(201, $bothSent->getStatusCode());
+        self::assertSame('text wins', json_decode($bothSent->getBody(), true)['data']['summary']);
+
+        $neither = $handler->create(7, null, $taskId, json_encode(['sort_order' => 1]));
+        self::assertSame(400, $neither->getStatusCode());
+    }
+
     public function testMilestonesCreateRejects404ForATaskOutsideTheCallersTenant(): void
     {
         $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');

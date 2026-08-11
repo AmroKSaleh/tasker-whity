@@ -64,9 +64,21 @@ final class MilestonesApiHandler
     public function create(int $tenantId, ?int $callerOuId, int $taskId, string $body): Response
     {
         $decoded = json_decode($body, true);
-        $summary = is_array($decoded) ? trim((string) ($decoded['summary'] ?? '')) : '';
+        // PARITY FIX (D1b Task 12). The ORIGINAL app's add_milestone names this
+        // argument `text` and REQUIRES it; D1 shipped it as `summary` — the
+        // column name — and required THAT. Core's InputSchemaValidator rejects a
+        // call with a required argument absent before the handler is reached, so
+        // every original-shaped add_milestone call died with "Missing required
+        // argument: summary". The contract-parity test caught it; this is the
+        // only hard break it found among the 36 tools both surfaces share.
+        //
+        // Both spellings are accepted rather than renaming outright: `summary`
+        // is this backend's column, its response field, and update_milestone's
+        // own argument name, so dropping it would trade one incompatibility for
+        // another. `text` wins if both are sent — it is the original's contract.
+        $summary = is_array($decoded) ? trim((string) ($decoded['text'] ?? $decoded['summary'] ?? '')) : '';
         if ($summary === '' || mb_strlen($summary) > self::MAX_SUMMARY_LENGTH) {
-            return Response::error('summary must be a non-empty string of at most ' . self::MAX_SUMMARY_LENGTH . ' characters', 400);
+            return Response::error('text must be a non-empty string of at most ' . self::MAX_SUMMARY_LENGTH . ' characters', 400);
         }
         $sortOrder = is_array($decoded) && isset($decoded['sort_order']) ? (int) $decoded['sort_order'] : 0;
 
