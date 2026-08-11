@@ -1,8 +1,9 @@
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import clsx from 'clsx'
 import { ChevronRight, ShieldCheck, AlertTriangle, Bot, User, Link } from 'lucide-react'
 import { Kicker } from '../editorial/atoms'
 import { inputEdges, outputRules, isConfirmed, lintRule } from '../../lib/flowGraph'
+import { flowTerminalIds } from '../../lib/flowExceptions'
 
 const EXECUTOR_CONFIG = {
   agent:    { Icon: Bot,  label: 'AGENT',    cls: 'text-mute-2 border-mute-2/40' },
@@ -103,6 +104,10 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
   })
 
   const stepByTaskId = new Map(steps.map(s => [s.task.id, s.step]))
+  // TDE-816 / Q7: the terminal output is the one gate that is unconditional — nothing
+  // downstream can catch a problem in it — so it is marked where the steps are, not only
+  // in the exceptions list. Same derivation the MCP uses, so the two cannot disagree.
+  const terminalIds = useMemo(() => flowTerminalIds(steps.map(s => s.task)), [steps])
 
   return (
     <div className="flex flex-col">
@@ -117,6 +122,7 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
           .map(e => stepByTaskId.get(e.source_task_id))
           .filter(Boolean)
           .sort((a, b) => a - b)
+        const isTerminal = terminalIds.has(task.id)
         return (
           <div key={task.id} className={clsx("border-b border-line-2 last:border-b-0 relative", task.status === 'in_progress' && "bg-accent/5")}>
             {task.status === 'in_progress' && <div className="absolute left-0 top-0 bottom-0 w-0.5 bg-accent z-10" />}
@@ -135,6 +141,14 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
               >
                 <span className="font-mono text-[10px] text-mute-2 shrink-0 w-5">{String(step).padStart(2, '0')}</span>
                 <span className={clsx("flex-1 text-[13px] font-medium truncate", task.status === 'in_progress' ? 'text-accent' : 'text-ink')}>{task.text}</span>
+                {isTerminal && (
+                  <span
+                    title="Terminal output — nothing inside the flow consumes this, so no later step can catch a problem in it. This gate is unconditional."
+                    className="inline-flex items-center gap-1 font-mono text-[9px] font-semibold px-1.5 py-px rounded border shrink-0 text-ink-2 border-ink-2/40"
+                  >
+                    ◆ TERMINAL
+                  </span>
+                )}
                 {(task.executor === 'user' || task.executor === 'external') && (
                   <ExecutorBadge executor={task.executor} />
                 )}
@@ -171,10 +185,14 @@ export default function FlowStepList({ steps, prefix, onTaskClick }) {
                   )
                 })}
                 <div>
-                  <Kicker className="mb-1">OUTPUT · DEFINITION OF DONE</Kicker>
+                  <Kicker className="mb-1">OUTPUT · DEFINITION OF DONE{isTerminal ? ' · TERMINAL' : ''}</Kicker>
                   {oRules.length
                     ? oRules.map((r, j) => <RuleRow key={j} rule={r} />)
-                    : <p className="text-[11px] text-mute-2">No definition of done — fine unless a later step builds on this without re-checking it.</p>}
+                    : <p className="text-[11px] text-mute-2">
+                        {isTerminal
+                          ? 'No definition of done — and nothing downstream will catch a problem here, so this output reaches you unchecked.'
+                          : 'No definition of done — fine unless a later step builds on this without re-checking it.'}
+                      </p>}
                   <BlessTag contract={task.output?.contract} hasRules={oRules.length > 0} />
                 </div>
                 {critiques.map(([edgeKey, c]) => (

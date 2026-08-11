@@ -20,7 +20,7 @@ export function useFlows() {
     const [{ data: projs }, { data: tsks }, { data: frecs }] = await Promise.all([
       supabase.from('projects').select(PROJECT_FIELDS).is('is_deleted', false).order('created_at'),
       supabase.from('tasks').select(TASK_FIELDS).is('is_deleted', false).order('sort_order'),
-      supabase.from('flows').select('id, name, short_id, gate_bypassed, gate_bypass_reason').is('is_deleted', false),
+      supabase.from('flows').select('id, name, short_id, gate_bypassed, gate_bypass_reason, step_list_open').is('is_deleted', false),
     ])
     if (projs) setProjects(projs)
     if (tsks) setTasks(tsks)
@@ -45,11 +45,14 @@ export function useFlows() {
         const steps = flowSteps(f.taskIds, taskById)
         const doneCount = steps.filter(s => s.task.status === 'done').length
         const anyInProgress = steps.some(s => s.task.status === 'in_progress')
-        const status = doneCount === steps.length ? 'done'
-          : (anyInProgress || doneCount > 0) ? 'in_progress'
-          : 'pending'
         const flowRecordId = steps.map(s => s.task.flow_id).find(Boolean) || null
         const flowRec = flowRecordId ? flowRecMap.get(flowRecordId) : null
+        // TDE-811: an open step list means more steps are still coming, so "all known
+        // steps are done" is not the same as done. Only a closed list can finish.
+        const stepListOpen = flowRec?.step_list_open === true
+        const status = (doneCount === steps.length && !stepListOpen) ? 'done'
+          : (anyInProgress || doneCount > 0) ? 'in_progress'
+          : 'pending'
         result.push({
           id: `${projectId}:${f.id}`,
           // Prefer the human-set name from the flows record (name_flow / update_flow_context);
@@ -64,6 +67,7 @@ export function useFlows() {
           gate: flowGateStatus(steps),
           gateBypassed: flowRec?.gate_bypassed === true,
           gateBypassReason: flowRec?.gate_bypass_reason ?? null,
+          stepListOpen,
           projectId,
           projectName: project?.name ?? '—',
           projectPrefix: project?.prefix ?? null,
