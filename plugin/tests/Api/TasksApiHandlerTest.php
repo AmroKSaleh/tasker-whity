@@ -349,6 +349,65 @@ final class TasksApiHandlerTest extends TestCase
         self::assertSame('pending', $row['status'], 'a rejected status must not partially apply');
     }
 
+    /**
+     * D1b Task 11 round 4: update_task's status write must maintain
+     * completed_at exactly the way complete()/uncomplete() already do —
+     * three transitions, each proving one part of that invariant.
+     */
+    public function testUpdateToDoneStampsCompletedAt(): void
+    {
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
+
+        $response = $this->handler->update(7, $taskId, json_encode(['status' => 'done']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('done', $payload['data']['status']);
+        self::assertNotNull(
+            $payload['data']['completedAt'],
+            'update_task setting status to done must stamp completed_at, matching complete()'
+        );
+    }
+
+    public function testUpdateAwayFromDoneClearsCompletedAt(): void
+    {
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original', null, null, 'done');
+        $this->pdo->exec("UPDATE tasker_tasks SET completed_at = CURRENT_TIMESTAMP WHERE rowid = {$taskId}");
+
+        $response = $this->handler->update(7, $taskId, json_encode(['status' => 'pending']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('pending', $payload['data']['status']);
+        self::assertNull(
+            $payload['data']['completedAt'],
+            'update_task moving status away from done must clear completed_at, matching uncomplete()'
+        );
+    }
+
+    /**
+     * The case that matters most: update_task changes only PROVIDED fields,
+     * so a text-only update on an already-done task must not touch
+     * completed_at at all -- neither re-stamping it nor clearing it.
+     */
+    public function testUpdateWithoutAStatusFieldLeavesCompletedAtUntouched(): void
+    {
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original', null, null, 'done');
+        $this->pdo->exec("UPDATE tasker_tasks SET completed_at = '2026-01-01 00:00:00' WHERE rowid = {$taskId}");
+
+        $response = $this->handler->update(7, $taskId, json_encode(['text' => 'Edited text only']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Edited text only', $payload['data']['text']);
+        self::assertSame('done', $payload['data']['status'], 'status must be unaffected by a text-only update');
+        self::assertSame(
+            '2026-01-01 00:00:00',
+            $payload['data']['completedAt'],
+            'a text-only update must not clear or restamp an existing completed_at'
+        );
+    }
+
     public function testUpdateRejects404ForATaskOutsideTheCallersTenant(): void
     {
         $response = $this->handler->update(9, 999, json_encode(['text' => 'Should fail']));

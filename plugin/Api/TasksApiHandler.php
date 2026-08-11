@@ -319,17 +319,22 @@ final class TasksApiHandler
      * placement vs. content are kept as two separate, smaller operations,
      * matching the design spec's own naming: update_task vs. move_task).
      *
-     * status (D1b Task 11 round 3) accepts the original's own three-value
-     * enum (pending/in_progress/done), validated exactly like priority
-     * above. NO completed_at side effect is applied here (unlike
-     * complete()/uncomplete(), which stamp/clear it) — this task's own
-     * scope was deliberately narrow ("the three-value enum... written
-     * through the existing OU-scoped update path", nothing about
-     * completed_at), so a task whose status is set to 'done' via THIS route
-     * rather than complete_task will NOT get a completed_at timestamp, and
-     * one moved away from 'done' via this route will not have a stale
-     * completed_at cleared either. Ledgered as a related, unaddressed gap in
-     * this task's own report rather than fixed unilaterally.
+     * status (D1b Task 11 round 3, completed_at fix in round 4) accepts the
+     * original's own three-value enum (pending/in_progress/done), validated
+     * exactly like priority above. completed_at is kept consistent with
+     * whichever status this call REQUESTS, matching complete()/uncomplete()'s
+     * own unconditional semantics exactly (see this method's own status
+     * branch below) rather than a third, independently-invented convention:
+     * both of those methods stamp/clear completed_at regardless of the
+     * task's PRIOR status (complete() re-stamps even an already-done task;
+     * uncomplete() clears even an already-pending one), and both therefore
+     * maintain the same invariant — completed_at is non-null exactly when
+     * status is 'done'. This addition preserves that same invariant across
+     * the third status value (in_progress) this route introduces. Before
+     * round 4, this docblock instead documented completed_at as a
+     * deliberately-unaddressed gap; round 4 fixed it rather than ledgering
+     * it, since it was a defect this same task introduced, not a
+     * pre-existing one.
      */
     public function update(int $tenantId, int $taskId, string $body): Response
     {
@@ -377,6 +382,22 @@ final class TasksApiHandler
             }
             $fields[] = 'status = :status';
             $params[':status'] = $status;
+            // Mirrors complete()/uncomplete()'s own unconditional
+            // completed_at handling exactly (D1b Task 11 round 4): the
+            // REQUESTED status becoming 'done' always (re-)stamps
+            // completed_at to now, regardless of the task's prior status —
+            // exactly like complete() itself, which never checks whether
+            // the task was already done before stamping. Any other
+            // requested status always clears it, regardless of prior
+            // status — exactly like uncomplete()'s own unconditional NULL.
+            // $status is already validated above, never caller-supplied SQL
+            // text, so this fixed two-armed literal is safe the same way
+            // setPinned()'s own $pinnedAtClause is. completed_at is left
+            // completely untouched when this whole block never runs (the
+            // array_key_exists() guard above) — that is what keeps a plain
+            // {"text": "..."} update on an already-done task from silently
+            // clearing its completion timestamp.
+            $fields[] = $status === 'done' ? 'completed_at = CURRENT_TIMESTAMP' : 'completed_at = NULL';
         }
 
         if ($fields === []) {
