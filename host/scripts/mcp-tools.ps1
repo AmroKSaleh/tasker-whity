@@ -105,7 +105,16 @@ try {
         throw "MCP tools/list failed: [$($response.error.code)] $($response.error.message)"
     }
 
+    # Kept in sync with every 'operationId' declared in TaskerPlugin.php's
+    # route table — verify with:
+    #   git grep -oE "'operationId' => '[^']+'" plugin/TaskerPlugin.php |
+    #     sed "s/.*=> '//;s/'$//" | sort -u
+    # and diff the result against this array. Task 5's review caught this
+    # list silently missing two Task-3 tools (__init_tasker_session,
+    # set_default_project) that predated it; nothing enforces this list
+    # automatically, so re-run that comparison whenever a task adds a route.
     $taskerToolNames = @(
+        '__init_tasker_session', 'set_default_project',
         'list_pings', 'create_ping', 'tag_ping',
         'list_projects', 'create_project', 'update_project', 'delete_project',
         'list_sections', 'create_section', 'update_section', 'rename_section', 'delete_section',

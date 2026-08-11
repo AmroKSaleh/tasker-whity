@@ -299,4 +299,129 @@ final class TaskerPluginTest extends TestCase
             $_GET = $previousGet;
         }
     }
+
+    /**
+     * Task 5 review finding: the new updateSection()/deleteSection()/
+     * updateGroup()/deleteGroup() branch — classify an optional parent
+     * identifier, 400 on malformed, resolve it only when non-empty, pass it
+     * as resolveSection()'s/resolveGroup()'s fifth argument — was extracted
+     * into resolveOptionalParentId() specifically because it shipped with NO
+     * verification at any layer: the existing
+     * testResolveSectionBySlugRequiresTheParentAndRefusesAcrossAnOuBoundary
+     * calls IdentifierResolver::resolveSection() directly with a
+     * hand-supplied parent, never through TaskerPlugin, so it could not catch
+     * a dispatch-order bug in the new composition code (a swapped classify
+     * call, or the wrong variable passed as the parent). These tests close
+     * that gap the same way {@see self::invokeIdentifierFromRequest()} does
+     * for identifierFromRequest() — via Reflection, since resolveOptionalParentId()
+     * is a private route-dispatch helper with no other seam.
+     *
+     * The 'empty' and 'malformed_short_id' branches are pure (no database
+     * call happens on either path) and are asserted directly. The "supplied"
+     * branch is asserted with a SPY resolver rather than a real
+     * IdentifierResolver::resolveProject()/resolveSection() call: those need
+     * PostgreSQL (OuScopeResolver::whereFragment()'s `= ANY(:scope)` fails at
+     * PDO::prepare() under SQLite — see TenantIsolationOuTest's own header),
+     * which is exactly why this composition logic had no coverage before
+     * this extraction. The spy lets these tests verify the exact
+     * (pdo, tenantId, callerOuId, raw) tuple resolveOptionalParentId() hands
+     * to the resolver, independent of what IdentifierResolver itself does
+     * with it.
+     */
+    private function invokeResolveOptionalParentId(
+        Request $request,
+        PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        string $key,
+        callable $resolver
+    ): array {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveOptionalParentId');
+        $method->setAccessible(true);
+
+        /** @var array{ok: bool, value: ?int} $result */
+        $result = $method->invoke($plugin, $request, $pdo, $tenantId, $callerOuId, $key, $resolver);
+
+        return $result;
+    }
+
+    public function testResolveOptionalParentIdReturnsNullWithoutCallingTheResolverWhenAbsent(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('PATCH', '/api/tasker/sections', [], (string) json_encode(['name' => 'x']));
+
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveOptionalParentId($request, $pdo, 7, null, 'project_id', $resolver);
+
+        self::assertTrue($result['ok']);
+        self::assertNull($result['value']);
+        self::assertFalse($called, 'an absent parent identifier must not trigger a resolver call at all');
+    }
+
+    public function testResolveOptionalParentIdRejectsAMalformedShortIdWithoutCallingTheResolver(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('PATCH', '/api/tasker/sections', [], (string) json_encode(['project_id' => 'AB-xyz']));
+
+        $called = false;
+        $resolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 99;
+        };
+
+        $result = $this->invokeResolveOptionalParentId($request, $pdo, 7, null, 'project_id', $resolver);
+
+        self::assertFalse($result['ok']);
+        self::assertNull($result['value']);
+        self::assertFalse($called, 'a malformed short id must not reach the resolver — the caller 400s on ok:false first');
+    }
+
+    public function testResolveOptionalParentIdCallsTheResolverWithTheExactTupleWhenSupplied(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('PATCH', '/api/tasker/sections', [], (string) json_encode(['project_id' => 'TDE']));
+
+        $seen = null;
+        $resolver = function (PDO $calledPdo, int $tenantId, ?int $callerOuId, $raw) use (&$seen, $pdo): ?int {
+            $seen = [$calledPdo === $pdo, $tenantId, $callerOuId, $raw];
+
+            return 42;
+        };
+
+        $result = $this->invokeResolveOptionalParentId($request, $pdo, 7, 3, 'project_id', $resolver);
+
+        self::assertTrue($result['ok']);
+        self::assertSame(42, $result['value']);
+        self::assertSame(
+            [true, 7, 3, 'TDE'],
+            $seen,
+            'the resolver must receive the SAME pdo, the tenantId, the callerOuId, and the raw (unresolved) '
+                . 'identifier untouched — not a swapped argument or an already-resolved value'
+        );
+    }
+
+    public function testResolveOptionalParentIdPassesThroughANullResolutionWithoutTreatingItAsAnError(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('PATCH', '/api/tasker/sections', [], (string) json_encode(['project_id' => 'ZZZ']));
+
+        $resolver = fn (PDO $pdo, int $tenantId, ?int $callerOuId, $raw): ?int => null;
+
+        $result = $this->invokeResolveOptionalParentId($request, $pdo, 7, null, 'project_id', $resolver);
+
+        self::assertTrue(
+            $result['ok'],
+            'a resolver returning null (not found, or outside the caller\'s OU scope) is not the same failure '
+                . 'mode as a malformed identifier and must not be reported as ok:false'
+        );
+        self::assertNull($result['value']);
+    }
 }

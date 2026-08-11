@@ -1261,16 +1261,19 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('section_id looks like a short id but is malformed', 400);
         }
 
-        $rawProjectId = $this->identifierFromRequest($request, 'project_id');
-        $projectForm = IdentifierResolver::classify($rawProjectId);
-        if ($projectForm === 'malformed_short_id') {
+        $parent = $this->resolveOptionalParentId(
+            $request,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            'project_id',
+            [IdentifierResolver::class, 'resolveProject']
+        );
+        if (!$parent['ok']) {
             return Response::error('project_id looks like a short id but is malformed', 400);
         }
-        $parentProjectId = $projectForm === 'empty'
-            ? null
-            : IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $rawProjectId);
 
-        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId, $parentProjectId);
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId, $parent['value']);
         if ($sectionId === null) {
             return Response::error('Section not found', 404);
         }
@@ -1306,16 +1309,19 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('section_id looks like a short id but is malformed', 400);
         }
 
-        $rawProjectId = $this->identifierFromRequest($request, 'project_id');
-        $projectForm = IdentifierResolver::classify($rawProjectId);
-        if ($projectForm === 'malformed_short_id') {
+        $parent = $this->resolveOptionalParentId(
+            $request,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            'project_id',
+            [IdentifierResolver::class, 'resolveProject']
+        );
+        if (!$parent['ok']) {
             return Response::error('project_id looks like a short id but is malformed', 400);
         }
-        $parentProjectId = $projectForm === 'empty'
-            ? null
-            : IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $rawProjectId);
 
-        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId, $parentProjectId);
+        $sectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId, $parent['value']);
         if ($sectionId === null) {
             return Response::error('Section not found', 404);
         }
@@ -1433,16 +1439,19 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('group_id looks like a short id but is malformed', 400);
         }
 
-        $rawSectionId = $this->identifierFromRequest($request, 'section_id');
-        $sectionForm = IdentifierResolver::classify($rawSectionId);
-        if ($sectionForm === 'malformed_short_id') {
+        $parent = $this->resolveOptionalParentId(
+            $request,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            'section_id',
+            [IdentifierResolver::class, 'resolveSection']
+        );
+        if (!$parent['ok']) {
             return Response::error('section_id looks like a short id but is malformed', 400);
         }
-        $parentSectionId = $sectionForm === 'empty'
-            ? null
-            : IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId);
 
-        $groupId = IdentifierResolver::resolveGroup($pdo, $tenantId, $ou['ouId'], $rawGroupId, $parentSectionId);
+        $groupId = IdentifierResolver::resolveGroup($pdo, $tenantId, $ou['ouId'], $rawGroupId, $parent['value']);
         if ($groupId === null) {
             return Response::error('Group not found', 404);
         }
@@ -1478,16 +1487,19 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('group_id looks like a short id but is malformed', 400);
         }
 
-        $rawSectionId = $this->identifierFromRequest($request, 'section_id');
-        $sectionForm = IdentifierResolver::classify($rawSectionId);
-        if ($sectionForm === 'malformed_short_id') {
+        $parent = $this->resolveOptionalParentId(
+            $request,
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            'section_id',
+            [IdentifierResolver::class, 'resolveSection']
+        );
+        if (!$parent['ok']) {
             return Response::error('section_id looks like a short id but is malformed', 400);
         }
-        $parentSectionId = $sectionForm === 'empty'
-            ? null
-            : IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawSectionId);
 
-        $groupId = IdentifierResolver::resolveGroup($pdo, $tenantId, $ou['ouId'], $rawGroupId, $parentSectionId);
+        $groupId = IdentifierResolver::resolveGroup($pdo, $tenantId, $ou['ouId'], $rawGroupId, $parent['value']);
         if ($groupId === null) {
             return Response::error('Group not found', 404);
         }
@@ -1972,6 +1984,79 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return $value;
+    }
+
+    /**
+     * Resolve an OPTIONAL parent identifier supplied alongside a slug-form
+     * child identifier — project_id for a section (updateSection()/
+     * deleteSection()), section_id for a group (updateGroup()/
+     * deleteGroup()). A section/group slug is unique only within its parent
+     * (see IdentifierResolver::resolveStructural()'s own docblock), so the
+     * parent has to be resolved to an integer before it can be passed as
+     * resolveSection()'s/resolveGroup()'s fifth argument.
+     *
+     * Three outcomes, distinguished the same way resolveCallerOu() above
+     * distinguishes its own three outcomes — a bare `?int` cannot tell
+     * "not supplied" apart from "supplied but did not resolve":
+     *
+     *   - not supplied at all ('empty' form): {ok: true, value: null}. The
+     *     resolver is never called — a slug lookup against a null parent
+     *     legitimately fails to resolve later (resolveSection()/
+     *     resolveGroup() return null for a slug/prefix form with $parentId
+     *     === null), which becomes the same 404 as "not found", not a
+     *     separate error here.
+     *   - malformed (looks like a short id but is not one):
+     *     {ok: false, value: null}. Callers must 400 on this, matching
+     *     every other malformed-short-id check in this file.
+     *   - any other supplied form: {ok: true, value: $resolver(...)} — the
+     *     resolver's own return value passed straight through (an int, or
+     *     null if it did not resolve, e.g. outside the caller's OU scope).
+     *
+     * Extracted as a private helper — rather than inlined near-identically
+     * four times across updateSection()/deleteSection()/updateGroup()/
+     * deleteGroup(), as it originally was — for two reasons: it removes that
+     * duplication, and it gives this composition logic (new in this task) an
+     * actual Reflection test seam. The logic inside updateSection() and
+     * friends is otherwise unreachable from PHPUnit: every path through
+     * those route methods calls resolvePdo(), which resolves the live host
+     * container and has no test double. See TaskerPluginTest for coverage:
+     * the 'empty' and 'malformed_short_id' branches are exercised directly
+     * (pure — no database call happens on either path); the "supplied"
+     * branch is exercised with a spy $resolver, verifying the exact
+     * (pdo, tenantId, callerOuId, raw) tuple this method passes through,
+     * without requiring a real IdentifierResolver::resolveProject()/
+     * resolveSection() call — those need PostgreSQL (OuScopeResolver::
+     * whereFragment()'s `= ANY(:scope)` fails at PDO::prepare() under
+     * SQLite), which is exactly why this composition logic had no coverage
+     * before this extraction.
+     *
+     * $resolver is IdentifierResolver::resolveProject() or ::resolveSection(),
+     * passed as a first-class callable and invoked with no default/
+     * grandparent argument — this resolves exactly one level up, never two.
+     *
+     * @param callable(\PDO, int, ?int, string|int|null): ?int $resolver
+     * @return array{ok: bool, value: ?int}
+     */
+    private function resolveOptionalParentId(
+        Request $request,
+        \PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        string $key,
+        callable $resolver
+    ): array {
+        $raw = $this->identifierFromRequest($request, $key);
+        $form = IdentifierResolver::classify($raw);
+
+        if ($form === 'malformed_short_id') {
+            return ['ok' => false, 'value' => null];
+        }
+
+        if ($form === 'empty') {
+            return ['ok' => true, 'value' => null];
+        }
+
+        return ['ok' => true, 'value' => $resolver($pdo, $tenantId, $callerOuId, $raw)];
     }
 
     /**
