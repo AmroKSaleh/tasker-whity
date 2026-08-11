@@ -44,6 +44,20 @@ Deno.serve(async (req: Request) => {
     await sb.from('oauth_codes').delete().eq('code', code)
     return json({ error: 'invalid_grant', error_description: 'Code expired' }, 400)
   }
+  // Defence in depth. The authorize page also checks this, but that check runs in the browser and
+  // is therefore advisory. The comparison below only tests the REQUEST against the CODE, so an
+  // attacker who controlled the redirect_uri at authorize time matches it here trivially — which
+  // is precisely the hijack case. Validate against what the client actually REGISTERED instead.
+  if (authCode.redirect_uri) {
+    const { data: client } = await sb.from('oauth_clients')
+      .select('redirect_uris').eq('client_id', authCode.client_id).maybeSingle()
+    const registered = Array.isArray(client?.redirect_uris) ? client.redirect_uris : []
+    if (!registered.includes(authCode.redirect_uri)) {
+      // Burn the code — it was minted for a destination this client never registered.
+      await sb.from('oauth_codes').delete().eq('code', code)
+      return json({ error: 'invalid_grant', error_description: 'redirect_uri is not registered for this client' }, 400)
+    }
+  }
   if (redirect_uri && authCode.redirect_uri !== redirect_uri) {
     return json({ error: 'invalid_grant', error_description: 'redirect_uri mismatch' }, 400)
   }

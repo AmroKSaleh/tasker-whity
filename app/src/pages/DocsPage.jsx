@@ -16,9 +16,10 @@ export default function DocsPage() {
   const params = useParams()
   const slug = params['*'] || ''
   const item = ITEMS.find(i => i.slug === slug)
+  const cleanSlug = useMemo(() => slug.replace(/[^a-zA-Z0-9\-_/]/g, ''), [slug])
   const body = PAGES[slug] || (item
     ? `# ${item.title}\n\n${item.purpose}\n\n*Full content coming soon.*`
-    : `# Page not found\n\nNothing lives at \`/docs/${slug}\`. [Back to the start](/docs).`)
+    : `# Page not found\n\nNothing lives at \`/docs/${cleanSlug}\`. [Back to the start](/docs).`)
   const html = useMemo(() => marked.parse(body), [body])
 
   return (
