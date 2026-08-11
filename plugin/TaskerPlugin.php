@@ -2263,6 +2263,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     /**
      * POST /api/tasker/milestones
      *
+     * Uses {@see self::resolveMilestoneTarget()} with $requireMilestone:
+     * false — there is no existing milestone to address on a create, only a
+     * task to attach the new one to.
+     *
      * @param array<string, string> $params
      */
     public function addMilestone(Request $request, array $params = []): Response
@@ -2278,28 +2282,29 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
-        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
-        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
-            return Response::error('task_id looks like a short id but is malformed', 400);
-        }
-
-        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $callerOu['ouId'], $rawTaskId);
-        if ($taskId === null) {
-            return Response::error('Task not found', 404);
+        $target = $this->resolveMilestoneTarget(
+            $request,
+            $pdo,
+            $tenantId,
+            $callerOu['ouId'],
+            [IdentifierResolver::class, 'resolveTask'],
+            false
+        );
+        $error = $this->milestoneTargetError($target);
+        if ($error !== null) {
+            return $error;
         }
 
         return (new MilestonesApiHandler($pdo))
-            ->create($tenantId, $callerOu['ouId'], $taskId, $request->getBody());
+            ->create($tenantId, $callerOu['ouId'], (int) $target['taskId'], $request->getBody());
     }
 
     /**
      * POST /api/tasker/milestones/complete
      *
-     * task_id resolves the milestone's parent task first (OU-scoped);
-     * milestone_id/index then resolves within that task's own milestones via
-     * IdentifierResolver::resolveMilestone(). setChecked(true) is called
-     * directly rather than toggle() — see MilestonesApiHandler's own doc for
-     * why a toggle cannot express the complete/uncomplete pair.
+     * setChecked(true) is called directly rather than toggle() — see
+     * MilestonesApiHandler's own doc for why a toggle cannot express the
+     * complete/uncomplete pair.
      *
      * @param array<string, string> $params
      */
@@ -2316,25 +2321,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
-        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
-        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
-            return Response::error('task_id looks like a short id but is malformed', 400);
+        $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
+        $error = $this->milestoneTargetError($target);
+        if ($error !== null) {
+            return $error;
         }
 
-        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
-        if ($taskId === null) {
-            return Response::error('Task not found', 404);
-        }
-
-        $decoded = json_decode($request->getBody(), true);
-        $rawMilestone = is_array($decoded) ? ($decoded['milestone_id'] ?? $decoded['index'] ?? null) : null;
-
-        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
-        if ($milestoneId === null) {
-            return Response::error('Milestone not found', 404);
-        }
-
-        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, $milestoneId, true);
+        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, (int) $target['milestoneId'], true);
     }
 
     /**
@@ -2358,25 +2351,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
-        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
-        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
-            return Response::error('task_id looks like a short id but is malformed', 400);
+        $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
+        $error = $this->milestoneTargetError($target);
+        if ($error !== null) {
+            return $error;
         }
 
-        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
-        if ($taskId === null) {
-            return Response::error('Task not found', 404);
-        }
-
-        $decoded = json_decode($request->getBody(), true);
-        $rawMilestone = is_array($decoded) ? ($decoded['milestone_id'] ?? $decoded['index'] ?? null) : null;
-
-        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
-        if ($milestoneId === null) {
-            return Response::error('Milestone not found', 404);
-        }
-
-        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, $milestoneId, false);
+        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, (int) $target['milestoneId'], false);
     }
 
     /**
@@ -2397,35 +2378,22 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
-        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
-        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
-            return Response::error('task_id looks like a short id but is malformed', 400);
+        $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
+        $error = $this->milestoneTargetError($target);
+        if ($error !== null) {
+            return $error;
         }
 
-        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
-        if ($taskId === null) {
-            return Response::error('Task not found', 404);
-        }
-
-        $decoded = json_decode($request->getBody(), true);
-        $rawMilestone = is_array($decoded) ? ($decoded['milestone_id'] ?? $decoded['index'] ?? null) : null;
-
-        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
-        if ($milestoneId === null) {
-            return Response::error('Milestone not found', 404);
-        }
-
-        return (new MilestonesApiHandler($pdo))->update($tenantId, $milestoneId, $request->getBody());
+        return (new MilestonesApiHandler($pdo))->update($tenantId, (int) $target['milestoneId'], $request->getBody());
     }
 
     /**
      * DELETE /api/tasker/milestones
      *
-     * NOTE: reads BOTH task_id and milestone_id/index via
-     * identifierFromRequest() rather than the body alone — see
-     * {@see self::identifierFromRequest()}'s docblock for why a DELETE
-     * request's arguments arrive as query parameters over the MCP transport,
-     * never in the body.
+     * task_id/milestone_id/index all arrive via
+     * {@see self::resolveMilestoneTarget()}'s use of identifierFromRequest()
+     * (body then query) rather than the body alone — required for a DELETE,
+     * whose arguments never survive the MCP transport in the body at all.
      *
      * @param array<string, string> $params
      */
@@ -2442,25 +2410,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
-        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
-        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
-            return Response::error('task_id looks like a short id but is malformed', 400);
+        $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
+        $error = $this->milestoneTargetError($target);
+        if ($error !== null) {
+            return $error;
         }
 
-        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
-        if ($taskId === null) {
-            return Response::error('Task not found', 404);
-        }
-
-        $rawMilestone = $this->identifierFromRequest($request, 'milestone_id')
-            ?? $this->identifierFromRequest($request, 'index');
-
-        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
-        if ($milestoneId === null) {
-            return Response::error('Milestone not found', 404);
-        }
-
-        return (new MilestonesApiHandler($pdo))->delete($tenantId, $milestoneId);
+        return (new MilestonesApiHandler($pdo))->delete($tenantId, (int) $target['milestoneId']);
     }
 
     /**
@@ -2887,6 +2843,119 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         return $resolved === null
             ? ['status' => 'unresolved', 'value' => null]
             : ['status' => 'resolved', 'value' => $resolved];
+    }
+
+    /**
+     * Resolve {task_id, milestone_id|index} into a concrete (taskId,
+     * milestoneId) pair, OU-scoped through the owning task — the shared
+     * two-stage resolution behind every milestone-mutation route:
+     * addMilestone() (task only, $requireMilestone: false — there is no
+     * existing milestone to address yet), completeMilestone(),
+     * uncompleteMilestone(), updateMilestone(), and deleteMilestone().
+     *
+     * TASK REVIEW FIX: the first version of this task inlined this
+     * composition five times, and three of those five copies
+     * (completeMilestone/uncompleteMilestone/updateMilestone) read
+     * milestone_id/index straight off a bare `json_decode($request->getBody(),
+     * true)` rather than through {@see self::identifierFromRequest()}. Under
+     * this codebase's `strict_types=1`, a caller sending a non-scalar value —
+     * e.g. `{"task_id":"TDE-1","milestone_id":{"x":1}}` — reached
+     * `IdentifierResolver::resolveMilestone(..., string|int|null $raw)` as a
+     * PHP array and threw an uncaught TypeError instead of a controlled 400.
+     * `deleteMilestone()`, in the same original commit, already read both
+     * identifiers correctly through `identifierFromRequest()` (required
+     * there regardless, since DELETE bodies never survive the MCP
+     * transport) — this extraction generalises that already-correct method's
+     * approach to all five, rather than leaving four different
+     * implementations of the same idea to drift.
+     *
+     * FIVE outcomes:
+     *   - 'malformed_task': task_id classifies as malformed_short_id. The
+     *     milestone identifier is never even read — callers 400.
+     *   - 'task_not_found': task_id is absent, or does not resolve within
+     *     the caller's tenant/OU scope. Callers 404.
+     *   - 'malformed_milestone': milestone_id/index classifies as
+     *     malformed_short_id (only reachable when $requireMilestone is
+     *     true). Callers 400.
+     *   - 'milestone_not_found': the task resolved, but
+     *     IdentifierResolver::resolveMilestone() found nothing under it
+     *     (wrong tenant, wrong task, or genuinely absent/non-scalar — see
+     *     the TypeError note above: a non-scalar value is filtered out by
+     *     identifierFromRequest() before it ever reaches classify() or
+     *     resolveMilestone(), so it lands here rather than throwing).
+     *     Callers 404.
+     *   - 'resolved': the task resolved (and, unless $requireMilestone is
+     *     false, so did the milestone within it).
+     *
+     * $taskResolver is injected — IdentifierResolver::resolveTask() in
+     * production — for the same Reflection-testability reason
+     * resolveOptionalParentId()/resolveMoveDestinationId()/
+     * resolveCreateTaskSectionId() inject theirs: it calls
+     * OuScopeResolver::whereFragment() unconditionally, which SQLite's
+     * PDO::prepare() rejects outright. IdentifierResolver::resolveMilestone()
+     * itself is called directly, NOT injected — it carries no OU-scoping and
+     * no Postgres-only syntax at all (plain tenant/task-scoped SQL), so it
+     * runs for real against a bare SQLite fixture in this class's own tests,
+     * the same way resolveCreateTaskSectionId() calls backlogSectionIdFor()
+     * directly rather than injecting it.
+     *
+     * @param callable(\PDO, int, ?int, string|int|null): ?int $taskResolver
+     * @return array{status: 'malformed_task'|'task_not_found'|'malformed_milestone'|'milestone_not_found'|'resolved', taskId: ?int, milestoneId: ?int}
+     */
+    private function resolveMilestoneTarget(
+        Request $request,
+        \PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        callable $taskResolver,
+        bool $requireMilestone = true
+    ): array {
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return ['status' => 'malformed_task', 'taskId' => null, 'milestoneId' => null];
+        }
+
+        $taskId = $taskResolver($pdo, $tenantId, $callerOuId, $rawTaskId);
+        if ($taskId === null) {
+            return ['status' => 'task_not_found', 'taskId' => null, 'milestoneId' => null];
+        }
+
+        if (!$requireMilestone) {
+            return ['status' => 'resolved', 'taskId' => $taskId, 'milestoneId' => null];
+        }
+
+        $rawMilestone = $this->identifierFromRequest($request, 'milestone_id')
+            ?? $this->identifierFromRequest($request, 'index');
+        if (IdentifierResolver::classify($rawMilestone) === 'malformed_short_id') {
+            return ['status' => 'malformed_milestone', 'taskId' => $taskId, 'milestoneId' => null];
+        }
+
+        $milestoneId = IdentifierResolver::resolveMilestone($pdo, $tenantId, $taskId, $rawMilestone);
+        if ($milestoneId === null) {
+            return ['status' => 'milestone_not_found', 'taskId' => $taskId, 'milestoneId' => null];
+        }
+
+        return ['status' => 'resolved', 'taskId' => $taskId, 'milestoneId' => $milestoneId];
+    }
+
+    /**
+     * Turn a {@see self::resolveMilestoneTarget()} outcome into the matching
+     * error Response, or null when it resolved and the caller should
+     * proceed. Extracted so the five milestone-mutation route methods share
+     * one mapping from status to (message, code) rather than repeating a
+     * four-armed if/match each.
+     *
+     * @param array{status: 'malformed_task'|'task_not_found'|'malformed_milestone'|'milestone_not_found'|'resolved', taskId: ?int, milestoneId: ?int} $target
+     */
+    private function milestoneTargetError(array $target): ?Response
+    {
+        return match ($target['status']) {
+            'malformed_task' => Response::error('task_id looks like a short id but is malformed', 400),
+            'task_not_found' => Response::error('Task not found', 404),
+            'malformed_milestone' => Response::error('milestone_id looks like a short id but is malformed', 400),
+            'milestone_not_found' => Response::error('Milestone not found', 404),
+            default => null,
+        };
     }
 
     /**

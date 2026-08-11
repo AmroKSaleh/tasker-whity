@@ -6,6 +6,7 @@ namespace Tasker\Tests;
 
 use PDO;
 use PHPUnit\Framework\TestCase;
+use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\TaskerPlugin;
 use Whity\Sdk\Http\Request;
 use Whity\Sdk\PluginInterface;
@@ -689,5 +690,241 @@ final class TaskerPluginTest extends TestCase
             'the resolver must receive the SAME pdo, tenantId, callerOuId, raw identifier, and the resolved ' .
                 'projectId as its parent — never the backlog fallback'
         );
+    }
+
+    /**
+     * Task review finding #2 (D1b Task 7): three of resolveMilestoneTarget()'s
+     * five now-consolidated call sites (completeMilestone/uncompleteMilestone/
+     * updateMilestone) used to read milestone_id/index straight off a bare
+     * `json_decode($request->getBody(), true)` rather than through
+     * identifierFromRequest() — under this codebase's `strict_types=1`, a
+     * non-scalar value (e.g. `{"milestone_id":{"x":1}}`) reached
+     * `IdentifierResolver::resolveMilestone(..., string|int|null $raw)` as a
+     * PHP array and threw an uncaught TypeError instead of a controlled 400.
+     * `deleteMilestone()` already read both identifiers correctly (required
+     * anyway, since DELETE bodies never survive the MCP transport); this
+     * extraction generalises deleteMilestone()'s own approach to all five
+     * milestone-mutation routes and gives the whole two-stage
+     * task-then-milestone composition a Reflection test seam, the same way
+     * resolveOptionalParentId()/resolveMoveDestinationId()/
+     * resolveCreateTaskSectionId() already do above —
+     * resolveMilestoneTarget() is unreachable any other way, since every one
+     * of its five callers calls resolvePdo(), which needs the live host
+     * container.
+     *
+     * Only the TASK resolver is injected (IdentifierResolver::resolveTask()
+     * in production) — it calls OuScopeResolver::whereFragment()
+     * unconditionally, which SQLite's PDO::prepare() rejects outright.
+     * IdentifierResolver::resolveMilestone() itself carries no such
+     * restriction (plain tenant/task-scoped SQL, no OU join), so these tests
+     * call the REAL one against a bare SQLite tasker_milestones fixture,
+     * never a spy.
+     */
+    private function invokeResolveMilestoneTarget(
+        Request $request,
+        PDO $pdo,
+        int $tenantId,
+        ?int $callerOuId,
+        callable $taskResolver,
+        bool $requireMilestone = true
+    ): array {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveMilestoneTarget');
+        $method->setAccessible(true);
+
+        /** @var array{status: string, taskId: ?int, milestoneId: ?int} $result */
+        $result = $method->invoke($plugin, $request, $pdo, $tenantId, $callerOuId, $taskResolver, $requireMilestone);
+
+        return $result;
+    }
+
+    /**
+     * tasker_milestones' real schema declares `id BIGSERIAL PRIMARY KEY`
+     * (CreateTaskerMilestonesTable) — a type SQLite does not recognise as its
+     * own rowid alias (only the literal string "INTEGER" qualifies; see
+     * MilestonesApiHandler::idColumn()'s own docblock for the full
+     * explanation). IdentifierResolver::resolveMilestone() selects the
+     * literal `id` column (never rowid), so a fixture that lets SQLite
+     * autogenerate it would leave every row's `id` NULL and every lookup
+     * silently fail. This helper always supplies `id` explicitly for that
+     * reason.
+     */
+    private function insertMilestoneWithExplicitId(PDO $pdo, int $id, int $tenantId, int $taskId, int $sortOrder = 0): void
+    {
+        $stmt = $pdo->prepare(
+            'INSERT INTO tasker_milestones (id, public_id, tenant_id, task_id, summary, sort_order, created_at)
+             VALUES (:id, :public_id, :tenant_id, :task_id, :summary, :sort_order, CURRENT_TIMESTAMP)'
+        );
+        $stmt->execute([
+            ':id' => $id,
+            ':public_id' => sprintf('aaaaaaaa-0000-4000-8000-%012d', $id),
+            ':tenant_id' => $tenantId,
+            ':task_id' => $taskId,
+            ':summary' => 'Fixture',
+            ':sort_order' => $sortOrder,
+        ]);
+    }
+
+    public function testResolveMilestoneTargetReportsMalformedTaskWithoutCallingTheTaskResolver(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('POST', '/api/tasker/milestones/complete', [], (string) json_encode(['task_id' => 'AB-xyz']));
+
+        $called = false;
+        $taskResolver = function () use (&$called): ?int {
+            $called = true;
+
+            return 55;
+        };
+
+        $result = $this->invokeResolveMilestoneTarget($request, $pdo, 7, null, $taskResolver);
+
+        self::assertSame('malformed_task', $result['status']);
+        self::assertNull($result['taskId']);
+        self::assertNull($result['milestoneId']);
+        self::assertFalse($called, 'a malformed task_id must not reach the task resolver at all');
+    }
+
+    public function testResolveMilestoneTargetReportsTaskNotFoundWhenTheTaskResolverFindsNothing(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request('POST', '/api/tasker/milestones/complete', [], (string) json_encode(['task_id' => 'TDE-1']));
+
+        $result = $this->invokeResolveMilestoneTarget($request, $pdo, 7, null, fn () => null);
+
+        self::assertSame('task_not_found', $result['status']);
+        self::assertNull($result['taskId']);
+        self::assertNull($result['milestoneId']);
+    }
+
+    public function testResolveMilestoneTargetReportsMalformedMilestoneWithoutQueryingMilestones(): void
+    {
+        // No tasker_milestones table at all: if the malformed check were
+        // bypassed and IdentifierResolver::resolveMilestone() were reached,
+        // its own SELECT would throw ("no such table") rather than this
+        // test silently passing.
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request(
+            'POST',
+            '/api/tasker/milestones/complete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'milestone_id' => 'AB-xyz'])
+        );
+
+        $result = $this->invokeResolveMilestoneTarget($request, $pdo, 7, null, fn () => 55);
+
+        self::assertSame('malformed_milestone', $result['status']);
+        self::assertSame(55, $result['taskId'], 'the already-resolved taskId must still be reported');
+        self::assertNull($result['milestoneId']);
+    }
+
+    public function testResolveMilestoneTargetReportsMilestoneNotFoundWhenNoneExistsUnderTheResolvedTask(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        (new CreateTaskerMilestonesTable())->up($pdo);
+        $this->insertMilestoneWithExplicitId($pdo, 1, 7, 999);
+
+        $request = new Request(
+            'POST',
+            '/api/tasker/milestones/complete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'milestone_id' => 1])
+        );
+
+        // The task resolver reports task 55 — a different task than the one
+        // the only fixture milestone belongs to (999) — so it must not be
+        // found.
+        $result = $this->invokeResolveMilestoneTarget($request, $pdo, 7, null, fn () => 55);
+
+        self::assertSame('milestone_not_found', $result['status']);
+        self::assertSame(55, $result['taskId']);
+        self::assertNull($result['milestoneId']);
+    }
+
+    /**
+     * The core regression this extraction fixes: a non-scalar milestone_id
+     * (e.g. an agent sending {"milestone_id": {...}}) must be rejected as
+     * "not found", never allowed to throw a TypeError. identifierFromRequest()
+     * only ever returns string|int|null (see its own docblock's is_string()/
+     * is_int() guard), so a JSON object/array value for milestone_id falls
+     * through to a query-string lookup that also comes up empty here —
+     * landing on 'milestone_not_found' (which routes turn into a clean 404)
+     * rather than an uncaught exception.
+     */
+    public function testResolveMilestoneTargetRejectsANonScalarMilestoneIdentifierWithoutThrowing(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $request = new Request(
+            'POST',
+            '/api/tasker/milestones/complete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'milestone_id' => ['x' => 1]])
+        );
+
+        $result = $this->invokeResolveMilestoneTarget($request, $pdo, 7, null, fn () => 55);
+
+        self::assertSame('milestone_not_found', $result['status']);
+        self::assertSame(55, $result['taskId']);
+        self::assertNull($result['milestoneId']);
+    }
+
+    public function testResolveMilestoneTargetResolvesTheMilestoneWithinTheExactResolvedTaskInOrder(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        (new CreateTaskerMilestonesTable())->up($pdo);
+
+        // Two milestones at the SAME index (0) under two DIFFERENT tasks —
+        // only the one under the task id the spy resolver actually returns
+        // (55) may be picked, proving the milestone lookup uses the
+        // RESOLVED task id, not the raw task_id string or some other value.
+        $this->insertMilestoneWithExplicitId($pdo, 1, 7, 999, 0);
+        $this->insertMilestoneWithExplicitId($pdo, 2, 7, 55, 0);
+
+        $request = new Request(
+            'POST',
+            '/api/tasker/milestones/complete',
+            [],
+            (string) json_encode(['task_id' => 'TDE-1', 'index' => 0])
+        );
+
+        $seen = null;
+        $taskResolver = function (PDO $calledPdo, int $tenantId, ?int $callerOuId, $raw) use (&$seen, $pdo): ?int {
+            $seen = [$calledPdo === $pdo, $tenantId, $callerOuId, $raw];
+
+            return 55;
+        };
+
+        $result = $this->invokeResolveMilestoneTarget($request, $pdo, 7, 3, $taskResolver);
+
+        self::assertSame('resolved', $result['status']);
+        self::assertSame(55, $result['taskId']);
+        self::assertSame(
+            2,
+            $result['milestoneId'],
+            'must resolve the milestone within the RESOLVED task id (55), not the one sharing the same ' .
+                'index under a different task (999)'
+        );
+        self::assertSame(
+            [true, 7, 3, 'TDE-1'],
+            $seen,
+            'the task resolver must receive the same pdo, tenantId, callerOuId, and raw identifier untouched'
+        );
+    }
+
+    public function testResolveMilestoneTargetSkipsMilestoneResolutionWhenNotRequired(): void
+    {
+        $pdo = new PDO('sqlite::memory:');
+        // No tasker_milestones table at all — proves the milestone stage is
+        // never reached when $requireMilestone is false (addMilestone()'s
+        // own use: there is no existing milestone to address on a create).
+        $request = new Request('POST', '/api/tasker/milestones', [], (string) json_encode(['task_id' => 'TDE-1', 'summary' => 'New']));
+
+        $result = $this->invokeResolveMilestoneTarget($request, $pdo, 7, null, fn () => 55, false);
+
+        self::assertSame('resolved', $result['status']);
+        self::assertSame(55, $result['taskId']);
+        self::assertNull($result['milestoneId']);
     }
 }

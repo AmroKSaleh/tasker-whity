@@ -208,14 +208,26 @@ final class MilestonesApiHandler
     }
 
     /**
-     * POST /api/tasker/milestones/{id}/toggle — flips checked, does not set it
-     * to a caller-supplied value.
+     * Flips checked; does not set it to a caller-supplied value.
      *
-     * Kept as a thin wrapper over {@see self::setChecked()} purely so nothing
-     * already calling toggle() breaks; the route surface itself no longer
-     * uses it (complete_milestone/uncomplete_milestone call setChecked()
-     * directly — see this class's own doc for why a toggle cannot express
-     * that pair of tools).
+     * NOT WIRED TO ANY ROUTE as of this task: `TaskerPlugin::toggleMilestone()`
+     * (the only production caller this method ever had) was deleted in the
+     * same commit that added complete_milestone/uncomplete_milestone as
+     * separate routes calling {@see self::setChecked()} directly — see this
+     * class's own doc for why a toggle cannot express that pair of tools.
+     * The only remaining callers are this class's own unit tests
+     * (`testToggleFlipsCheckedState`,
+     * `testToggleRejects404ForAMilestoneOutsideTheCallersTenant`). Kept
+     * because a prior task's brief asked for it to survive, not because
+     * anything live depends on it.
+     *
+     * NON-ATOMIC: read-then-write via findScoped() + setChecked(), unlike
+     * the single `SET checked = NOT checked` statement this replaced —
+     * fine for a route with no caller, but this must be revisited (either
+     * restored to a single atomic UPDATE, or explicitly accepted as
+     * good-enough) before ever wiring this back to a route, since a
+     * concurrent toggle on the same milestone could race between the read
+     * and the write.
      */
     public function toggle(int $tenantId, int $milestoneId): Response
     {
