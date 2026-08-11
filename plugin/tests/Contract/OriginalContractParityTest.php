@@ -149,24 +149,50 @@ final class OriginalContractParityTest extends TestCase
         $unported = array_values(array_filter($names, static fn (string $n): bool => !isset($ours[$n])));
         sort($unported);
 
+        $direction = count($unported) < self::EXPECTED_UNPORTED_COUNT
+            ? "The gap SHRANK. If a slice ported one of these, lower EXPECTED_UNPORTED_COUNT in the same commit.\n"
+                . "If it ported one of the liveOnlyToolNames, capture that tool's real schema from the live server\n"
+                . "first — the snapshot has its name but not its shape, so nothing can check the port against it."
+            : "The gap GREW. Either a tool was REMOVED from our surface (check the route table for a lost\n"
+                . "operationId — mcp-tools.ps1's allowlist should have caught it too), or the snapshot gained tools\n"
+                . 'because the generator was re-run against a newer source. Those need opposite responses: the first '
+                . "is a regression to revert, the second is a real increase to record.";
+
         self::assertCount(
             self::EXPECTED_UNPORTED_COUNT,
             $unported,
             sprintf(
-                "The unported slice of the original's tool surface changed (expected %d, got %d).\n"
-                . "If a slice ported one of these, lower EXPECTED_UNPORTED_COUNT in the same commit.\n"
-                . "Unported:\n  %s\n",
+                "The unported slice of the original's tool surface changed (expected %d, got %d).\n%s\nUnported:\n  %s\n",
                 self::EXPECTED_UNPORTED_COUNT,
                 count($unported),
+                $direction,
                 implode("\n  ", $unported),
             ),
         );
+    }
+
+    /**
+     * The size of the snapshot itself.
+     *
+     * Its own test rather than a second assertion on the unported one: it guards
+     * a different regression (the snapshot losing or gaining tools) and, sharing
+     * a method, it would never run on the turn the unported count failed — which
+     * is exactly the turn its answer matters most.
+     */
+    public function testTheSnapshotStillDescribesTheWholeOriginalSurface(): void
+    {
+        $names = array_merge(array_keys(self::originalSchemas()), self::liveOnlyToolNames());
 
         self::assertCount(
             self::EXPECTED_ORIGINAL_SURFACE_SIZE,
             $names,
-            'The snapshot of the original surface changed size — re-run '
-            . 'host/scripts/extract-original-schemas.ps1 and re-verify the counts above.',
+            sprintf(
+                'The snapshot of the original surface changed size (expected %d, got %d). Re-run '
+                . 'host/scripts/extract-original-schemas.ps1, check _meta.sourceIsStale against the live server, '
+                . 'and re-verify EXPECTED_UNPORTED_COUNT in the same commit.',
+                self::EXPECTED_ORIGINAL_SURFACE_SIZE,
+                count($names),
+            ),
         );
     }
 
@@ -190,8 +216,9 @@ final class OriginalContractParityTest extends TestCase
                 [],
                 null,
                 // ToolDeriver's default warn closure is error_log(). Swallow it:
-                // its mutation-body lint is not what this test measures, and
-                // PHPUnit is configured failOnWarning.
+                // its mutation-body lint fires on routes this test has no
+                // opinion about, and routing that into the run's error log is
+                // noise at best. Nothing here depends on what it would say.
                 static function (string $message): void {
                 },
             );
@@ -346,6 +373,22 @@ final class OriginalContractParityTest extends TestCase
      * already decided divergence was tolerable. Every entry must be live, and
      * must carry a reason a human wrote.
      *
+     * THE SEMANTIC RULE. Every SEMANTIC divergence in this file is expressed as
+     * a `missing` property, which left an escape hatch worth naming: declaring
+     * `delete_tasks` on delete_section's schema makes the entry stale, forces
+     * its removal, and turns the build green — with the behaviour unchanged and
+     * now MORE dangerous, because the caller believes the flag is honoured
+     * where today it at least fails visibly as "not accepted" (core drops
+     * undeclared arguments). A guard that can be satisfied by making the
+     * problem invisible is not a guard.
+     *
+     * So a `severity: 'semantic'` entry inverts the staleness rule: declaring
+     * the property is a FAILURE, not a discharge, unless the behavioural test
+     * named in `dischargedBy` actually exists. Only once that test is in the
+     * suite does the entry become removable — and removing it is then a
+     * deliberate edit next to the comment explaining the semantics, which is
+     * the whole point.
+     *
      * @param array<string, mixed>                  $allow
      * @param array<string, array<string, mixed>>   $original
      * @param array<string, array<string, mixed>>   $ours
@@ -363,6 +406,15 @@ final class OriginalContractParityTest extends TestCase
             if (!is_string($entry['reason'] ?? null) || trim((string) $entry['reason']) === '') {
                 $failures[] = "allowlist[{$name}] has no reason — an entry whose reason cannot be stated is a bug to fix, not a line to add";
             }
+
+            $isSemantic = ($entry['severity'] ?? null) === 'semantic';
+            $dischargedBy = is_string($entry['dischargedBy'] ?? null) ? trim($entry['dischargedBy']) : '';
+            if ($isSemantic && $dischargedBy === '') {
+                $failures[] = "allowlist[{$name}] is severity 'semantic' but names no dischargedBy test. A semantic "
+                    . 'divergence is a behaviour difference; it must name the behavioural test that has to exist '
+                    . 'before the entry may be removed, so it cannot be discharged by a schema declaration alone.';
+            }
+
             if (!isset($original[$name])) {
                 $failures[] = "allowlist[{$name}] names a tool the original does not have";
                 continue;
@@ -376,9 +428,33 @@ final class OriginalContractParityTest extends TestCase
             $ourProps   = array_keys(self::properties($ours[$name]));
 
             foreach (self::listOf($entry, 'missing') as $property) {
-                if (in_array($property, $ourProps, true) || !in_array($property, $theirProps, true)) {
-                    $failures[] = "allowlist[{$name}].missing lists '{$property}', which is no longer missing";
+                if (!in_array($property, $theirProps, true)) {
+                    $failures[] = "allowlist[{$name}].missing lists '{$property}', which the original does not have";
+                    continue;
                 }
+                if (!in_array($property, $ourProps, true)) {
+                    continue; // Still missing — the waiver is live.
+                }
+
+                // We now declare it. For an ordinary waiver that is a discharge.
+                // For a SEMANTIC one it is only a discharge if the behaviour
+                // actually landed, which is what dischargedBy has to prove.
+                if (!$isSemantic || self::behaviourTestExists($dischargedBy)) {
+                    $failures[] = "allowlist[{$name}].missing lists '{$property}', which is no longer missing";
+                    continue;
+                }
+
+                $failures[] = sprintf(
+                    "allowlist[%s].missing lists '%s', which our schema NOW DECLARES while the behaviour it "
+                    . 'describes is still unimplemented — and no test named %s() exists to show otherwise. '
+                    . 'Declaring the property does not discharge a SEMANTIC divergence; it makes it worse, because '
+                    . 'the caller now believes the flag is honoured instead of seeing it rejected as unaccepted. '
+                    . 'Implement the behaviour and add %s(), or revert the schema declaration.',
+                    $name,
+                    $property,
+                    $dischargedBy === '' ? '<dischargedBy unset>' : $dischargedBy,
+                    $dischargedBy === '' ? '<dischargedBy unset>' : $dischargedBy,
+                );
             }
             foreach (self::listOf($entry, 'extra') as $property) {
                 if (!in_array($property, $ourProps, true) || in_array($property, $theirProps, true)) {
@@ -418,6 +494,46 @@ final class OriginalContractParityTest extends TestCase
         }
 
         return $failures;
+    }
+
+    /**
+     * Does a test method of this name exist anywhere in the suite?
+     *
+     * This is what stops a SEMANTIC waiver being discharged by a schema edit:
+     * the named behavioural test has to be real and in the tree before the
+     * property may appear on our side without failing.
+     */
+    private static function behaviourTestExists(string $method): bool
+    {
+        if ($method === '') {
+            return false;
+        }
+
+        foreach (self::testFiles() as $file) {
+            $source = file_get_contents($file);
+            if (is_string($source) && str_contains($source, "function {$method}(")) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    /** @return list<string> */
+    private static function testFiles(): array
+    {
+        $files = [];
+        $iterator = new \RecursiveIteratorIterator(
+            new \RecursiveDirectoryIterator(dirname(__DIR__), \FilesystemIterator::SKIP_DOTS),
+        );
+        /** @var \SplFileInfo $file */
+        foreach ($iterator as $file) {
+            if ($file->isFile() && $file->getExtension() === 'php') {
+                $files[] = $file->getPathname();
+            }
+        }
+
+        return $files;
     }
 
     /**

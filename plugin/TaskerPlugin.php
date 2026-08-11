@@ -577,7 +577,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                             'in' => 'query',
                             'required' => false,
                             'schema' => ['type' => 'string'],
-                            'description' => 'Section UUID, id, or slug (slug requires project_id).',
+                            // NOT "or slug": this route resolves section_id with no
+                            // parent id (see listGroups()), and resolveSection()
+                            // refuses a slug without one — a slug is unique only
+                            // within its parent. Advertising slug form here promised
+                            // a path that cannot execute. Restoring project_id so
+                            // slugs DO work is tracked separately.
+                            'description' => 'Section UUID or id.',
                         ],
                     ],
                     'responses' => [
@@ -600,7 +606,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         'type' => 'object',
                         'required' => ['name'],
                         'properties' => [
-                            'section_id' => ['type' => 'string', 'description' => 'Section UUID, id, or slug (slug requires project_id).'],
+                            // NOT "or slug" — same reason as list_groups above:
+                            // createGroup() passes no parent to resolveSection(),
+                            // so a slug cannot resolve on this route.
+                            'section_id' => ['type' => 'string', 'description' => 'Section UUID or id.'],
                             'name' => ['type' => 'string'],
                         ],
                     ],

@@ -94,6 +94,15 @@ if (-not $sourceDate)   { $sourceDate   = 'unknown' }
 # declares that index.ts does not. Do NOT add anything here that was not read
 # off the live server: this table is the only part of the snapshot that is not
 # mechanically reproducible, so its provenance has to stay exact.
+#
+# COMPLETENESS IS BOUNDED BY WHAT WAS HAND-CAPTURED. This table can only correct
+# tools somebody actually read off the live server. The extractor throws when a
+# correction becomes REDUNDANT (index.ts caught up), but it cannot detect a
+# correction that was never written — so a tool nobody captured stays silently
+# short. Coverage so far: all 36 tools shared with this plugin were compared
+# against the live server during Task 12's review; 35 matched and list_tasks did
+# not. The 95 unported tools have NOT been compared and may be short too. That is
+# tolerable only because nothing measures against them yet.
 $liveOracleCorrections = @'
 [
   { "tool": "create_task", "property": "tags",
@@ -104,7 +113,24 @@ $liveOracleCorrections = @'
     "note": "Live server declares tags on update_task; index.ts has no tags anywhere." },
   { "tool": "update_task", "property": "current_state",
     "schema": { "type": "string" },
-    "note": "Live server declares current_state on update_task; the string does not occur in index.ts at all." }
+    "note": "Live server declares current_state on update_task; the string does not occur in index.ts at all." },
+
+  { "tool": "list_tasks", "property": "flow_id", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks (Task 12 review, all-36-tool comparison). Name captured, shape not." },
+  { "tool": "list_tasks", "property": "gate_status", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it." },
+  { "tool": "list_tasks", "property": "blocking", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks. Name captured, shape not." },
+  { "tool": "list_tasks", "property": "phase_id", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks - part of the phases feature that post-dates index.ts entirely (see liveOnlyToolNames)." },
+  { "tool": "list_tasks", "property": "cursor", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks. Name captured, shape not." },
+  { "tool": "list_tasks", "property": "limit", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks. Name captured, shape not." },
+  { "tool": "list_tasks", "property": "sort", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it." },
+  { "tool": "list_tasks", "property": "updated_since", "schema": { "description": "NAME ONLY - shape not captured." },
+    "note": "Live-only on list_tasks. Name captured, shape not." }
 ]
 '@
 
@@ -213,9 +239,16 @@ const doc = {
     sourceIsStale:
       'index.ts is a SNAPSHOT and is behind the live server. Verified 2026-08-11: 131 tools here vs 143 live; ' +
       'the 12 extra live names are in liveOnlyToolNames; update_task/create_task were missing tags and ' +
-      'current_state, applied from the live oracle (see liveOracleCorrections). The drift observed was purely ' +
-      'additive - no tool or property present here has been removed upstream - so this file is a FLOOR on the ' +
-      'original\u2019s surface, not an exact image of it.',
+      'current_state, and list_tasks was missing 8 properties - all applied from the live oracle (see ' +
+      'liveOracleCorrections). The drift observed was purely additive - no tool or property present here has been ' +
+      'removed upstream - so this file is a FLOOR on the original\u2019s surface, not an exact image of it.',
+    correctionCoverage:
+      'THE FLOOR IS ONLY AS COMPLETE AS THE HAND CAPTURE. liveOracleCorrections can only fix tools somebody read ' +
+      'off the live server; the generator throws when a correction becomes redundant but CANNOT detect one that ' +
+      'was never written, so an uncaptured tool stays silently short. Compared against the live server so far: all ' +
+      '36 tools shared with this plugin (35 matched; list_tasks did not). NOT compared: the 95 unported tools here ' +
+      'and the 12 in liveOnlyToolNames, whose schemas were never captured at all. Treat a tool outside the shared ' +
+      '36 as unverified until someone compares it.',
     liveOracleCorrections: corrections,
   },
   tools: sorted,

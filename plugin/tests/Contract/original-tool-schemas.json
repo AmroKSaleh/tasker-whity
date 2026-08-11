@@ -5,11 +5,12 @@
     "source": "c:/Projects/tasker/V2/supabase/functions/mcp/index.ts (design repo, the original app’s deployed MCP edge function)",
     "sourceCommit": "2f1826ea073fa62bee47000dae55bbd26c88c90b",
     "sourceCommitDate": "2026-07-18T20:42:51+03:00",
-    "extractedAt": "2026-08-11T17:50:01.553Z",
+    "extractedAt": "2026-08-11T18:35:14.569Z",
     "toolsFromSource": 131,
     "liveOnlyToolCount": 12,
     "originalSurfaceSize": 143,
-    "sourceIsStale": "index.ts is a SNAPSHOT and is behind the live server. Verified 2026-08-11: 131 tools here vs 143 live; the 12 extra live names are in liveOnlyToolNames; update_task/create_task were missing tags and current_state, applied from the live oracle (see liveOracleCorrections). The drift observed was purely additive - no tool or property present here has been removed upstream - so this file is a FLOOR on the original’s surface, not an exact image of it.",
+    "sourceIsStale": "index.ts is a SNAPSHOT and is behind the live server. Verified 2026-08-11: 131 tools here vs 143 live; the 12 extra live names are in liveOnlyToolNames; update_task/create_task were missing tags and current_state, and list_tasks was missing 8 properties - all applied from the live oracle (see liveOracleCorrections). The drift observed was purely additive - no tool or property present here has been removed upstream - so this file is a FLOOR on the original’s surface, not an exact image of it.",
+    "correctionCoverage": "THE FLOOR IS ONLY AS COMPLETE AS THE HAND CAPTURE. liveOracleCorrections can only fix tools somebody read off the live server; the generator throws when a correction becomes redundant but CANNOT detect one that was never written, so an uncaptured tool stays silently short. Compared against the live server so far: all 36 tools shared with this plugin (35 matched; list_tasks did not). NOT compared: the 95 unported tools here and the 12 in liveOnlyToolNames, whose schemas were never captured at all. Treat a tool outside the shared 36 as unverified until someone compares it.",
     "liveOracleCorrections": [
       {
         "tool": "create_task",
@@ -40,6 +41,70 @@
           "type": "string"
         },
         "note": "Live server declares current_state on update_task; the string does not occur in index.ts at all."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "flow_id",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks (Task 12 review, all-36-tool comparison). Name captured, shape not."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "gate_status",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "blocking",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks. Name captured, shape not."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "phase_id",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks - part of the phases feature that post-dates index.ts entirely (see liveOnlyToolNames)."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "cursor",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks. Name captured, shape not."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "limit",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks. Name captured, shape not."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "sort",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it."
+      },
+      {
+        "tool": "list_tasks",
+        "property": "updated_since",
+        "schema": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "note": "Live-only on list_tasks. Name captured, shape not."
       }
     ]
   },
@@ -1664,6 +1729,30 @@
         "include_flow_steps": {
           "type": "boolean",
           "description": "EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks — TDE-320). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own."
+        },
+        "flow_id": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "gate_status": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "blocking": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "phase_id": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "cursor": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "limit": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "sort": {
+          "description": "NAME ONLY - shape not captured."
+        },
+        "updated_since": {
+          "description": "NAME ONLY - shape not captured."
         }
       },
       "required": []

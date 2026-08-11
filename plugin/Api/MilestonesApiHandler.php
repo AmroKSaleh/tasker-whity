@@ -78,7 +78,13 @@ final class MilestonesApiHandler
         // another. `text` wins if both are sent — it is the original's contract.
         $summary = is_array($decoded) ? trim((string) ($decoded['text'] ?? $decoded['summary'] ?? '')) : '';
         if ($summary === '' || mb_strlen($summary) > self::MAX_SUMMARY_LENGTH) {
-            return Response::error('text must be a non-empty string of at most ' . self::MAX_SUMMARY_LENGTH . ' characters', 400);
+            // Name the field the caller actually sent. Reporting "text" to
+            // someone who sent an over-long `summary` points them at a field
+            // they never used.
+            $sent = is_array($decoded) && !isset($decoded['text']) && isset($decoded['summary'])
+                ? 'summary'
+                : 'text';
+            return Response::error($sent . ' must be a non-empty string of at most ' . self::MAX_SUMMARY_LENGTH . ' characters', 400);
         }
         $sortOrder = is_array($decoded) && isset($decoded['sort_order']) ? (int) $decoded['sort_order'] : 0;
 

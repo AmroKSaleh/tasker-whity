@@ -23,12 +23,23 @@ declare(strict_types=1);
  *               core's InputSchemaValidator only enforces `required`, so
  *               undeclared arguments pass straight through and vanish.
  *   SEMANTIC  — the same call does something DIFFERENT here. These are the
- *               dangerous ones. There are six (move_task, delete_section,
- *               delete_project, delete_environment, get_task, delete_group);
- *               two of them (delete_section, delete_project) diverge in the
- *               UNSAFE direction and one (move_task) is a silent no-op.
+ *               dangerous ones. There are nine; two (delete_section,
+ *               delete_project) diverge in the UNSAFE direction, one
+ *               (move_task) is a silent no-op, and three (the milestone
+ *               index trio) mutate the WRONG ROW.
  *
- * 22 entries waiving 56 individual divergences across the 36 shared tools, after
+ * EVERY SEMANTIC ENTRY MUST CARRY `severity => 'semantic'` AND `dischargedBy`,
+ * and the test enforces both. The reason is an escape hatch found in review:
+ * every SEMANTIC divergence here is expressed as a `missing` property, so
+ * declaring that property on the route schema would make the entry stale, force
+ * its removal, and turn the build green — with the behaviour unchanged and now
+ * MORE dangerous, because the caller believes the flag is honoured where today
+ * it at least fails visibly as "not accepted" (core drops undeclared
+ * arguments). So for a semantic entry the rule is inverted: declaring the
+ * property FAILS unless the behavioural test named in `dischargedBy` actually
+ * exists in the suite. Behaviour first, schema second.
+ *
+ * 22 entries waiving 64 individual divergences across the 36 shared tools, after
  * one route was fixed rather than waived (add_milestone — see its entry).
  *
  * Divergence keys:
@@ -57,6 +68,8 @@ return [
         // ADDITIVE relative to the original's move_task_to_group, which carries
         // group_id and section_id; sort_order is ours (explicit board ordering).
         'extra' => ['section_id', 'group_id', 'sort_order'],
+        'severity' => 'semantic',
+        'dischargedBy' => 'testMoveTaskMovesATaskIntoADifferentProject',
         'reason' => 'SEMANTIC: the original move_task is a cross-project move (target_project_id required); ours is '
             . 'within-project relocation/reordering. A cross-project call silently no-ops with a 200. Needs a real '
             . 'port, not a property — short ids are project-prefixed and OU scope travels with the project. Unowned.',
@@ -68,6 +81,8 @@ return [
         // section's groups and tasks. The identical call is a refusal there and
         // irreversible data loss here. The most dangerous entry in this file.
         'missing' => ['delete_tasks'],
+        'severity' => 'semantic',
+        'dischargedBy' => 'testDeleteSectionRefusesANonEmptySectionUnlessDeleteTasksIsTrue',
         'reason' => 'SEMANTIC/UNSAFE: the original refuses a non-empty section without delete_tasks:true; ours always '
             . 'cascades. Same call, refusal there vs irreversible data loss here. Unowned — fix before D1b ships to '
             . 'anyone driving it from an original-app agent.',
@@ -80,6 +95,8 @@ return [
         // still works — the value is simply ignored — so nothing breaks; what is
         // lost is the deliberateness the gate exists to force.
         'missing' => ['confirmed'],
+        'severity' => 'semantic',
+        'dischargedBy' => 'testDeleteProjectRefusesWithoutConfirmedTrue',
         'reason' => 'SEMANTIC/UNSAFE: the original gates permanent project deletion on confirmed:true; D1 deletes '
             . 'immediately. No original call breaks (the flag is ignored), but the safety gate is gone. Unowned.',
     ],
@@ -95,6 +112,8 @@ return [
         //    core's own 409 refusal is the only guard, which does at least make
         //    the accidental-destruction case the gate protects impossible.
         'missing' => ['reassign_to_id', 'confirmed'],
+        'severity' => 'semantic',
+        'dischargedBy' => 'testDeleteEnvironmentReassignsItsProjectsBehindAConfirmedGate',
         'reason' => 'SEMANTIC: the original deletes an Environment and reassigns its projects behind a confirmed '
             . 'gate; this alias passes through to core OU delete, which 409s while the OU is non-empty. Owned by the '
             . 'Environment-semantics reconciliation flagged for D2.',
@@ -112,6 +131,8 @@ return [
         //    get_knowledge_base and their whole family are unported), so there is
         //    nothing to refresh.
         'missing' => ['peek', 'refresh_context'],
+        'severity' => 'semantic',
+        'dischargedBy' => 'testGetTaskStartsTheTaskUnlessPeekIsTrue',
         'reason' => 'SEMANTIC: the original get_task auto-starts the task unless peek:true; ours is always a pure '
             . 'read, so it behaves as if peek were always on. refresh_context is DEFERRED — the Instruction Set and '
             . 'KB it re-inlines are entirely unported.',
@@ -126,6 +147,8 @@ return [
         // ADDITIVE: ours accepts a group SLUG, which needs its parent section to
         // disambiguate (Task 5). The original only takes UUIDs.
         'extra' => ['section_id'],
+        'severity' => 'semantic',
+        'dischargedBy' => 'testDeleteGroupDeletesItsTasksWhenDeleteTasksIsTrue',
         'reason' => 'SEMANTIC/fail-safe: we implement the original\'s DEFAULT (un-group) and omit its destructive '
             . 'delete_tasks:true option, so that flag is silently ignored and tasks survive. section_id is ADDITIVE '
             . 'for slug disambiguation, which the original cannot do.',
@@ -190,18 +213,40 @@ return [
     ],
 
     'list_tasks' => [
-        // DEFERRED:
+        // DEFERRED. This entry grew from 2 waived properties to 10 after review:
+        // the reviewer compared the snapshot against the LIVE server for all 36
+        // shared tools (not just the 5 sampled here) and found list_tasks alone
+        // short by 8 — flow_id, gate_status, blocking, phase_id, cursor, limit,
+        // sort, updated_since. Faithful to index.ts, so source staleness rather
+        // than an extraction bug; the 8 are now in the generator's live-oracle
+        // table as NAMES ONLY, since no shape was captured for them.
+        //
         //  - confirmed: the original's all-projects gate. Ours resolves the
         //    caller's default project and 404s when there is none — there is no
         //    all-projects mode to gate. rank_tasks DOES carry this gate (Task 11),
         //    so the pattern exists here and this is a gap, not a decision.
-        //  - include_flow_steps: flow steps do not exist here. D5.
-        'missing' => ['confirmed', 'include_flow_steps'],
+        //  - include_flow_steps, flow_id, gate_status, blocking: flows, flow
+        //    steps and quality gates do not exist here at all. D5.
+        //  - phase_id: phases post-date index.ts entirely — the whole six-tool
+        //    phases family is in liveOnlyToolNames. Unported, unowned.
+        //  - cursor, limit, sort, updated_since: pagination, ordering and
+        //    incremental sync. Nothing here paginates list_tasks; core ships
+        //    PaginationParams, so this is a gap rather than a design choice, and
+        //    it is the one group in this entry that a caller notices as a real
+        //    functional loss on a large project.
+        'missing' => [
+            'confirmed', 'include_flow_steps', 'flow_id', 'gate_status', 'blocking',
+            'phase_id', 'cursor', 'limit', 'sort', 'updated_since',
+        ],
         // ADDITIVE filter, matching the group tools D1 ported.
         'extra' => ['group_id'],
-        'reason' => 'DEFERRED: confirmed gates an all-projects listing this route does not implement (rank_tasks '
-            . 'already carries the same gate, so this is a gap and not a decision); include_flow_steps belongs to '
-            . 'D5. group_id is an ADDITIVE filter over groups, which D1 did port.',
+        'reason' => 'DEFERRED, 10 properties: confirmed gates an all-projects listing this route does not implement '
+            . '(rank_tasks already carries the same gate, so this is a gap and not a decision); include_flow_steps, '
+            . 'flow_id, gate_status and blocking are the flow/gate layer (D5); phase_id belongs to the phases family '
+            . 'that post-dates the snapshot entirely; cursor, limit, sort and updated_since are pagination, ordering '
+            . 'and incremental sync, which nothing here implements despite core shipping PaginationParams — the one '
+            . 'group a caller feels as real functional loss on a large project. group_id is an ADDITIVE filter over '
+            . 'groups, which D1 did port.',
     ],
 
     '__init_tasker_session' => [
@@ -234,31 +279,79 @@ return [
             . 'sort_order places a milestone explicitly, which the original\'s jsonb array could not.',
     ],
 
+    // ── SEMANTIC: the milestone `index` trio ─────────────────────────────────
+    //
+    // An earlier version of this file said, of all three, that "index is still
+    // accepted and still means the same thing, so the original's call works
+    // unchanged". That was FALSE, and a false reason is worse than no entry: it
+    // tells the next reader the case is handled.
+    //
+    // The original is strictly positional — complete_milestone documents index
+    // as 0-based, types it `number`, and REQUIRES it. Ours resolves an integer
+    // ID-FIRST: IdentifierResolver::resolveMilestone() tries
+    // `WHERE id = :value AND task_id = …` (IdentifierResolver.php:419-427) and
+    // only falls through to the ordinal list (:429-438) when no milestone with
+    // that primary key belongs to the task. So for any task whose milestone ids
+    // land in the low integers — the normal case for early rows —
+    // complete_milestone({task_id, index: 1}) completes the milestone with ID 1,
+    // not the second milestone.
+    //
+    // Same class of break as add_milestone, one degree worse: it does not error,
+    // it mutates the WRONG ROW. A separate task owns the fix (positional
+    // resolution for `index`, id resolution reserved to `milestone_id`); it is
+    // deliberately not fixed here, where the remit is the test artifacts.
+    //
+    // Note what is NOT waived: the `extra` waiver below covers milestone_id, and
+    // the `missing` waiver covers nothing, because `index` exists on both sides.
+    // The shape matches; only the meaning does not. That is precisely the kind
+    // of divergence a property-name diff cannot see, and the reason these three
+    // carry severity 'semantic' — so nobody can retire them without landing the
+    // behaviour and the test.
+
     'complete_milestone' => [
         'extra' => ['milestone_id'],
-        'reason' => 'ADDITIVE: the original addressed milestones POSITIONALLY (index) because they lived in a jsonb '
-            . 'array; here they are rows with stable ids. index is still accepted and still means the same thing, so '
-            . 'the original\'s call works unchanged — milestone_id is the form that survives concurrent reordering.',
+        'severity' => 'semantic',
+        'dischargedBy' => 'testCompleteMilestoneTreatsIndexAsAPositionNotAnId',
+        'reason' => 'SEMANTIC/WRONG-ROW: the original addressed milestones POSITIONALLY (index, 0-based, required) '
+            . 'because they lived in a jsonb array; here they are rows and index is resolved ID-FIRST '
+            . '(IdentifierResolver.php:419-438), falling back to the ordinal only when no milestone with that primary '
+            . 'key belongs to the task. An original-shaped positional call therefore completes the WRONG milestone '
+            . 'whenever the ids land in the low integers, silently. milestone_id is the unambiguous form and is '
+            . 'ADDITIVE. Fix owned by the separate behaviour task split out of this review.',
     ],
 
     'uncomplete_milestone' => [
         'extra' => ['milestone_id'],
-        'reason' => 'ADDITIVE: same as complete_milestone — index is preserved and unchanged; milestone_id is the '
-            . 'reorder-safe alternative made possible by milestones being rows here rather than jsonb array members.',
+        'severity' => 'semantic',
+        'dischargedBy' => 'testUncompleteMilestoneTreatsIndexAsAPositionNotAnId',
+        'reason' => 'SEMANTIC/WRONG-ROW: same id-first resolution of index as complete_milestone — an original-shaped '
+            . 'positional call reopens the wrong milestone rather than erroring. milestone_id is ADDITIVE and '
+            . 'unambiguous. Fix owned by the separate behaviour task.',
     ],
 
     'delete_milestone' => [
         'extra' => ['milestone_id'],
-        'reason' => 'ADDITIVE: same as complete_milestone — index is preserved and unchanged; milestone_id is the '
-            . 'reorder-safe alternative made possible by milestones being rows here rather than jsonb array members.',
+        'severity' => 'semantic',
+        'dischargedBy' => 'testDeleteMilestoneTreatsIndexAsAPositionNotAnId',
+        'reason' => 'SEMANTIC/WRONG-ROW, and the most destructive of the three: same id-first resolution of index, so '
+            . 'an original-shaped positional call DELETES the wrong milestone silently. milestone_id is ADDITIVE and '
+            . 'unambiguous. Fix owned by the separate behaviour task.',
     ],
 
+    // ── ADDITIVE (continued) ─────────────────────────────────────────────────
+
     'create_environment' => [
+        // The plugin AUTHORS this request schema itself (TaskerPlugin.php:201-209)
+        // — it is not obliged to forward every field core's OU create accepts, so
+        // "cannot drop them" would overstate it. Keeping them is a choice: the
+        // route is an alias, and narrowing it would make the alias lie about the
+        // endpoint it fronts.
         'extra' => ['parent_id', 'description'],
         'reason' => 'ADDITIVE, inherited from the host: Environments are a thin alias over core\'s organizational '
             . 'units (Task 10), which are HIERARCHICAL and carry a description, while the original\'s Environments '
-            . 'are flat and name-only. These are core\'s own OU fields passed straight through — the plugin cannot '
-            . 'drop them without diverging from core instead. Reconciling the two models is flagged for D2.',
+            . 'are flat and name-only. These are core\'s own OU fields forwarded deliberately — the plugin authors '
+            . 'this schema (TaskerPlugin.php:201-209) and COULD narrow it, but narrowing would make the alias '
+            . 'advertise less than the endpoint it fronts actually accepts. Reconciling the two models is flagged for D2.',
     ],
 
     'rename_environment' => [
@@ -286,19 +379,40 @@ return [
             . 'wholesale replacement; it defaults to false, so omitting it reproduces the original exactly.',
     ],
 
+    // An earlier version of these two justified dropping project_id partly on
+    // "ours additionally accepts section slugs". That was FALSE. listGroups()
+    // and createGroup() are the only two section-consuming routes that call
+    // IdentifierResolver::resolveSection() with NO parent id
+    // (TaskerPlugin.php:2232, :2266), and resolveSection() returns null for a
+    // slug when $parentId === null (IdentifierResolver.php:339) — refusing to
+    // guess, correctly, since a slug is only unique within its parent. Every
+    // other section-consuming route passes a parent. So slug form does not work
+    // on exactly these two, and the route descriptions used to advertise it
+    // anyway; that clause has been removed from both.
+    //
+    // The CONCLUSION still holds — the original sends UUID-form ids and those
+    // resolve fine tenant- and OU-scoped without a project — but it holds for a
+    // narrower reason than was claimed. Restoring project_id to both routes (as
+    // the slug-bearing sibling routes have) is the better long-term fix and
+    // belongs to the separate behaviour task, not here.
+
     'list_groups' => [
         'missing' => ['project_id'],
-        'reason' => 'ADDITIVE-INVERSE (we need less): the original requires project_id alongside section_id because '
-            . 'its section ids are bare UUIDs with no scoping of their own. Here section_id resolves through '
-            . 'IdentifierResolver against the caller\'s tenant AND OU (Tasks 1/5), so the project is implied and '
-            . 'ours additionally accepts section slugs. A caller sending project_id has it ignored and still gets '
-            . 'the right section.',
+        'reason' => 'ADDITIVE-INVERSE (we need less), for UUID-form ids only: the original requires project_id '
+            . 'alongside section_id because its section ids are bare UUIDs with no scoping of their own. Here a '
+            . 'UUID/integer section_id resolves through IdentifierResolver against the caller\'s tenant AND OU '
+            . '(Tasks 1/5), so the project is implied and the original\'s call — which always sends a UUID — works. '
+            . 'It does NOT buy slug support: this route passes no parent to resolveSection(), so slugs return null '
+            . '(IdentifierResolver.php:339). Restoring project_id, which would make slug form work here as it does '
+            . 'on the sibling routes, is owned by the separate behaviour task.',
     ],
 
     'create_group' => [
         'missing' => ['project_id'],
-        'reason' => 'ADDITIVE-INVERSE, same as list_groups: section_id is resolved tenant- and OU-scoped here, so the '
-            . 'original\'s second identifier is redundant rather than absent.',
+        'reason' => 'ADDITIVE-INVERSE, same as list_groups and with the same limit: UUID/integer section_id resolves '
+            . 'tenant- and OU-scoped without a project, so the original\'s identifier pair is redundant for the calls '
+            . 'the original actually makes — but slug form does not resolve here either, for want of a parent. Same '
+            . 'owner for the fix.',
     ],
 
     'rename_group' => [
