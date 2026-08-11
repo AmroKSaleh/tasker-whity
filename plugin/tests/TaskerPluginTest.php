@@ -139,4 +139,80 @@ final class TaskerPluginTest extends TestCase
         self::assertTrue($result['resolved']);
         self::assertSame(3, $result['ouId']);
     }
+
+    /**
+     * Regression tests for a bug found via a LIVE tools/call smoke test
+     * during Task 4, not by any PHPUnit test — TenantIsolationOuTest
+     * exercises ProjectsApiHandler directly and never goes through
+     * TaskerPlugin::deleteProject()/updateProject() at all.
+     *
+     * Tasker's MCP transport (Whity\Mcp\Tools\ToolsCallHandler::buildRequest(),
+     * in the gitignored, pinned-ref host/.core checkout — out of this
+     * plugin's reach entirely) sends EVERY argument to a DELETE tool call as
+     * a query-string parameter appended to the synthesized request's path,
+     * and leaves the body empty — unlike POST/PATCH, whose body arguments
+     * really do arrive JSON-encoded. A deleteProject() that only read the
+     * JSON body (this method's first implementation, and the brief's own
+     * sketch) 400s on EVERY SINGLE MCP delete_project call with "Request
+     * body must be a JSON object", defeating the entire point of this
+     * flattening slice: an agent could never actually delete a project
+     * through the tool surface this task built. Confirmed fixed against a
+     * real running instance (docker exec tasker_frankenphp, tools/call
+     * delete_project) before these were written; these pin the fix at the
+     * unit level via Reflection, the same seam resolveCallerOu() above uses.
+     */
+    private function invokeIdentifierFromRequest(Request $request, string $key): string|int|null
+    {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'identifierFromRequest');
+        $method->setAccessible(true);
+
+        /** @var string|int|null $result */
+        $result = $method->invoke($plugin, $request, $key);
+
+        return $result;
+    }
+
+    public function testIdentifierFromRequestReadsFromTheJsonBodyWhenPresent(): void
+    {
+        $request = new Request(
+            'PATCH',
+            '/api/tasker/projects',
+            ['content-type' => 'application/json'],
+            (string) json_encode(['project_id' => 'TDE'])
+        );
+
+        self::assertSame('TDE', $this->invokeIdentifierFromRequest($request, 'project_id'));
+    }
+
+    /**
+     * Mirrors exactly what ToolsCallHandler::buildRequest() sends for a
+     * DELETE tool call: the argument travels in the path's query string, and
+     * the body is the empty string.
+     */
+    public function testIdentifierFromRequestFallsBackToTheQueryStringWhenTheBodyIsEmpty(): void
+    {
+        $request = new Request('DELETE', '/api/v1/tasker/projects?project_id=TDE', [], '');
+
+        self::assertSame('TDE', $this->invokeIdentifierFromRequest($request, 'project_id'));
+    }
+
+    public function testIdentifierFromRequestPrefersTheBodyOverTheQueryStringWhenBothArePresent(): void
+    {
+        $request = new Request(
+            'PATCH',
+            '/api/tasker/projects?project_id=FROM-QUERY',
+            [],
+            (string) json_encode(['project_id' => 'FROM-BODY'])
+        );
+
+        self::assertSame('FROM-BODY', $this->invokeIdentifierFromRequest($request, 'project_id'));
+    }
+
+    public function testIdentifierFromRequestReturnsNullWhenNeitherBodyNorQueryHasTheKey(): void
+    {
+        $request = new Request('DELETE', '/api/tasker/projects', [], '');
+
+        self::assertNull($this->invokeIdentifierFromRequest($request, 'project_id'));
+    }
 }

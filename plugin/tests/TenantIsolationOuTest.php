@@ -1527,4 +1527,78 @@ final class TenantIsolationOuTest extends TestCase
         self::assertNull(IdentifierResolver::resolveGroup($this->pdo, 7, 2, $siblingGroupId));
         self::assertNull(IdentifierResolver::resolveGroup($this->pdo, 7, 2, $publicId));
     }
+
+    // ==================== Task 4: flattened project routes ====================
+
+    public function testUpdateProjectAcceptsAPrefixInsteadOfAnId(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Prefix Update');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'PU' WHERE id = {$projectId}");
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $resolved = IdentifierResolver::resolveProject($this->pdo, 7, null, 'PU');
+        self::assertSame($projectId, $resolved);
+
+        $response = $handler->update(7, null, $resolved, json_encode(['name' => 'Renamed By Prefix']));
+        self::assertSame(200, $response->getStatusCode());
+
+        $name = (string) $this->pdo->query("SELECT name FROM tasker_projects WHERE id = {$projectId}")->fetchColumn();
+        self::assertSame('Renamed By Prefix', $name);
+    }
+
+    /**
+     * The judgement call this task leaves open: environment_id must behave
+     * as a genuine alias for ou_id, not a parallel, half-wired field —
+     * proven here by exercising it through the exact same
+     * ouIsInCallersScope() boundary the pre-existing ou_id tests above
+     * already cover (testCreateRejectsAnOuIdOutsideTheCallersScope et al.).
+     */
+    public function testCreateAcceptsEnvironmentIdAsAnAliasForOuId(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $created = json_decode(
+            $handler->create(7, null, 1, json_encode(['name' => 'Via alias', 'environment_id' => 2]))->getBody(),
+            true
+        );
+
+        self::assertSame(2, $created['data']['ouId']);
+    }
+
+    public function testCreateRejectsAnEnvironmentIdOutsideTheCallersScope(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        // Caller is scoped to OU 2; OU 3 is a sibling, outside their scope.
+        $response = $handler->create(7, 2, 1, json_encode(['name' => 'Sneaky alias', 'environment_id' => 3]));
+
+        self::assertSame(422, $response->getStatusCode());
+    }
+
+    public function testUpdateAcceptsEnvironmentIdAsAnAliasForOuId(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $projectId = $this->makeProjectDirect(7, null, 'Retarget via alias');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $projectId, json_encode(['environment_id' => 2]));
+
+        self::assertSame(200, $response->getStatusCode());
+        $row = $this->pdo->query("SELECT ou_id FROM tasker_projects WHERE id = {$projectId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(2, (int) $row['ou_id']);
+    }
+
+    public function testCreateRejectsANonNumericEnvironmentId(): void
+    {
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->create(7, null, 1, json_encode(['name' => 'Bad alias', 'environment_id' => 'not-a-number']));
+
+        self::assertSame(400, $response->getStatusCode());
+    }
 }

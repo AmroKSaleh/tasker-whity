@@ -82,14 +82,18 @@ final class ProjectsApiHandler
         // wider than their own scope (a bare null ou_id is visible
         // tenant-wide). An unrestricted caller's own OU is null, so this
         // default is a no-op for them. When the body DOES supply the key
-        // (array_key_exists, not isset — an explicit `"ou_id": null` must
+        // (present, not just non-null — an explicit `"ou_id": null` must
         // still be validated, not skipped), the requested value — concrete
         // id or null — is routed through ouIsInCallersScope() below.
         $ouId = $callerOuId;
-        if (is_array($decoded) && array_key_exists('ou_id', $decoded)) {
-            $ouId = $decoded['ou_id'] !== null ? (int) $decoded['ou_id'] : null;
+        $ouInput = self::extractOuIdInput(is_array($decoded) ? $decoded : []);
+        if ($ouInput['present']) {
+            if ($ouInput['raw'] !== null && !is_numeric($ouInput['raw'])) {
+                return Response::error('environment_id must be an integer id', 400);
+            }
+            $ouId = $ouInput['raw'] !== null ? (int) $ouInput['raw'] : null;
             if (!$this->ouIsInCallersScope($tenantId, $callerOuId, $ouId)) {
-                return Response::error('ou_id is outside the caller\'s scope', 422);
+                return Response::error('environment_id is outside the caller\'s scope', 422);
             }
         }
 
@@ -166,9 +170,11 @@ final class ProjectsApiHandler
     }
 
     /**
-     * PATCH /api/tasker/projects/{id} — partial update. Only fields present
-     * in the body are changed. slug is frozen at creation and never exposed
-     * as an updatable field, the same policy sections and groups use.
+     * PATCH /api/tasker/projects — partial update, project_id resolved by
+     * the caller before this is reached (see TaskerPlugin::updateProject()).
+     * Only fields present in the body are changed. slug is frozen at
+     * creation and never exposed as an updatable field, the same policy
+     * sections and groups use.
      */
     public function update(int $tenantId, ?int $callerOuId, int $projectId, string $body): Response
     {
@@ -193,14 +199,18 @@ final class ProjectsApiHandler
             $fields[] = 'name = :name';
             $params[':name'] = $name;
         }
-        if (array_key_exists('ou_id', $decoded)) {
-            $ouId = $decoded['ou_id'] !== null ? (int) $decoded['ou_id'] : null;
+        $ouInput = self::extractOuIdInput($decoded);
+        if ($ouInput['present']) {
+            if ($ouInput['raw'] !== null && !is_numeric($ouInput['raw'])) {
+                return Response::error('environment_id must be an integer id', 400);
+            }
+            $ouId = $ouInput['raw'] !== null ? (int) $ouInput['raw'] : null;
             // Validated regardless of whether the new value is a concrete OU
             // id or null: an OU-restricted caller setting ou_id to null would
             // otherwise unilaterally widen the project to tenant-wide
             // visibility with no authorization check at all.
             if (!$this->ouIsInCallersScope($tenantId, $callerOuId, $ouId)) {
-                return Response::error('ou_id is outside the caller\'s scope', 422);
+                return Response::error('environment_id is outside the caller\'s scope', 422);
             }
             $fields[] = 'ou_id = :ou_id';
             $params[':ou_id'] = $ouId;
@@ -245,11 +255,13 @@ final class ProjectsApiHandler
     }
 
     /**
-     * DELETE /api/tasker/projects/{id} — cascades to the project's sections,
-     * groups, tasks, milestones, and task discussions via each table's own
-     * FK (all ON DELETE CASCADE, see Tasks 4-7's migrations). entity_tags
-     * rows referencing a deleted task or project become orphaned — accepted,
-     * since entity_tags.entity_type is opaque and unenforced by design (§6).
+     * DELETE /api/tasker/projects — project_id resolved by the caller before
+     * this is reached (see TaskerPlugin::deleteProject()). Cascades to the
+     * project's sections, groups, tasks, milestones, and task discussions via
+     * each table's own FK (all ON DELETE CASCADE, see Tasks 4-7's
+     * migrations). entity_tags rows referencing a deleted task or project
+     * become orphaned — accepted, since entity_tags.entity_type is opaque and
+     * unenforced by design (§6).
      */
     public function delete(int $tenantId, ?int $callerOuId, int $projectId): Response
     {
@@ -272,6 +284,44 @@ final class ProjectsApiHandler
         } catch (\Throwable) {
             return Response::error('Failed to delete project', 500);
         }
+    }
+
+    /**
+     * Reads the caller-supplied OU id out of a decoded body, accepting
+     * `environment_id` as the request-facing alias for the internal `ou_id`
+     * column — the derived MCP tool surface speaks "Environment", never
+     * "OU" (see this handler's route schema in TaskerPlugin::getRoutes()),
+     * so `create`/`update` must accept whichever key an agent actually sends.
+     * `ou_id` wins when a caller supplies both, matching this class's own
+     * historical field name.
+     *
+     * `present` uses array_key_exists, not isset, on EITHER key — an
+     * explicit `"ou_id": null` (or `"environment_id": null`) must still be
+     * validated as "leave/set this project tenant-wide", not silently
+     * treated as "the key was omitted".
+     *
+     * OU ids are integers or UUIDs, resolved by core rather than by
+     * {@see \Tasker\Access\IdentifierResolver} — that resolver only knows
+     * Tasker's own entities (projects/sections/groups/tasks); it has no
+     * notion of an organizational_units row. Accepting a UUID here would
+     * need a genuine OU-identifier resolver this slice does not build, so
+     * only an integer or a numeric string is accepted; anything else is
+     * rejected by the caller with a 400, not silently coerced to 0 or
+     * misreported as a 404/422 scope failure.
+     *
+     * @param array<string, mixed> $decoded
+     * @return array{present: bool, raw: mixed}
+     */
+    private static function extractOuIdInput(array $decoded): array
+    {
+        if (array_key_exists('ou_id', $decoded)) {
+            return ['present' => true, 'raw' => $decoded['ou_id']];
+        }
+        if (array_key_exists('environment_id', $decoded)) {
+            return ['present' => true, 'raw' => $decoded['environment_id']];
+        }
+
+        return ['present' => false, 'raw' => null];
     }
 
     /**

@@ -168,6 +168,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'list_projects',
                     'summary' => 'List the caller\'s OU-scoped projects',
                     'tags' => ['tasker'],
+                    'parameters' => [
+                        [
+                            'name' => 'environment_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Optional: only projects in this Environment (OU). Omit to see every Environment.',
+                        ],
+                    ],
                     'responses' => [200 => ['description' => 'The project list']],
                 ],
             ],
@@ -181,34 +190,55 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'create_project',
                     'summary' => 'Create a project (with its default Backlog section)',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['name'],
+                        'properties' => [
+                            'name' => ['type' => 'string', 'description' => 'Project name'],
+                            'prefix' => ['type' => 'string', 'description' => 'Optional 2-5 uppercase letters for short ids (e.g. TDE). Derived from the name when omitted.'],
+                            'environment_id' => ['type' => 'string', 'description' => 'Optional Environment (OU) to create the project in.'],
+                            'context' => ['type' => 'object', 'description' => 'The project Foundation: goal, why, scope, definition_of_done and related keys.'],
+                        ],
+                    ],
                     'responses' => [
                         201 => ['description' => 'The created project'],
-                        400 => ['description' => 'name missing, empty, or too long'],
-                        422 => ['description' => 'ou_id is outside the caller\'s scope'],
+                        400 => ['description' => 'name missing/empty/too long, or prefix malformed'],
+                        422 => ['description' => 'environment_id is outside the caller\'s scope'],
                     ],
                 ],
             ],
             [
                 'method' => 'PATCH',
-                'path' => '/api/tasker/projects/{id:\d+}',
+                'path' => '/api/tasker/projects',
                 'handler' => [$this, 'updateProject'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_project:manage',
                 'schema' => [
                     'operationId' => 'update_project',
-                    'summary' => 'Update a project\'s name, ou_id, prefix, or sort_order',
+                    'summary' => 'Update a project\'s name, environment, prefix or sort order',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['project_id'],
+                        'properties' => [
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix (e.g. TDE), slug, UUID or id.'],
+                            'name' => ['type' => 'string'],
+                            'prefix' => ['type' => 'string', 'description' => '2-5 uppercase letters, or null to clear.'],
+                            'environment_id' => ['type' => 'string', 'description' => 'Move the project to this Environment (OU).'],
+                            'sort_order' => ['type' => 'integer'],
+                        ],
+                    ],
                     'responses' => [
                         200 => ['description' => 'The updated project'],
-                        400 => ['description' => 'name empty/too long, or prefix not 2-5 uppercase letters'],
+                        400 => ['description' => 'A supplied field is invalid'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
-                        422 => ['description' => 'ou_id is outside the caller\'s scope'],
+                        422 => ['description' => 'environment_id is outside the caller\'s scope'],
                     ],
                 ],
             ],
             [
                 'method' => 'DELETE',
-                'path' => '/api/tasker/projects/{id:\d+}',
+                'path' => '/api/tasker/projects',
                 'handler' => [$this, 'deleteProject'],
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_project:manage',
@@ -216,6 +246,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'operationId' => 'delete_project',
                     'summary' => 'Delete a project and everything under it',
                     'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['project_id'],
+                        'properties' => [
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix (e.g. TDE), slug, UUID or id.'],
+                        ],
+                    ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
@@ -895,7 +932,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * PATCH /api/tasker/projects/{id}
+     * PATCH /api/tasker/projects
      *
      * @param array<string, string> $params
      */
@@ -907,17 +944,43 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new ProjectsApiHandler($pdo))
-            ->update($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0), $request->getBody());
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        $raw = $this->identifierFromRequest($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        return (new ProjectsApiHandler($pdo))->update($tenantId, $ou['ouId'], $projectId, $request->getBody());
     }
 
     /**
-     * DELETE /api/tasker/projects/{id}
+     * DELETE /api/tasker/projects
+     *
+     * NOTE: this handler deliberately does NOT require the body to decode
+     * as a JSON object the way updateProject() does — see
+     * {@see self::identifierFromRequest()}'s docblock for why a DELETE
+     * request here may legitimately carry no body at all.
      *
      * @param array<string, string> $params
      */
@@ -929,13 +992,29 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         $pdo = $this->resolvePdo();
-        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
-        if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new ProjectsApiHandler($pdo))
-            ->delete($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0));
+        $raw = $this->identifierFromRequest($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        return (new ProjectsApiHandler($pdo))->delete($tenantId, $ou['ouId'], $projectId);
     }
 
     /**
@@ -1471,6 +1550,65 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new SessionApiHandler($pdo))->setDefaultProject($tenantId, $profileId, $projectId);
+    }
+
+    /**
+     * Reads $key from the request body (a JSON object) first, falling back
+     * to a query-string parameter of the same name.
+     *
+     * REGRESSION FIX, found by a live tools/call smoke test rather than the
+     * PHPUnit suite — TenantIsolationOuTest exercises ProjectsApiHandler
+     * directly and never goes through updateProject()/deleteProject() at
+     * all, so nothing in this codebase's existing test plan could have
+     * caught it. The host's MCP transport
+     * (`Whity\Mcp\Tools\ToolsCallHandler::buildRequest()`, in the
+     * gitignored, pinned-ref `host/.core` checkout — out of this plugin's
+     * reach entirely) sends EVERY argument to a DELETE (also GET/HEAD, but
+     * those don't reach this method) tool call as a query-string parameter
+     * and leaves the body empty, unlike POST/PATCH whose body arguments
+     * really do arrive JSON-encoded (confirmed empirically for both).
+     *
+     * Without this fallback, a delete_project route that only looked at the
+     * body — this method's first implementation, and the brief's own
+     * sketch — 400s on EVERY SINGLE MCP delete_project call with "Request
+     * body must be a JSON object", which defeats the entire point of this
+     * flattening slice: an agent could never actually delete a project
+     * through the tool surface this task builds. The same fallback also
+     * makes a bare `DELETE /api/tasker/projects?project_id=5` with no body
+     * at all work over plain HTTP — common, since many HTTP clients and
+     * proxies drop DELETE bodies outright — without weakening
+     * updateProject()'s body-first behaviour: a body value still wins
+     * whenever both are present.
+     */
+    private function identifierFromRequest(Request $request, string $key): string|int|null
+    {
+        $decoded = json_decode($request->getBody(), true);
+        if (is_array($decoded) && array_key_exists($key, $decoded) && (is_string($decoded[$key]) || is_int($decoded[$key]))) {
+            return $decoded[$key];
+        }
+
+        $query = parse_url($request->getPath(), PHP_URL_QUERY);
+        if (!is_string($query) || $query === '') {
+            return null;
+        }
+
+        parse_str($query, $queryParams);
+
+        return isset($queryParams[$key]) && is_string($queryParams[$key]) ? $queryParams[$key] : null;
+    }
+
+    /**
+     * The caller's default project id, or null. Used as the empty-identifier
+     * fallback so tools like list_tasks can be called with no arguments,
+     * exactly as the original allows.
+     */
+    private function defaultProjectIdFor(Request $request, int $tenantId): ?int
+    {
+        $profileId = $this->callerProfileId($request);
+
+        return $profileId === null
+            ? null
+            : SessionApiHandler::defaultProjectId($this->resolvePdo(), $tenantId, $profileId);
     }
 
     /**
