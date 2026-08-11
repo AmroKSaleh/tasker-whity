@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Tasker;
 
+use Tasker\Access\IdentifierResolver;
 use Tasker\Api\BoardApiHandler;
 use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\PingApiHandler;
 use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
+use Tasker\Api\SessionApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\AddTaskerTaskShortIdUnique;
@@ -20,6 +22,7 @@ use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
+use Tasker\Migrations\CreateTaskerUserPrefsTable;
 use Tasker\Migrations\GrantTaskerMilestonePermissions;
 use Tasker\Migrations\GrantTaskerPingPermissions;
 use Tasker\Migrations\GrantTaskerProjectPermissions;
@@ -662,6 +665,47 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/session/init',
+                'handler' => [$this, 'initSession'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:view',
+                'schema' => [
+                    'operationId' => '__init_tasker_session',
+                    'summary' => 'First call of any Tasker session: preferences plus the directive playbook',
+                    'tags' => ['tasker'],
+                    'responses' => [
+                        200 => ['description' => 'Preferences and directives'],
+                        403 => ['description' => 'Tenant context or caller identity could not be resolved'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PUT',
+                'path' => '/api/tasker/session/default-project',
+                'handler' => [$this, 'setDefaultProject'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_project:view',
+                'schema' => [
+                    'operationId' => 'set_default_project',
+                    'summary' => 'Set or clear the caller\'s default project',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'properties' => [
+                            'project_id' => [
+                                'type' => ['string', 'integer', 'null'],
+                                'description' => 'Project UUID, prefix, slug or id. Null clears the default.',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The updated preferences'],
+                        404 => ['description' => 'Project not found in the caller\'s tenant'],
+                    ],
+                ],
+            ],
         ];
     }
 
@@ -755,6 +799,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             CreateTaskerMilestonesTable::class,
             GrantTaskerMilestonePermissions::class,
             CreateTaskerTaskDiscussionsTable::class,
+            CreateTaskerUserPrefsTable::class,
         ];
     }
 
@@ -1369,6 +1414,63 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
         return (new TaskDiscussionsApiHandler($pdo))
             ->put($tenantId, $callerOu['ouId'], (int) ($params['id'] ?? 0), $request->getBody());
+    }
+
+    /**
+     * GET /api/tasker/session/init
+     *
+     * @param array<string, string> $params
+     */
+    public function initSession(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $profileId = $this->callerProfileId($request);
+        if ($profileId === null) {
+            return Response::error('Caller identity is required', 403);
+        }
+
+        return (new SessionApiHandler($this->resolvePdo()))->init($tenantId, $profileId);
+    }
+
+    /**
+     * PUT /api/tasker/session/default-project
+     *
+     * @param array<string, string> $params
+     */
+    public function setDefaultProject(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $profileId = $this->callerProfileId($request);
+        if ($profileId === null) {
+            return Response::error('Caller identity is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$callerOu['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        $raw = is_array($decoded) ? ($decoded['project_id'] ?? null) : null;
+
+        $projectId = $raw === null
+            ? null
+            : IdentifierResolver::resolveProject($pdo, $tenantId, $callerOu['ouId'], is_scalar($raw) ? $raw : null);
+
+        if ($raw !== null && $projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        return (new SessionApiHandler($pdo))->setDefaultProject($tenantId, $profileId, $projectId);
     }
 
     /**
