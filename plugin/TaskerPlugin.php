@@ -747,7 +747,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:edit',
                 'schema' => [
                     'operationId' => 'update_task',
-                    'summary' => 'Update a task\'s text, detail, priority, or due_date',
+                    'summary' => 'Update a task\'s text, detail, priority, due_date, or status',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
@@ -758,11 +758,16 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                             'detail' => ['type' => ['string', 'null']],
                             'priority' => ['type' => ['string', 'null'], 'enum' => ['rush', 'high', 'medium', 'low', null]],
                             'due_date' => ['type' => ['string', 'null'], 'description' => 'ISO date YYYY-MM-DD, or null to clear.'],
+                            'status' => [
+                                'type' => 'string',
+                                'enum' => ['pending', 'in_progress', 'done'],
+                                'description' => 'Does not stamp or clear completed_at -- use complete_task/uncomplete_task for that.',
+                            ],
                         ],
                     ],
                     'responses' => [
                         200 => ['description' => 'The updated task'],
-                        400 => ['description' => 'text empty/too long, or priority invalid'],
+                        400 => ['description' => 'text empty/too long, priority invalid, or status not one of pending/in_progress/done'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
                     ],
                 ],
@@ -1056,6 +1061,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The ranked task list'],
                         400 => ['description' => 'project_id looks like a short id but is malformed, or no project_id/default project was found and confirmed was not passed as true'],
+                        403 => ['description' => 'Tenant context is required, or caller membership could not be resolved'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
                     ],
                 ],
@@ -1071,12 +1077,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'summary' => 'The "what needs me?" triage for the CALLING USER\'S OWN non-done work -- not the '
                         . 'whole team\'s. Matched by created_by (tasker_tasks has no assignee column). Two buckets '
                         . 'in the response: overdue (due_date before today) and stale (in_progress and not updated '
-                        . 'in 2+ days -- fixed, not configurable). NOT AVAILABLE ON THIS BACKEND (the original also '
-                        . 'covers these, but this schema has no such concept yet): tasks awaiting review verdict, '
-                        . 'pending human guidance, and agent sessions awaiting input. A task qualifying for both '
-                        . 'available buckets appears in each, not deduplicated. A completed (done) task appears in '
-                        . 'no bucket. project_id is optional, and omitting it means every project in your OU scope '
-                        . '-- NOT your default project, unlike every other tool in this plugin.',
+                        . 'in 2+ days -- fixed, not configurable). Within EACH bucket, CRITICAL (pinned) tasks are '
+                        . 'listed first, ahead of the bucket\'s own normal order. NOT AVAILABLE ON THIS BACKEND (the '
+                        . 'original also covers these, but this schema has no such concept yet): tasks awaiting '
+                        . 'review verdict, pending human guidance, and agent sessions awaiting input. A task '
+                        . 'qualifying for both available buckets appears in each, not deduplicated. A completed '
+                        . '(done) task appears in no bucket. project_id is optional, and omitting it means every '
+                        . 'project in your OU scope -- NOT your default project, unlike every other tool in this '
+                        . 'plugin.',
                     'tags' => ['tasker'],
                     'parameters' => [
                         [
@@ -1090,7 +1098,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The two buckets: overdue, stale'],
                         400 => ['description' => 'project_id looks like a short id but is malformed'],
-                        403 => ['description' => 'Caller membership or identity could not be resolved'],
+                        403 => ['description' => 'Tenant context is required, caller membership could not be resolved, or caller identity could not be resolved'],
                         404 => ['description' => 'project_id was supplied but not found or outside the caller\'s OU scope'],
                     ],
                 ],

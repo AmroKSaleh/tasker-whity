@@ -2530,6 +2530,55 @@ final class TenantIsolationOuTest extends TestCase
         );
     }
 
+    /**
+     * Round 3 review finding: the fixture above uses pinned = false and
+     * default sort_order everywhere, so re-introducing `pinned DESC` or
+     * `sort_order` into rank()'s own ORDER BY (get_ready_work's ordering, or
+     * this task's own withdrawn 'sorting_order'/'pinned' rank_by options)
+     * would silently change nothing it asserts. This fixture pins a LOW
+     * priority task with a very negative sort_order — if pinned or
+     * sort_order leaked into rank()'s ordering, this task would jump to the
+     * front; the live original's rank_tasks orders by priority and due date
+     * only, so it must stay last.
+     */
+    public function testRankIgnoresPinnedStatusAndSortOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Rank ignores pinned project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Rush', 'rush', false, null, 0);
+        // Pinned AND an extremely low sort_order -- would rank FIRST if
+        // either leaked into rank()'s ordering. It must still rank LAST:
+        // low priority beats any pinned/sort_order advantage.
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Low but pinned', 'low', true, null, -100);
+
+        $handler = new AttentionApiHandler($this->pdo);
+        $payload = json_decode($handler->rank(7, null, $projectId)->getBody(), true);
+
+        self::assertSame(['Rush', 'Low but pinned'], array_column($payload['data'], 'text'));
+    }
+
+    /**
+     * Round 3 review finding: proves the final tiebreak is `id` (insertion
+     * order here), not `sort_order` -- two tasks tied on BOTH priority and
+     * due_date, with sort_order values that would REVERSE the expected
+     * order if sort_order were consulted before id.
+     */
+    public function testRankTieBreaksByIdNotSortOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Rank tiebreak project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        // Created first (lower id), but with a HIGHER sort_order than the
+        // second task -- if sort_order were consulted before id, the second
+        // task (sort_order 1) would wrongly rank first.
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Created first', 'medium', false, '2027-03-01', 50);
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Created second', 'medium', false, '2027-03-01', 1);
+
+        $handler = new AttentionApiHandler($this->pdo);
+        $payload = json_decode($handler->rank(7, null, $projectId)->getBody(), true);
+
+        self::assertSame(['Created first', 'Created second'], array_column($payload['data'], 'text'));
+    }
+
     public function testRankExcludesDoneTasks(): void
     {
         $projectId = $this->makeProjectDirect(7, null, 'Rank excludes done project');
@@ -2689,6 +2738,60 @@ final class TenantIsolationOuTest extends TestCase
         $payload = json_decode($handler->attention(7, null, $projectId, self::CALLER_ID)->getBody(), true);
 
         self::assertSame([], $payload['data']['stale']);
+    }
+
+    /**
+     * Round 3 correction: `pinned` is real for get_my_attention, but as a
+     * SORT key within each bucket, not a bucket of its own (see
+     * AttentionApiHandler's own class docblock for the full history — round
+     * 1 shipped it as a bucket, round 2 deleted it entirely, both wrong).
+     * A pinned task less overdue than an unpinned one must still sort
+     * FIRST, proving pinned genuinely overrides the bucket's own normal
+     * due_date ordering rather than only ever coinciding with it.
+     */
+    public function testAttentionOverdueBucketSortsPinnedTasksFirst(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Overdue pinned-order project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $fiveDaysAgo = (new \DateTimeImmutable('-5 days'))->format('Y-m-d');
+        $oneDayAgo = (new \DateTimeImmutable('-1 day'))->format('Y-m-d');
+
+        // Far more overdue, but NOT pinned -- must still rank second.
+        $this->makeAttentionTaskDirect(7, $projectId, $sectionId, 'Very overdue', self::CALLER_ID, 'pending', $fiveDaysAgo, false);
+        // Barely overdue, but PINNED -- must rank first despite the later due_date.
+        $this->makeAttentionTaskDirect(7, $projectId, $sectionId, 'Barely overdue, pinned', self::CALLER_ID, 'pending', $oneDayAgo, true);
+
+        $handler = new AttentionApiHandler($this->pdo);
+        $payload = json_decode($handler->attention(7, null, $projectId, self::CALLER_ID)->getBody(), true);
+
+        self::assertSame(['Barely overdue, pinned', 'Very overdue'], array_column($payload['data']['overdue'], 'text'));
+    }
+
+    /**
+     * Same proof as the overdue test above, for the `stale` bucket's own
+     * secondary sort (updated_at) instead of due_date.
+     */
+    public function testAttentionStaleBucketSortsPinnedTasksFirst(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Stale pinned-order project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        // Quieter for far longer, but NOT pinned -- must still rank second.
+        $this->makeAttentionTaskDirect(
+            7, $projectId, $sectionId, 'Very stale', self::CALLER_ID, 'in_progress', null, false,
+            "CURRENT_TIMESTAMP - INTERVAL '10 days'"
+        );
+        // Barely past the 2-day cutoff, but PINNED -- must rank first
+        // despite being touched far more recently.
+        $this->makeAttentionTaskDirect(
+            7, $projectId, $sectionId, 'Barely stale, pinned', self::CALLER_ID, 'in_progress', null, true,
+            "CURRENT_TIMESTAMP - INTERVAL '3 days'"
+        );
+
+        $handler = new AttentionApiHandler($this->pdo);
+        $payload = json_decode($handler->attention(7, null, $projectId, self::CALLER_ID)->getBody(), true);
+
+        self::assertSame(['Barely stale, pinned', 'Very stale'], array_column($payload['data']['stale'], 'text'));
     }
 
     /**

@@ -47,11 +47,19 @@ use Whity\Sdk\Http\Response;
  * INPUT, STALE in-progress tasks (quiet 2+ days), and OVERDUE items." Of
  * these five, only stale and overdue are implementable on this backend today
  * — review, guidance, and agent-session concepts do not exist in this D1
- * schema at all. `pinned` (this task's earlier, withdrawn ruling #7) was
- * NEVER one of the original's five and has been removed entirely. The three
- * unimplementable buckets are named explicitly, as missing, in the route's
- * own summary text — the same honesty the skip_count disclosure above
- * already established, extended to this tool.
+ * schema at all. The three unimplementable buckets are named explicitly, as
+ * missing, in the route's own summary text — the same honesty the
+ * skip_count disclosure above already established, extended to this tool.
+ *
+ * ROUND 3 CORRECTION — `pinned` is real, but as ORDERING, not a bucket: round
+ * 1 shipped `pinned` as a third bucket; round 2 (reading the live tool's own
+ * description, which lists five buckets and no `pinned` among them) deleted
+ * it entirely; BOTH were wrong. The original's `update_task` describes
+ * `pinned` as marking a task "CRITICAL (must-not-slip)... they are listed
+ * first by get_my_attention". So `pinned` is real, it belongs to THIS tool,
+ * and it is a SORT key across each bucket's results, not a bucket of its
+ * own: `pinned DESC` leads both `overdue` and `stale`'s own ORDER BY, ahead
+ * of the existing due-date/updated-at/id ordering.
  */
 final class AttentionApiHandler
 {
@@ -106,12 +114,12 @@ final class AttentionApiHandler
 
             // t.tenant_id/p.tenant_id kept as LITERAL SQL text (not folded
             // into an interpolated variable) for the same reason
-            // fetchBucket() below does — see that method's own docblock for
-            // the tenant-predicate-scanner rationale. `t.id` (not a bare
-            // `id`) in the ORDER BY is required here, unlike readyWork()'s
-            // own single-table query: this JOINs tasker_projects, which also
-            // has its own `id` column, so an unqualified `id` would be
-            // ambiguous.
+            // fetchOverdue()/fetchStale() below do — see fetchOverdue()'s
+            // own docblock for the tenant-predicate-scanner rationale.
+            // `t.id` (not a bare `id`) in the ORDER BY is required here,
+            // unlike readyWork()'s own single-table query: this JOINs
+            // tasker_projects, which also has its own `id` column, so an
+            // unqualified `id` would be ambiguous.
             $stmt = $this->db->prepare(
                 "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
                         t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
@@ -146,13 +154,18 @@ final class AttentionApiHandler
      * GUIDANCE (unconsumed), agent sessions AWAITING INPUT, STALE
      * in-progress tasks (quiet 2+ days), and OVERDUE items." Of those five,
      * only `stale` and `overdue` are implementable here — this D1 schema has
-     * no review/guidance/agent-session concept at all. `pinned` (this task's
-     * earlier, now-withdrawn ruling #7) was NEVER one of the original's five
-     * and is not returned. Two named buckets: `overdue`, `stale`. A task
-     * qualifying for both appears in EACH — buckets are deliberately not
-     * deduplicated against each other. A completed (`status = 'done'`) task
-     * appears in NO bucket regardless of how many it would otherwise qualify
-     * for (ruling #8, upheld through the round-2 correction).
+     * no review/guidance/agent-session concept at all. Two named buckets:
+     * `overdue`, `stale`. A task qualifying for both appears in EACH —
+     * buckets are deliberately not deduplicated against each other. A
+     * completed (`status = 'done'`) task appears in NO bucket regardless of
+     * how many it would otherwise qualify for (ruling #8, upheld through the
+     * round-2 correction).
+     *
+     * PINNED IS ORDERING, NOT A BUCKET (round 3 — see this class's own
+     * docblock for the full correction): within EACH bucket, pinned tasks
+     * sort first (`pinned DESC`), ahead of the bucket's own existing
+     * secondary order (due_date for overdue, updated_at for stale), with
+     * `id` still the final tiebreak either way.
      *
      * PERSONAL, NOT TEAM-WIDE (ruling #5): tasker_tasks has no assignee/owner
      * column, only `created_by` (see CreateTaskerTasksTable) — the closest
@@ -202,22 +215,8 @@ final class AttentionApiHandler
         }
 
         try {
-            $overdue = $this->fetchBucket(
-                $tenantId,
-                $callerOuId,
-                $projectId,
-                $callerId,
-                't.due_date < CURRENT_DATE',
-                't.due_date ASC, t.id ASC'
-            );
-            $stale = $this->fetchBucket(
-                $tenantId,
-                $callerOuId,
-                $projectId,
-                $callerId,
-                "t.status = 'in_progress' AND t.updated_at <= " . self::STALE_CUTOFF_SQL,
-                't.updated_at ASC, t.id ASC'
-            );
+            $overdue = $this->fetchOverdue($tenantId, $callerOuId, $projectId, $callerId);
+            $stale = $this->fetchStale($tenantId, $callerOuId, $projectId, $callerId);
 
             return Response::json([
                 'data' => [
@@ -231,25 +230,31 @@ final class AttentionApiHandler
     }
 
     /**
-     * One bucket's rows: tenant + OU (unconditional, one static SQL
+     * The `overdue` bucket: tenant + OU (unconditional, one static SQL
      * template per {@see OuScopeResolver::whereFragment()}) + created_by +
-     * "not done" + the bucket's own predicate, optionally narrowed to one
-     * project. $bucketPredicate and $orderBy are ALWAYS one of the two fixed
-     * literals {@see self::attention()} passes (overdue, stale) — never
-     * caller input — so this is not a runtime-branched WHERE/ORDER BY text
-     * in the sense the architecture forbids; it is two separate static
-     * templates selected by which of the two fixed call sites invoked this
-     * method, the same shape as {@see TasksApiHandler::listFiltered()}'s own
-     * optional, presence-controlled (never value-controlled) predicate text.
+     * "not done" + `due_date < CURRENT_DATE`, optionally narrowed to one
+     * project, pinned tasks sorted first.
+     *
+     * Inlined as its OWN static template (round 3 review finding) rather
+     * than sharing a `fetchBucket($bucketPredicate, $orderBy)` helper the
+     * way an earlier version of this class did: passing WHERE/ORDER BY
+     * fragments in as plain string PARAMETERS is structurally the exact
+     * shape the "never branch WHERE or ORDER BY text at runtime" rule
+     * exists to forbid, even though both of that helper's two call sites
+     * only ever passed fixed literals — a constraint held by a docblock
+     * argument rather than by the code itself is the one that breaks under
+     * the next edit (e.g. a THIRD call site passing a caller-influenced
+     * fragment, which nothing in that shape would have stopped). With only
+     * two call sites, inlining each as its own method costs little and
+     * removes the shape entirely.
      *
      * The `t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p` predicate
-     * is kept as LITERAL SQL text below (not folded into a `$conditions`
-     * array and imploded into one opaque interpolated variable, as an
-     * earlier version of this method did) — TenantIsolationTest's own
-     * tenant-predicate scanner statically greps each route's SQL string
-     * literals for a `tenant_id` comparison and cannot see inside a runtime
-     * `{$where}` variable at all; folding it in there tripped that scanner
-     * even though the query is genuinely tenant-scoped at runtime. Matches
+     * is kept as LITERAL SQL text (not an interpolated variable) so
+     * TenantIsolationTest's own tenant-predicate scanner — which statically
+     * greps each route's SQL string literals for a `tenant_id` comparison
+     * and cannot see inside a runtime variable at all — can verify it;
+     * folding it into one requires re-deriving that same argument every
+     * time this code is touched. Matches
      * {@see TasksApiHandler::listFiltered()}'s own established `{$extra}`
      * pattern: the ALWAYS-present predicates stay literal, only the
      * genuinely optional project_id clause is a separate, presence-controlled
@@ -257,14 +262,8 @@ final class AttentionApiHandler
      *
      * @return list<array<string, mixed>>
      */
-    private function fetchBucket(
-        int $tenantId,
-        ?int $callerOuId,
-        ?int $projectId,
-        int $callerId,
-        string $bucketPredicate,
-        string $orderBy
-    ): array {
+    private function fetchOverdue(int $tenantId, ?int $callerOuId, ?int $projectId, int $callerId): array
+    {
         $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
         $ouClause = OuScopeResolver::whereFragment('p.ou_id');
         $projectClause = $projectId !== null ? ' AND t.project_id = :project_id' : '';
@@ -276,8 +275,54 @@ final class AttentionApiHandler
              FROM tasker_tasks t
              JOIN tasker_projects p ON p.id = t.project_id
              WHERE t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
-               AND t.created_by = :created_by AND t.status != 'done' AND {$bucketPredicate}{$projectClause}
-             ORDER BY {$orderBy}"
+               AND t.created_by = :created_by AND t.status != 'done'
+               AND t.due_date < CURRENT_DATE{$projectClause}
+             ORDER BY t.pinned DESC, t.due_date ASC, t.id ASC"
+        );
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':created_by', $callerId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        if ($projectId !== null) {
+            $stmt->bindValue(':project_id', $projectId, PDO::PARAM_INT);
+        }
+        $stmt->execute();
+
+        /** @var array<int, array<string, mixed>> $rows */
+        $rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        return $rows;
+    }
+
+    /**
+     * The `stale` bucket: identical shape to {@see self::fetchOverdue()} —
+     * see that method's own docblock for why each bucket is its own inlined
+     * static template rather than a shared helper taking WHERE/ORDER BY
+     * text as parameters — except the predicate is `status = 'in_progress'
+     * AND updated_at <= ` + {@see self::STALE_CUTOFF_SQL} (the fixed 2-day
+     * cutoff, ruling #4), and the secondary sort is `updated_at ASC`
+     * (longest-quiet first) instead of `due_date ASC`. Pinned tasks sort
+     * first here too.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function fetchStale(int $tenantId, ?int $callerOuId, ?int $projectId, int $callerId): array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+        $projectClause = $projectId !== null ? ' AND t.project_id = :project_id' : '';
+
+        $stmt = $this->db->prepare(
+            "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
+                    t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
+                    t.short_id, t.created_by, t.created_at, t.updated_at
+             FROM tasker_tasks t
+             JOIN tasker_projects p ON p.id = t.project_id
+             WHERE t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
+               AND t.created_by = :created_by AND t.status != 'done'
+               AND t.status = 'in_progress' AND t.updated_at <= " . self::STALE_CUTOFF_SQL . "{$projectClause}
+             ORDER BY t.pinned DESC, t.updated_at ASC, t.id ASC"
         );
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
         $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);

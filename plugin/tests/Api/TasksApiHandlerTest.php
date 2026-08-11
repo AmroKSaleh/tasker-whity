@@ -315,6 +315,40 @@ final class TasksApiHandlerTest extends TestCase
         self::assertSame(400, $response->getStatusCode());
     }
 
+    /**
+     * D1b Task 11 round 3: update_task gained a status field matching the
+     * original live tool's own three-value enum. Before this, nothing in
+     * this plugin ever wrote 'in_progress' at all -- create() hardcodes
+     * 'pending', complete()/uncomplete() only ever write 'done'/'pending' --
+     * which made AttentionApiHandler's own `stale` bucket (status =
+     * 'in_progress' AND quiet 2+ days) permanently unreachable through any
+     * real write path. This is the fix.
+     */
+    public function testUpdateAcceptsEachValidStatus(): void
+    {
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Status test');
+
+        foreach (['in_progress', 'done', 'pending'] as $status) {
+            $response = $this->handler->update(7, $taskId, json_encode(['status' => $status]));
+
+            self::assertSame(200, $response->getStatusCode());
+            $payload = json_decode($response->getBody(), true);
+            self::assertSame($status, $payload['data']['status']);
+        }
+    }
+
+    public function testUpdateRejectsAnInvalidStatus(): void
+    {
+        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
+
+        $response = $this->handler->update(7, $taskId, json_encode(['status' => 'blocked']));
+
+        self::assertSame(400, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT status FROM tasker_tasks WHERE rowid = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('pending', $row['status'], 'a rejected status must not partially apply');
+    }
+
     public function testUpdateRejects404ForATaskOutsideTheCallersTenant(): void
     {
         $response = $this->handler->update(9, 999, json_encode(['text' => 'Should fail']));

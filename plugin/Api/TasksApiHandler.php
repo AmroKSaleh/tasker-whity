@@ -60,6 +60,23 @@ final class TasksApiHandler
      */
     private const VALID_PRIORITIES = ['rush', 'high', 'medium', 'low'];
 
+    /**
+     * D1b Task 11 round 3: the original's live update_task declares
+     * `status: { enum: ["pending", "in_progress", "done"] }` — this plugin
+     * had no way to reach 'in_progress' at all before this addition
+     * (create() hardcodes 'pending'; complete()/uncomplete() only ever write
+     * 'done'/'pending'), which is a real parity gap: it is also why
+     * AttentionApiHandler's `stale` bucket (status = 'in_progress' AND
+     * quiet 2+ days) could never populate through any real write path. The
+     * tasker_tasks.status COLUMN itself carries no CHECK constraint by
+     * design (see CreateTaskerTasksTable's own docblock — deferred custom
+     * statuses must stay purely additive), so this three-value enum is
+     * enforced at the API layer only, exactly like VALID_PRIORITIES above.
+     *
+     * @var list<string>
+     */
+    private const VALID_STATUSES = ['pending', 'in_progress', 'done'];
+
     private PDO $db;
 
     public function __construct(PDO $db)
@@ -301,6 +318,18 @@ final class TasksApiHandler
      * sort_order are NOT editable here; that's move()'s job (structural
      * placement vs. content are kept as two separate, smaller operations,
      * matching the design spec's own naming: update_task vs. move_task).
+     *
+     * status (D1b Task 11 round 3) accepts the original's own three-value
+     * enum (pending/in_progress/done), validated exactly like priority
+     * above. NO completed_at side effect is applied here (unlike
+     * complete()/uncomplete(), which stamp/clear it) — this task's own
+     * scope was deliberately narrow ("the three-value enum... written
+     * through the existing OU-scoped update path", nothing about
+     * completed_at), so a task whose status is set to 'done' via THIS route
+     * rather than complete_task will NOT get a completed_at timestamp, and
+     * one moved away from 'done' via this route will not have a stale
+     * completed_at cleared either. Ledgered as a related, unaddressed gap in
+     * this task's own report rather than fixed unilaterally.
      */
     public function update(int $tenantId, int $taskId, string $body): Response
     {
@@ -340,6 +369,14 @@ final class TasksApiHandler
         if (array_key_exists('due_date', $decoded)) {
             $fields[] = 'due_date = :due_date';
             $params[':due_date'] = $decoded['due_date'] !== null ? (string) $decoded['due_date'] : null;
+        }
+        if (array_key_exists('status', $decoded)) {
+            $status = is_string($decoded['status']) ? $decoded['status'] : '';
+            if (!in_array($status, self::VALID_STATUSES, true)) {
+                return Response::error('status must be one of: ' . implode(', ', self::VALID_STATUSES), 400);
+            }
+            $fields[] = 'status = :status';
+            $params[':status'] = $status;
         }
 
         if ($fields === []) {
@@ -858,7 +895,7 @@ final class TasksApiHandler
                         short_id, created_by, created_at, updated_at
                  FROM tasker_tasks
                  WHERE tenant_id = :tenant_id AND project_id = :project_id AND status != 'done'
-                 ORDER BY " . self::readyWorkOrderBy()
+                 ORDER BY pinned DESC, " . self::priorityRankCase() . " ASC, due_date ASC NULLS LAST, sort_order ASC"
             );
             $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
 
@@ -873,30 +910,19 @@ final class TasksApiHandler
 
     /**
      * The CASE expression ranking priority rush > high > medium > low > none
-     * — factored out of {@see self::readyWorkOrderBy()} (D1b Task 11) so
+     * — shared (D1b Task 11) by this method's own ORDER BY above AND
      * {@see \Tasker\Api\AttentionApiHandler::rank()}'s own priority-led
-     * ordering reuses this EXACT expression rather than an independently
-     * retyped copy that could silently drift from this one over time.
+     * ordering, so the two never drift into independently-typed copies of
+     * the same expression. (An earlier round of D1b Task 11 also factored
+     * the FULL pinned/priority/due-date/sort-order clause out into a
+     * `readyWorkOrderBy()` sibling method for a 'sorting_order' rank_tasks
+     * option — that option turned out not to exist on the live original
+     * tool and was withdrawn; `readyWorkOrderBy()` was re-inlined here once
+     * it had gone back to having exactly one caller.)
      */
     public static function priorityRankCase(): string
     {
         return "CASE priority WHEN 'rush' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END";
-    }
-
-    /**
-     * The ORDER BY clause implementing {@see self::readyWork()}'s own
-     * pinned/priority/due-date/sort-order ranking — extracted (D1b Task 11)
-     * so {@see \Tasker\Api\AttentionApiHandler::rank()}'s 'sorting_order'
-     * option (the original's own default, per that task's brief and
-     * rulings) reuses this EXACT text rather than a second, independently
-     * typed copy of it that risks drifting out of sync. Pure string
-     * assembly — behaviourally identical to the inline SQL this replaced in
-     * {@see self::readyWork()} above, so extracting it changes nothing
-     * about readyWork()'s own behaviour or its existing test coverage.
-     */
-    public static function readyWorkOrderBy(): string
-    {
-        return 'pinned DESC, ' . self::priorityRankCase() . ' ASC, due_date ASC NULLS LAST, sort_order ASC';
     }
 
     /**
