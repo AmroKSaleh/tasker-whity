@@ -201,7 +201,7 @@ export function renderFlowExceptions(
 ): string {
   const lines: string[] = [
     `# What needs you — "${opts.flowName}"${opts.shortId ? `  [${opts.shortId}]` : ''}`,
-    `${opts.stepCount} step${opts.stepCount !== 1 ? 's' : ''}${opts.stepListOpen ? ' known so far (step list OPEN)' : ''} · ${excs.length} item${excs.length !== 1 ? 's' : ''} need judgment`,
+    `${opts.stepCount} step${opts.stepCount !== 1 ? 's' : ''}${opts.stepListOpen ? ' known so far (step list OPEN)' : ''} · ${excs.length} item${excs.length !== 1 ? 's need' : ' needs'} judgment`,
     `Ordered by blast radius — how much downstream work builds on the step. Passing checks and step outputs are deliberately NOT shown (Q7: showing everything is what causes rubber-stamping).`,
   ]
   if (!excs.length) {
