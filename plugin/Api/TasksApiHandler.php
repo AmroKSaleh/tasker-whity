@@ -858,11 +858,7 @@ final class TasksApiHandler
                         short_id, created_by, created_at, updated_at
                  FROM tasker_tasks
                  WHERE tenant_id = :tenant_id AND project_id = :project_id AND status != 'done'
-                 ORDER BY
-                    pinned DESC,
-                    CASE priority WHEN 'rush' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END ASC,
-                    due_date ASC NULLS LAST,
-                    sort_order ASC"
+                 ORDER BY " . self::readyWorkOrderBy()
             );
             $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);
 
@@ -873,6 +869,34 @@ final class TasksApiHandler
         } catch (\Throwable) {
             return Response::error('Failed to fetch ready work', 500);
         }
+    }
+
+    /**
+     * The CASE expression ranking priority rush > high > medium > low > none
+     * — factored out of {@see self::readyWorkOrderBy()} (D1b Task 11) so
+     * {@see \Tasker\Api\AttentionApiHandler::rank()}'s own priority-led
+     * ordering reuses this EXACT expression rather than an independently
+     * retyped copy that could silently drift from this one over time.
+     */
+    public static function priorityRankCase(): string
+    {
+        return "CASE priority WHEN 'rush' THEN 1 WHEN 'high' THEN 2 WHEN 'medium' THEN 3 WHEN 'low' THEN 4 ELSE 5 END";
+    }
+
+    /**
+     * The ORDER BY clause implementing {@see self::readyWork()}'s own
+     * pinned/priority/due-date/sort-order ranking — extracted (D1b Task 11)
+     * so {@see \Tasker\Api\AttentionApiHandler::rank()}'s 'sorting_order'
+     * option (the original's own default, per that task's brief and
+     * rulings) reuses this EXACT text rather than a second, independently
+     * typed copy of it that risks drifting out of sync. Pure string
+     * assembly — behaviourally identical to the inline SQL this replaced in
+     * {@see self::readyWork()} above, so extracting it changes nothing
+     * about readyWork()'s own behaviour or its existing test coverage.
+     */
+    public static function readyWorkOrderBy(): string
+    {
+        return 'pinned DESC, ' . self::priorityRankCase() . ' ASC, due_date ASC NULLS LAST, sort_order ASC';
     }
 
     /**

@@ -122,6 +122,7 @@ try {
         'list_groups', 'create_group', 'update_group', 'rename_group', 'delete_group',
         'list_tasks', 'create_task', 'update_task', 'move_task', 'move_task_to_group', 'delete_task',
         'complete_task', 'uncomplete_task', 'pin_task', 'unpin_task', 'tag_task', 'get_ready_work',
+        'rank_tasks', 'get_my_attention',
         'list_milestones', 'add_milestone', 'complete_milestone', 'uncomplete_milestone', 'update_milestone', 'delete_milestone',
         'get_board', 'get_task',
         'get_task_discussion', 'set_task_discussion',

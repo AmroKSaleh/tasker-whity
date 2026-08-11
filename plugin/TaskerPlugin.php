@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Tasker;
 
 use Tasker\Access\IdentifierResolver;
+use Tasker\Api\AttentionApiHandler;
 use Tasker\Api\BoardApiHandler;
 use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\MilestonesApiHandler;
@@ -1020,6 +1021,70 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The task and its milestones'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/rank-tasks',
+                'handler' => [$this, 'rankTasks'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:view',
+                'schema' => [
+                    'operationId' => 'rank_tasks',
+                    'summary' => 'List a project\'s non-done tasks (the same set get_ready_work uses) in an explicit '
+                        . 'ranking order you choose. D1 dropped skip_count, so unlike the original app this cannot '
+                        . 'rank by skip-decay -- ranking is pinned/priority/due_date/sort_order only.',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'project_id', 'in' => 'query', 'required' => false, 'schema' => ['type' => 'string'], 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
+                        [
+                            'name' => 'rank_by',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string', 'enum' => ['sorting_order', 'priority', 'due_date', 'pinned']],
+                            'description' => 'Which criterion leads the ordering. Defaults to sorting_order -- the '
+                                . 'same pinned > priority > due_date > sort_order ordering get_ready_work uses. The '
+                                . 'other three lead with that one criterion instead, then break ties by sort_order.',
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The ranked task list'],
+                        400 => ['description' => 'rank_by is not one of: sorting_order, priority, due_date, pinned'],
+                        404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/attention',
+                'handler' => [$this, 'getMyAttention'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:view',
+                'schema' => [
+                    'operationId' => 'get_my_attention',
+                    'summary' => 'List the CALLING USER\'S OWN overdue, stale, and pinned tasks -- not the whole '
+                        . 'team\'s. Matched by created_by (tasker_tasks has no assignee column). Three separate '
+                        . 'buckets in the response: overdue (due_date before today), stale (in_progress and not '
+                        . 'updated in 2+ days -- fixed, not configurable), and pinned. A task qualifying for more '
+                        . 'than one bucket appears in each, not deduplicated. A completed (done) task appears in no '
+                        . 'bucket. project_id is optional, and omitting it means every project in your OU scope -- '
+                        . 'NOT your default project, unlike every other tool in this plugin.',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        [
+                            'name' => 'project_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Project prefix, slug, UUID or id. Omit to search across every project in your OU scope (this does NOT fall back to your default project).',
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The three buckets: overdue, stale, pinned'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed'],
+                        403 => ['description' => 'Caller membership or identity could not be resolved'],
+                        404 => ['description' => 'project_id was supplied but not found or outside the caller\'s OU scope'],
                     ],
                 ],
             ],
@@ -2963,6 +3028,120 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new TasksApiHandler($pdo))->getOne($tenantId, $ou['ouId'], $taskId);
+    }
+
+    /**
+     * GET /api/tasker/rank-tasks?project_id=&rank_by= — the original's
+     * rank_tasks. project_id follows getReadyWork()'s own shape exactly
+     * (optional, falling back to the caller's default project, 404 if
+     * neither resolves) — D1b Task 11 ruling #6 explicitly calls this tool
+     * OUT as one of the two that scopes project_id the ordinary way, unlike
+     * its sibling get_my_attention below.
+     *
+     * rank_by is read via queryParam() with a PHP-side default of
+     * 'sorting_order' applied ONLY when the parameter is absent — an
+     * explicitly supplied but invalid value is never silently coerced to
+     * the default; it reaches AttentionApiHandler::rank() unchanged, which
+     * 400s naming the allowed set (ruling #2).
+     *
+     * @param array<string, string> $params
+     */
+    public function rankTasks(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $raw = $this->queryParam($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $rankBy = $this->queryParam($request, 'rank_by') ?? 'sorting_order';
+
+        return (new AttentionApiHandler($pdo))->rank($tenantId, $ou['ouId'], $projectId, $rankBy);
+    }
+
+    /**
+     * GET /api/tasker/attention?project_id= — the original's
+     * get_my_attention: overdue, stale, and pinned tasks CREATED BY the
+     * calling user (D1b Task 11 ruling #5 — tasker_tasks has no assignee
+     * column).
+     *
+     * project_id is optional, but UNLIKE every other project-scoped route in
+     * this file (and unlike this tool's own sibling rankTasks() just above),
+     * an omitted value here does NOT fall back to the caller's default
+     * project (ruling #6) — defaultProjectIdFor() is deliberately never
+     * called on this path. Omitting it means "every project in the caller's
+     * OU scope"; AttentionApiHandler::attention() receives a genuine null
+     * $projectId in that case, not a resolved default. A SUPPLIED project_id
+     * is still resolved and OU/tenant-checked exactly like every other
+     * route, 404ing if it does not resolve — the classify()-then-resolve
+     * split below (rather than IdentifierResolver::resolveProject()'s own
+     * $defaultProjectId parameter) is what keeps "supplied but wrong" (404)
+     * distinct from "omitted" (span everything): resolveProject() returns
+     * null for BOTH cases when given no default, which would otherwise make
+     * a typo'd project_id silently behave like it was never supplied.
+     *
+     * @param array<string, string> $params
+     */
+    public function getMyAttention(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // resolveCallerOu() above only ever returns resolved => true after
+        // it has already resolved a non-null callerProfileId() itself (see
+        // its own docblock) -- this cannot be null on any path that reaches
+        // here today, but "my attention" filters by created_by, so this
+        // fails closed on the (currently unreachable) null case rather than
+        // trusting that invariant silently forever.
+        $callerId = $this->callerProfileId($request);
+        if ($callerId === null) {
+            return Response::error('Caller identity could not be resolved', 403);
+        }
+
+        $raw = $this->queryParam($request, 'project_id');
+        $form = IdentifierResolver::classify($raw);
+        if ($form === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = null;
+        if ($form !== 'empty') {
+            $projectId = IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $raw);
+            if ($projectId === null) {
+                return Response::error('Project not found', 404);
+            }
+        }
+
+        return (new AttentionApiHandler($pdo))->attention($tenantId, $ou['ouId'], $projectId, $callerId);
     }
 
     /**
