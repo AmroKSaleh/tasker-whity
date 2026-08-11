@@ -1601,4 +1601,37 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(400, $response->getStatusCode());
     }
+
+    /**
+     * The update()-side twin of testCreateRejectsAnEnvironmentIdOutsideTheCallersScope():
+     * update() is the path that can orphan an EXISTING project (widen or
+     * relocate a project a caller already owns), so this needs its own
+     * coverage rather than assuming create()'s coverage of the shared
+     * extractOuIdInput()/ouIsInCallersScope() plumbing is enough.
+     */
+    public function testUpdateRejectsAnEnvironmentIdOutsideTheCallersScope(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $projectId = $this->makeProjectDirect(7, 2, 'Scoped via alias');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        // Caller is scoped to OU 2; OU 3 is a sibling, outside their scope.
+        $response = $handler->update(7, 2, $projectId, json_encode(['environment_id' => 3]));
+
+        self::assertSame(422, $response->getStatusCode());
+        $row = $this->pdo->query("SELECT ou_id FROM tasker_projects WHERE id = {$projectId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(2, (int) $row['ou_id'], 'a rejected update must not silently relocate the project');
+    }
+
+    public function testUpdateRejectsANonNumericEnvironmentId(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Bad alias update');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $projectId, json_encode(['environment_id' => 'not-a-number']));
+
+        self::assertSame(400, $response->getStatusCode());
+    }
 }

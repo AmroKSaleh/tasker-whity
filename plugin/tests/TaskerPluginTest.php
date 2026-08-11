@@ -160,6 +160,19 @@ final class TaskerPluginTest extends TestCase
      * real running instance (docker exec tasker_frankenphp, tools/call
      * delete_project) before these were written; these pin the fix at the
      * unit level via Reflection, the same seam resolveCallerOu() above uses.
+     *
+     * SECOND ROUND (whole-branch review): the first version of the fix read
+     * the query ONLY off `$request->getPath()`, which is a no-op for a
+     * genuine HTTP request — `Request::fromGlobals()` strips the query
+     * string from the path entirely; `$_GET` is the only place it survives
+     * at runtime. That failure mode is silent and worse than the original
+     * bug: `IdentifierResolver::classify(null)` returns 'empty', not
+     * 'malformed', so `resolveProject()` falls through to the caller's
+     * DEFAULT project — a 204 against the WRONG project, not a 404. The
+     * tests below exercise `$_GET` directly (saving/restoring the
+     * superglobal around each assertion) alongside the path-embedded form,
+     * which must keep working since that is the shape both this plugin's
+     * own hand-built test Requests and the MCP transport actually use.
      */
     private function invokeIdentifierFromRequest(Request $request, string $key): string|int|null
     {
@@ -171,6 +184,15 @@ final class TaskerPluginTest extends TestCase
         $result = $method->invoke($plugin, $request, $key);
 
         return $result;
+    }
+
+    protected function tearDown(): void
+    {
+        // Defense-in-depth alongside each test's own try/finally below: a
+        // test that failed an assertion mid-block (unlikely here, since none
+        // of these assert anything but the final value, but cheap insurance
+        // against ever leaking $_GET into an unrelated later test).
+        $_GET = [];
     }
 
     public function testIdentifierFromRequestReadsFromTheJsonBodyWhenPresent(): void
@@ -187,32 +209,94 @@ final class TaskerPluginTest extends TestCase
 
     /**
      * Mirrors exactly what ToolsCallHandler::buildRequest() sends for a
-     * DELETE tool call: the argument travels in the path's query string, and
-     * the body is the empty string.
+     * DELETE tool call, AND how this test suite's other hand-built Requests
+     * work: the argument travels in the path's query string, the body is
+     * the empty string, and $_GET is untouched (empty).
      */
-    public function testIdentifierFromRequestFallsBackToTheQueryStringWhenTheBodyIsEmpty(): void
+    public function testIdentifierFromRequestFallsBackToThePathEmbeddedQueryWhenTheBodyIsEmpty(): void
     {
-        $request = new Request('DELETE', '/api/v1/tasker/projects?project_id=TDE', [], '');
+        $previousGet = $_GET;
+        $_GET = [];
+        try {
+            $request = new Request('DELETE', '/api/v1/tasker/projects?project_id=TDE', [], '');
 
-        self::assertSame('TDE', $this->invokeIdentifierFromRequest($request, 'project_id'));
+            self::assertSame('TDE', $this->invokeIdentifierFromRequest($request, 'project_id'));
+        } finally {
+            $_GET = $previousGet;
+        }
     }
 
-    public function testIdentifierFromRequestPrefersTheBodyOverTheQueryStringWhenBothArePresent(): void
+    /**
+     * The runtime case: `Request::fromGlobals()` builds the path via
+     * `parse_url($requestUri, PHP_URL_PATH)`, which strips the query
+     * entirely, so a genuine `DELETE /api/tasker/projects?project_id=TDE`
+     * arrives here with a bare path and NOTHING in it but $_GET carrying
+     * the value. Without the $_GET fallback this returns null, which is
+     * exactly the silent-wrong-project failure mode the whole-branch review
+     * caught.
+     */
+    public function testIdentifierFromRequestFallsBackToDollarGetWhenThePathHasNoQuery(): void
     {
-        $request = new Request(
-            'PATCH',
-            '/api/tasker/projects?project_id=FROM-QUERY',
-            [],
-            (string) json_encode(['project_id' => 'FROM-BODY'])
-        );
+        $previousGet = $_GET;
+        $_GET = ['project_id' => 'TDE'];
+        try {
+            $request = new Request('DELETE', '/api/tasker/projects', [], '');
 
-        self::assertSame('FROM-BODY', $this->invokeIdentifierFromRequest($request, 'project_id'));
+            self::assertSame('TDE', $this->invokeIdentifierFromRequest($request, 'project_id'));
+        } finally {
+            $_GET = $previousGet;
+        }
     }
 
-    public function testIdentifierFromRequestReturnsNullWhenNeitherBodyNorQueryHasTheKey(): void
+    public function testIdentifierFromRequestPrefersTheBodyOverEitherQuerySourceWhenAllArePresent(): void
     {
-        $request = new Request('DELETE', '/api/tasker/projects', [], '');
+        $previousGet = $_GET;
+        $_GET = ['project_id' => 'FROM-GET'];
+        try {
+            $request = new Request(
+                'PATCH',
+                '/api/tasker/projects?project_id=FROM-PATH',
+                [],
+                (string) json_encode(['project_id' => 'FROM-BODY'])
+            );
 
-        self::assertNull($this->invokeIdentifierFromRequest($request, 'project_id'));
+            self::assertSame('FROM-BODY', $this->invokeIdentifierFromRequest($request, 'project_id'));
+        } finally {
+            $_GET = $previousGet;
+        }
+    }
+
+    /**
+     * The path-embedded form wins over $_GET when the body is absent and
+     * both query sources disagree — matching
+     * {@see \Whity\Api\PersonsApiHandler::queryParam()} /
+     * {@see \Whity\Api\DelegationsApiHandler::queryParams()}'s own
+     * precedence exactly (WC-167), rather than this plugin inventing a
+     * third convention for the same problem.
+     */
+    public function testIdentifierFromRequestPrefersThePathEmbeddedQueryOverDollarGetWhenBothArePresent(): void
+    {
+        $previousGet = $_GET;
+        $_GET = ['project_id' => 'FROM-GET'];
+        try {
+            $request = new Request('DELETE', '/api/tasker/projects?project_id=FROM-PATH', [], '');
+
+            self::assertSame('FROM-PATH', $this->invokeIdentifierFromRequest($request, 'project_id'));
+        } finally {
+            $_GET = $previousGet;
+        }
+    }
+
+    public function testIdentifierFromRequestReturnsNullWhenNoneOfTheThreeSourcesHaveTheKey(): void
+    {
+        $previousGet = $_GET;
+        $_GET = [];
+        try {
+            $request = new Request('DELETE', '/api/tasker/projects', [], '');
+
+            self::assertNull($this->invokeIdentifierFromRequest($request, 'project_id'));
+        } finally {
+            $_GET = $previousGet;
+        }
     }
 }

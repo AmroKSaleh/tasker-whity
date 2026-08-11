@@ -1554,7 +1554,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
     /**
      * Reads $key from the request body (a JSON object) first, falling back
-     * to a query-string parameter of the same name.
+     * to a query parameter of the same name.
      *
      * REGRESSION FIX, found by a live tools/call smoke test rather than the
      * PHPUnit suite — TenantIsolationOuTest exercises ProjectsApiHandler
@@ -1565,20 +1565,36 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * gitignored, pinned-ref `host/.core` checkout — out of this plugin's
      * reach entirely) sends EVERY argument to a DELETE (also GET/HEAD, but
      * those don't reach this method) tool call as a query-string parameter
-     * and leaves the body empty, unlike POST/PATCH whose body arguments
-     * really do arrive JSON-encoded (confirmed empirically for both).
+     * baked into the synthesized request's path, and leaves the body
+     * empty, unlike POST/PATCH whose body arguments really do arrive
+     * JSON-encoded (confirmed empirically for both).
      *
      * Without this fallback, a delete_project route that only looked at the
      * body — this method's first implementation, and the brief's own
      * sketch — 400s on EVERY SINGLE MCP delete_project call with "Request
      * body must be a JSON object", which defeats the entire point of this
      * flattening slice: an agent could never actually delete a project
-     * through the tool surface this task builds. The same fallback also
-     * makes a bare `DELETE /api/tasker/projects?project_id=5` with no body
-     * at all work over plain HTTP — common, since many HTTP clients and
-     * proxies drop DELETE bodies outright — without weakening
-     * updateProject()'s body-first behaviour: a body value still wins
-     * whenever both are present.
+     * through the tool surface this task builds.
+     *
+     * SECOND REGRESSION FIX (whole-branch review): the first version of
+     * this method parsed the query ONLY off `$request->getPath()`, which
+     * works for a hand-built test Request and for ToolsCallHandler's
+     * synthesized one (both bake the query into the path string) but is
+     * silently a no-op for a genuine HTTP request — `Request::fromGlobals()`
+     * (host/.core/public/index.php) builds the Request from
+     * `parse_url($requestUri, PHP_URL_PATH)`, which STRIPS the query
+     * entirely; `$_GET` is the only place it survives at runtime. Reading
+     * only the path meant a real `DELETE /api/tasker/projects?project_id=X`
+     * would see `$raw === null`, `IdentifierResolver::classify(null)`
+     * returns 'empty' (not 'malformed'), and `resolveProject()` would
+     * silently fall through to the caller's DEFAULT project — a 204
+     * against the wrong project, not a 404. Delegates to
+     * {@see self::queryParam()}, which reads both sources the same way
+     * {@see \Whity\Api\PersonsApiHandler::queryParam()} /
+     * {@see \Whity\Api\DelegationsApiHandler::queryParams()} already do
+     * (WC-167 review: "path-only parsing made every documented filter dead
+     * in production") — this handler would otherwise have repeated exactly
+     * the mistake that review was about.
      */
     private function identifierFromRequest(Request $request, string $key): string|int|null
     {
@@ -1587,14 +1603,45 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return $decoded[$key];
         }
 
-        $query = parse_url($request->getPath(), PHP_URL_QUERY);
-        if (!is_string($query) || $query === '') {
-            return null;
+        return $this->queryParam($request, $key);
+    }
+
+    /**
+     * Read a single query parameter from BOTH runtime sources — see
+     * {@see self::identifierFromRequest()}'s docblock for why both are
+     * required. `$_GET` is the live runtime source (FrankenPHP strips the
+     * query string from the path via `Request::fromGlobals()`); the
+     * path-embedded form is how this plugin's own test suite AND the MCP
+     * transport (`ToolsCallHandler::buildRequest()`) build a Request. The
+     * path-embedded value wins when both are present — mirroring
+     * {@see \Whity\Api\PersonsApiHandler::queryParam()} /
+     * {@see \Whity\Api\DelegationsApiHandler::queryParams()}'s own
+     * precedence exactly, so this plugin does not invent a third
+     * convention for the same problem (WC-167).
+     *
+     * THE CANONICAL QUERY ACCESSOR for this plugin going forward: Tasks
+     * 5–7 need query parameters too (`list_sections?project_id=`,
+     * `list_tasks?project_id=&status=`, etc.) and should call this rather
+     * than re-deriving path-only parsing a third time.
+     */
+    private function queryParam(Request $request, string $name): ?string
+    {
+        $value = null;
+
+        if (isset($_GET[$name]) && is_string($_GET[$name])) {
+            $value = $_GET[$name];
         }
 
-        parse_str($query, $queryParams);
+        $query = parse_url($request->getPath(), PHP_URL_QUERY);
+        if (is_string($query) && $query !== '') {
+            $params = [];
+            parse_str($query, $params);
+            if (isset($params[$name]) && is_string($params[$name])) {
+                $value = $params[$name];
+            }
+        }
 
-        return isset($queryParams[$key]) && is_string($queryParams[$key]) ? $queryParams[$key] : null;
+        return $value;
     }
 
     /**
