@@ -6,6 +6,7 @@ namespace Tasker\Api;
 
 use PDO;
 use Tasker\Access\OuScopeResolver;
+use Tasker\Domain\PrefixDeriver;
 use Whity\Core\Audit\AuditLogger;
 use Whity\Sdk\Http\Response;
 
@@ -94,11 +95,27 @@ final class ProjectsApiHandler
 
         $slug = self::slugify($name);
 
+        // A caller-supplied prefix is validated the same 2-5-uppercase-letter
+        // shape update() already enforces (see its own 'prefix' branch);
+        // omitting the key entirely derives one instead, mirroring the
+        // original app's deriveProjectPrefix() so a project's short ids
+        // (TDE-31) start from a sensible, name-derived prefix by default.
+        $prefix = null;
+        if (is_array($decoded) && isset($decoded['prefix'])) {
+            $prefix = strtoupper(trim((string) $decoded['prefix']));
+            if (preg_match('/^[A-Z]{2,5}$/', $prefix) !== 1) {
+                return Response::error('prefix must be 2-5 uppercase letters', 400);
+            }
+        } else {
+            // Null is acceptable — the project then has no short ids.
+            $prefix = PrefixDeriver::derive($this->db, $tenantId, $name);
+        }
+
         $this->db->beginTransaction();
         try {
             $insertProject = $this->db->prepare(
-                'INSERT INTO tasker_projects (public_id, tenant_id, ou_id, name, slug, created_by, created_at)
-                 VALUES (:public_id, :tenant_id, :ou_id, :name, :slug, :created_by, CURRENT_TIMESTAMP)
+                'INSERT INTO tasker_projects (public_id, tenant_id, ou_id, name, slug, prefix, created_by, created_at)
+                 VALUES (:public_id, :tenant_id, :ou_id, :name, :slug, :prefix, :created_by, CURRENT_TIMESTAMP)
                  RETURNING id'
             );
             $insertProject->execute([
@@ -107,6 +124,7 @@ final class ProjectsApiHandler
                 ':ou_id' => $ouId,
                 ':name' => $name,
                 ':slug' => $slug,
+                ':prefix' => $prefix,
                 ':created_by' => $createdBy,
             ]);
             $projectId = (int) $insertProject->fetchColumn();

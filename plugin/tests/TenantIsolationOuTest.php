@@ -14,6 +14,7 @@ use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
+use Tasker\Migrations\AddTaskerTaskShortIdUnique;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
@@ -140,6 +141,12 @@ final class TenantIsolationOuTest extends TestCase
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_groups CASCADE');
         (new CreateTaskerGroupsTable())->up($this->pdo);
         (new CreateTaskerTasksTable())->up($this->pdo);
+        // Registered here too, not just in TaskerPlugin::getMigrations():
+        // without it, tasker_tasks carries no UNIQUE (project_id, short_id)
+        // constraint on this suite's disposable tasker_test database, and
+        // testShortIdUniqueConstraintRejectsADuplicate below would find
+        // nothing to reject.
+        (new AddTaskerTaskShortIdUnique())->up($this->pdo);
         (new CreateTaskerMilestonesTable())->up($this->pdo);
         (new CreateTaskerTaskDiscussionsTable())->up($this->pdo);
     }
@@ -922,6 +929,51 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->create(7, 2, $siblingSectionId, 3, json_encode(['text' => 'Should not leak']));
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== ShortIdAllocator (Task 2: short_id allocation) ====================
+
+    /**
+     * NOTE ON A BRIEF DEVIATION: create()'s real signature is
+     * (tenantId, callerOuId, sectionId, createdBy, body) — see every other
+     * TasksApiHandler::create() call in this file — so the brief's own
+     * 4-argument call shape here (omitting callerOuId) does not match. Fixed
+     * to pass null for callerOuId, matching the unrestricted caller these
+     * projects were created for (makeProjectDirect(7, null, ...)).
+     */
+    public function testShortIdIsAllocatedSequentiallyPerProject(): void
+    {
+        $projectA = $this->makeProjectDirect(7, null, 'Project A');
+        $projectB = $this->makeProjectDirect(7, null, 'Project B');
+        $sectionA = $this->makeSectionDirect(7, $projectA);
+        $sectionB = $this->makeSectionDirect(7, $projectB);
+
+        $handler = new TasksApiHandler($this->pdo);
+
+        $first  = json_decode($handler->create(7, null, $sectionA, 1, json_encode(['text' => 'A1']))->getBody(), true);
+        $second = json_decode($handler->create(7, null, $sectionA, 1, json_encode(['text' => 'A2']))->getBody(), true);
+        $other  = json_decode($handler->create(7, null, $sectionB, 1, json_encode(['text' => 'B1']))->getBody(), true);
+
+        self::assertSame(1, $first['data']['shortId']);
+        self::assertSame(2, $second['data']['shortId']);
+
+        // Counters are per project, so B starts at 1 again.
+        self::assertSame(1, $other['data']['shortId']);
+    }
+
+    public function testShortIdUniqueConstraintRejectsADuplicate(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Constraint Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId    = $this->makeTaskDirect(7, $projectId, $sectionId, 'First');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$taskId}");
+
+        $second = $this->makeTaskDirect(7, $projectId, $sectionId, 'Second');
+
+        // Proves the constraint exists and bites — without it, the allocator's
+        // retry would be pointless because nothing would ever reject a race.
+        $this->expectException(\PDOException::class);
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$second}");
     }
 
     // ==================== MilestonesApiHandler::create() (whole-branch review finding C1) ====================

@@ -12,6 +12,7 @@ use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
+use Tasker\Migrations\AddTaskerTaskShortIdUnique;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerPingTable;
@@ -749,6 +750,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             CreateTaskerGroupsTable::class,
             GrantTaskerProjectPermissions::class,
             CreateTaskerTasksTable::class,
+            AddTaskerTaskShortIdUnique::class,
             GrantTaskerTaskPermissions::class,
             CreateTaskerMilestonesTable::class,
             GrantTaskerMilestonePermissions::class,

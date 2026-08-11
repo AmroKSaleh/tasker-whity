@@ -6,6 +6,7 @@ namespace Tasker\Api;
 
 use PDO;
 use Tasker\Access\OuScopeResolver;
+use Tasker\Domain\ShortIdAllocator;
 use Whity\Core\Audit\AuditLogger;
 use Whity\Core\Taxonomy\EntityTagRepository;
 use Whity\Core\Taxonomy\TagRepository;
@@ -133,22 +134,40 @@ final class TasksApiHandler
         }
 
         try {
-            $insert = $this->db->prepare(
-                'INSERT INTO tasker_tasks
-                    (public_id, tenant_id, project_id, section_id, text, priority, status, created_by, created_at, updated_at)
-                 VALUES
-                    (:public_id, :tenant_id, :project_id, :section_id, :text, :priority, :status, :created_by, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
+            $publicId = self::generateUuidV4();
+            // ShortIdAllocator::withRetry() computes MAX(short_id)+1 for this
+            // project and lets UNIQUE (project_id, short_id) — see
+            // AddTaskerTaskShortIdUnique — reject a concurrent race, retrying
+            // with a freshly recomputed candidate rather than holding a lock
+            // (see ShortIdAllocator's own docblock for why: this must also
+            // work under SQLite, which supports neither
+            // pg_advisory_xact_lock nor SELECT ... FOR UPDATE).
+            ShortIdAllocator::withRetry(
+                $this->db,
+                $tenantId,
+                (int) $sectionRow['project_id'],
+                function (int $candidate) use ($publicId, $tenantId, $sectionRow, $sectionId, $text, $priority, $createdBy): void {
+                    $insert = $this->db->prepare(
+                        'INSERT INTO tasker_tasks
+                            (public_id, tenant_id, project_id, section_id, text, priority, status,
+                             short_id, created_by, created_at, updated_at)
+                         VALUES
+                            (:public_id, :tenant_id, :project_id, :section_id, :text, :priority, :status,
+                             :short_id, :created_by, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
+                    );
+                    $insert->execute([
+                        ':public_id'  => $publicId,
+                        ':tenant_id'  => $tenantId,
+                        ':project_id' => $sectionRow['project_id'],
+                        ':section_id' => $sectionId,
+                        ':text'       => $text,
+                        ':priority'   => $priority,
+                        ':status'     => 'pending',
+                        ':short_id'   => $candidate,
+                        ':created_by' => $createdBy,
+                    ]);
+                }
             );
-            $insert->execute([
-                ':public_id' => self::generateUuidV4(),
-                ':tenant_id' => $tenantId,
-                ':project_id' => $sectionRow['project_id'],
-                ':section_id' => $sectionId,
-                ':text' => $text,
-                ':priority' => $priority,
-                ':status' => 'pending',
-                ':created_by' => $createdBy,
-            ]);
 
             // lastInsertId() is the row's true identity on BOTH engines
             // (SQLite's rowid; PostgreSQL's BIGSERIAL sequence via
