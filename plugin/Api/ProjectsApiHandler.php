@@ -27,6 +27,21 @@ final class ProjectsApiHandler
 {
     private const MAX_NAME_LENGTH = 255;
 
+    /**
+     * The one definition of a well-formed project prefix.
+     *
+     * WHOLE-BRANCH REVIEW B2: this regex used to be written out twice — once
+     * in create() and once in update() — and that duplication IS the seam the
+     * duplicate-prefix bug came through. Two call sites meant two independent
+     * notions of "the prefix is valid", and only one of them (create's derive
+     * branch, via PrefixDeriver) ever considered uniqueness at all. It now
+     * lives here, used only by {@see self::explicitPrefixError()}, which is
+     * the single gate BOTH write paths go through — so a future third writer
+     * cannot pick up the format rule without also picking up the collision
+     * check.
+     */
+    private const PREFIX_PATTERN = '/^[A-Z]{2,5}$/';
+
     private PDO $db;
 
     public function __construct(PDO $db)
@@ -99,16 +114,20 @@ final class ProjectsApiHandler
 
         $slug = self::slugify($name);
 
-        // A caller-supplied prefix is validated the same 2-5-uppercase-letter
-        // shape update() already enforces (see its own 'prefix' branch);
-        // omitting the key entirely derives one instead, mirroring the
-        // original app's deriveProjectPrefix() so a project's short ids
-        // (TDE-31) start from a sensible, name-derived prefix by default.
+        // A caller-supplied prefix goes through the SAME gate update() uses —
+        // {@see self::explicitPrefixError()} — which checks format AND
+        // uniqueness. WHOLE-BRANCH REVIEW B2: this branch used to check format
+        // only, because the uniqueness check lived inside PrefixDeriver and so
+        // ran solely on the derive (else) branch below. Omitting the key
+        // entirely still derives one instead, mirroring the original app's
+        // deriveProjectPrefix() so a project's short ids (TDE-31) start from a
+        // sensible, name-derived prefix by default.
         $prefix = null;
         if (is_array($decoded) && isset($decoded['prefix'])) {
             $prefix = strtoupper(trim((string) $decoded['prefix']));
-            if (preg_match('/^[A-Z]{2,5}$/', $prefix) !== 1) {
-                return Response::error('prefix must be 2-5 uppercase letters', 400);
+            $prefixError = $this->explicitPrefixError($tenantId, $prefix, null, false);
+            if ($prefixError !== null) {
+                return $prefixError;
             }
         } else {
             // Null is acceptable — the project then has no short ids.
@@ -217,8 +236,17 @@ final class ProjectsApiHandler
         }
         if (array_key_exists('prefix', $decoded)) {
             $prefix = $decoded['prefix'] !== null ? strtoupper((string) $decoded['prefix']) : null;
-            if ($prefix !== null && preg_match('/^[A-Z]{2,5}$/', $prefix) !== 1) {
-                return Response::error('prefix must be 2-5 uppercase letters, or null to clear it', 400);
+            // WHOLE-BRANCH REVIEW B2: this branch had NO collision check at all
+            // — the worse half of the duplicate-prefix bug. It now shares
+            // create()'s gate. $projectId is excluded so re-sending a project's
+            // own current prefix stays an idempotent no-op. An explicit null
+            // (clear the prefix) skips the gate entirely: there is no format to
+            // check and nothing to collide with.
+            if ($prefix !== null) {
+                $prefixError = $this->explicitPrefixError($tenantId, $prefix, $projectId, true);
+                if ($prefixError !== null) {
+                    return $prefixError;
+                }
             }
             $fields[] = 'prefix = :prefix';
             $params[':prefix'] = $prefix;
@@ -562,6 +590,93 @@ final class ProjectsApiHandler
         }
 
         return ['present' => false, 'raw' => null];
+    }
+
+    /**
+     * The single gate every EXPLICIT caller-supplied prefix passes through —
+     * format AND uniqueness. Returns the error Response to send, or null when
+     * $prefix is acceptable.
+     *
+     * WHOLE-BRANCH REVIEW B2: create()'s explicit-prefix branch checked format
+     * only (PrefixDeriver::takenPrefixes() ran solely on the derive branch),
+     * and update()'s checked format only with no collision check whatsoever.
+     * So `update_project(project_id: B, prefix: "TDE")` succeeded while
+     * project A already held TDE, after which every short id starting TDE-
+     * resolved through {@see \Tasker\Access\IdentifierResolver}'s
+     * `LIMIT 1`-with-no-`ORDER BY` prefix lookup to whichever row Postgres
+     * returned first — silent wrong-row mutation, no concurrency needed.
+     *
+     * 409, NOT 400 — and a note on the review brief, which asked for "the same
+     * status code the derive path uses for an exhausted/taken prefix". The
+     * derive path has no status code to match: PrefixDeriver::derive() returns
+     * NULL when every candidate is taken, and the project is simply created
+     * with no prefix and no short ids (see its own docblock — "Null is a
+     * legitimate outcome"). There was no existing code to copy, so the code is
+     * chosen to agree with this class's nearest neighbour instead: create()
+     * already maps a unique-constraint violation to 409 via
+     * {@see self::isUniqueViolation()}, and once
+     * {@see \Tasker\Migrations\AddTaskerProjectPrefixUnique} is applied a
+     * duplicate prefix that slipped past this check IS that violation. A taken
+     * prefix is a conflict with existing state, not a malformed argument, so
+     * 400 would be wrong on its own terms too.
+     *
+     * $excludeProjectId is the row being updated (null on create): re-sending a
+     * project's own current prefix must be an idempotent no-op, not a
+     * self-conflict.
+     *
+     * $nullable only shapes the message, preserving both call sites' original
+     * wording exactly — update() genuinely accepts null to clear the prefix,
+     * create() reaches this method only when a non-null prefix was supplied.
+     */
+    private function explicitPrefixError(int $tenantId, string $prefix, ?int $excludeProjectId, bool $nullable): ?Response
+    {
+        if (preg_match(self::PREFIX_PATTERN, $prefix) !== 1) {
+            return Response::error(
+                'prefix must be 2-5 uppercase letters' . ($nullable ? ', or null to clear it' : ''),
+                400
+            );
+        }
+
+        if ($this->prefixTaken($tenantId, $prefix, $excludeProjectId)) {
+            return Response::error(
+                'prefix ' . $prefix . ' is already used by another project in this tenant',
+                409
+            );
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether another project in $tenantId already holds $prefix.
+     *
+     * TENANT-scoped and deliberately NOT OU-scoped, matching
+     * {@see \Tasker\Domain\PrefixDeriver}'s own takenPrefixes() scope and the
+     * (tenant_id, prefix) uniqueness the migration enforces. OU-scoping this
+     * would be actively wrong twice over: the database index would reject the
+     * write anyway (surfacing as a 500-shaped unique violation rather than this
+     * 409), and a tenant-root caller — whose scope spans every OU — would then
+     * see BOTH duplicate projects through a prefix lookup that returns only one
+     * of them arbitrarily, which is the whole bug.
+     *
+     * $excludeProjectId ?? 0 keeps this ONE static SQL template with no runtime
+     * branch: tasker_projects.id is BIGSERIAL and starts at 1, so 0 can never
+     * match a real row and the create case (nothing to exclude) needs no
+     * separate query.
+     */
+    private function prefixTaken(int $tenantId, string $prefix, ?int $excludeProjectId): bool
+    {
+        $stmt = $this->db->prepare(
+            'SELECT 1 FROM tasker_projects
+             WHERE tenant_id = :tenant_id AND prefix = :prefix AND id <> :exclude_id
+             LIMIT 1'
+        );
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':prefix', $prefix, PDO::PARAM_STR);
+        $stmt->bindValue(':exclude_id', $excludeProjectId ?? 0, PDO::PARAM_INT);
+        $stmt->execute();
+
+        return $stmt->fetch() !== false;
     }
 
     /**

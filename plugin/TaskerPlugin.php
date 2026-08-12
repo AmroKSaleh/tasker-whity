@@ -15,6 +15,7 @@ use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\SessionApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
+use Tasker\Migrations\AddTaskerProjectPrefixUnique;
 use Tasker\Migrations\AddTaskerTaskShortIdUnique;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
@@ -351,7 +352,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         201 => ['description' => 'The created project'],
                         400 => ['description' => 'name missing/empty/too long, or prefix malformed'],
-                        409 => ['description' => 'A project with this name already exists in the tenant'],
+                        409 => ['description' => 'A project with this name already exists in the tenant, or the requested prefix is already used by another project'],
                         422 => ['description' => 'environment_id is outside the caller\'s scope'],
                     ],
                 ],
@@ -379,8 +380,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The updated project'],
-                        400 => ['description' => 'A supplied field is invalid'],
+                        400 => ['description' => 'A supplied field is invalid, or project_id was empty'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
+                        409 => ['description' => 'The requested prefix is already used by another project in this tenant'],
                         422 => ['description' => 'environment_id is outside the caller\'s scope'],
                     ],
                 ],
@@ -1546,6 +1548,10 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             CreateTaskerPingTable::class,
             GrantTaskerPingPermissions::class,
             CreateTaskerProjectsTable::class,
+            // After the table, before anything that can write a prefix: makes
+            // (tenant_id, prefix) unique so a short id is a real reference
+            // (whole-branch review B2).
+            AddTaskerProjectPrefixUnique::class,
             CreateTaskerSectionsTable::class,
             CreateTaskerGroupsTable::class,
             GrantTaskerProjectPermissions::class,

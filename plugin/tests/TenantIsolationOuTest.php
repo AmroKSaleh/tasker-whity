@@ -15,6 +15,7 @@ use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
+use Tasker\Migrations\AddTaskerProjectPrefixUnique;
 use Tasker\Migrations\AddTaskerTaskShortIdUnique;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
@@ -195,6 +196,12 @@ final class TenantIsolationOuTest extends TestCase
         $this->ensureTestTenant(9);
 
         (new CreateTaskerProjectsTable())->up($this->pdo);
+        // Registered here too, not just in TaskerPlugin::getMigrations() — for
+        // the same reason AddTaskerTaskShortIdUnique is below: without it
+        // tasker_projects carries no UNIQUE (tenant_id, prefix) on this suite's
+        // disposable tasker_test database, and the B2 duplicate-prefix tests
+        // would find nothing to reject.
+        (new AddTaskerProjectPrefixUnique())->up($this->pdo);
         (new CreateTaskerSectionsTable())->up($this->pdo);
         // Drop order matters: tasker_milestones and tasker_task_discussions
         // both FK-reference tasker_tasks, so both must be dropped before
@@ -677,6 +684,136 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->update(7, null, $projectId, json_encode(['prefix' => 'toolongprefix']));
 
         self::assertSame(400, $response->getStatusCode());
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW B2 — the composition bug. create_project validated
+     * an explicit `prefix` for FORMAT ONLY: PrefixDeriver::takenPrefixes() ran
+     * solely on the derive (else) branch, so an explicitly-supplied prefix
+     * skipped the uniqueness check entirely.
+     */
+    public function testCreateRejectsAnExplicitPrefixAlreadyTakenInTheTenant(): void
+    {
+        $existing = $this->makeProjectDirect(7, null, 'Holder');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TDE' WHERE id = {$existing}");
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->create(7, null, 1, json_encode(['name' => 'Usurper', 'prefix' => 'TDE']));
+
+        self::assertSame(409, $response->getStatusCode(), 'an explicit prefix already held by another project must be refused, not accepted alongside it');
+
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE tenant_id = 7 AND prefix = 'TDE'")->fetchColumn();
+        self::assertSame(1, $count, 'the refused create must not have left a second TDE project behind');
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW B2 — the worse half: update_project's `prefix`
+     * branch had NO collision check at all, so
+     * `update_project(project_id: B, prefix: "TDE")` succeeded while project A
+     * already held TDE. No concurrency required.
+     */
+    public function testUpdateRejectsAnExplicitPrefixAlreadyTakenByAnotherProject(): void
+    {
+        $holder = $this->makeProjectDirect(7, null, 'Holder');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TDE' WHERE id = {$holder}");
+        $usurper = $this->makeProjectDirect(7, null, 'Usurper');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $usurper, json_encode(['prefix' => 'TDE']));
+
+        self::assertSame(409, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT prefix FROM tasker_projects WHERE id = {$usurper}")->fetch(PDO::FETCH_ASSOC);
+        self::assertNull($row['prefix'], 'a refused prefix update must not have been written');
+    }
+
+    /**
+     * The collision check must EXCLUDE the row being updated — re-sending a
+     * project's own current prefix is an idempotent no-op, not a self-conflict.
+     */
+    public function testUpdateAcceptsAProjectsOwnPrefixUnchanged(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Self prefix');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'SELF' WHERE id = {$projectId}");
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $projectId, json_encode(['prefix' => 'SELF']));
+
+        self::assertSame(200, $response->getStatusCode(), 're-sending a project\'s own prefix must not collide with itself');
+    }
+
+    /**
+     * Prefix uniqueness is TENANT-scoped, matching PrefixDeriver's own
+     * takenPrefixes() scope exactly — another tenant holding TDE must not
+     * block this one.
+     */
+    public function testPrefixUniquenessIsScopedPerTenant(): void
+    {
+        $otherTenant = $this->makeProjectDirect(9, null, 'Other tenant holder');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TDE' WHERE id = {$otherTenant}");
+
+        $handler = new ProjectsApiHandler($this->pdo);
+        $response = $handler->create(7, null, 1, json_encode(['name' => 'Mine', 'prefix' => 'TDE']));
+
+        self::assertSame(201, $response->getStatusCode(), 'a prefix held in a DIFFERENT tenant must not block this tenant');
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW B2 — "the test no test in the slice has: two
+     * projects, same prefix, and what happens."
+     *
+     * The handler checks above are check-then-act and so cannot be the whole
+     * answer; the database must refuse the duplicate outright. This asserts
+     * the partial unique index does, and — the reason it matters — that a
+     * short id is therefore a REFERENCE: IdentifierResolver::projectByColumn()
+     * resolves a prefix with `LIMIT 1` and no `ORDER BY`, so with two TDE
+     * projects in one tenant every later complete_task("TDE-5") /
+     * update_task("TDE-5") / delete_task("TDE-5") would hit whichever row
+     * Postgres happened to return first. Deterministic silent wrong-row
+     * mutation. With the index in place the ambiguity cannot exist to be
+     * resolved arbitrarily.
+     */
+    public function testTwoProjectsCannotShareAPrefixSoAShortIdIsAlwaysAnUnambiguousReference(): void
+    {
+        $first = $this->makeProjectDirect(7, null, 'First TDE');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TDE' WHERE id = {$first}");
+        $second = $this->makeProjectDirect(7, null, 'Second TDE');
+
+        // The DATABASE refuses it, not merely the handler: this is what makes
+        // the guard hold under concurrency, where two simultaneous
+        // update_project calls both pass their own check-then-act SELECT.
+        $threw = false;
+        try {
+            $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TDE' WHERE id = {$second}");
+        } catch (\PDOException $e) {
+            $threw = true;
+            self::assertSame('23505', $e->getCode(), 'must be a unique-constraint violation');
+        }
+        self::assertTrue($threw, 'UNIQUE (tenant_id, prefix) WHERE prefix IS NOT NULL must reject a second TDE in the same tenant');
+
+        // Exactly one project holds TDE, so the prefix resolves to it and only
+        // it — the property short-id resolution has always assumed.
+        self::assertSame(
+            $first,
+            IdentifierResolver::resolveProject($this->pdo, 7, null, 'TDE'),
+            'with uniqueness enforced, a prefix resolves to exactly one project'
+        );
+    }
+
+    /**
+     * The index is PARTIAL (`WHERE prefix IS NOT NULL`) precisely so that the
+     * derive path's legitimate null outcome — PrefixDeriver::derive() returns
+     * null when every candidate is exhausted, leaving a project with no short
+     * ids at all — stays possible for more than one project per tenant.
+     */
+    public function testManyProjectsMayHaveNoPrefixAtAll(): void
+    {
+        $this->makeProjectDirect(7, null, 'No prefix one');
+        $this->makeProjectDirect(7, null, 'No prefix two');
+        $this->makeProjectDirect(7, null, 'No prefix three');
+
+        $nulls = (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_projects WHERE tenant_id = 7 AND prefix IS NULL')->fetchColumn();
+        self::assertSame(3, $nulls, 'a partial unique index must not collapse multiple NULL prefixes into a conflict');
     }
 
     public function testUpdateRejects404ForAProjectOutsideTheCallersOuScope(): void
