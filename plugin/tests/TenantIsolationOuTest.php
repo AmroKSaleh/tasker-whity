@@ -1493,6 +1493,87 @@ final class TenantIsolationOuTest extends TestCase
     }
 
     /**
+     * REGRESSION TEST (D1b Task 12c review round 1): a "move" whose
+     * target_project_id resolves to the task's OWN current project — the
+     * original's own guidance is "For same-project moves use update_task or
+     * move_task_to_group" — must be rejected with 422, not silently
+     * renumber/un-group/Backlog-relocate the task. Before this fix,
+     * ShortIdAllocator::next() would count the task's OWN row in its
+     * MAX(short_id) computation and hand back a NEW, higher number,
+     * destroying the task's stable external identity with nothing on this
+     * surface able to undo it.
+     */
+    public function testMoveToProjectRejects422ForASameProjectMove(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Same Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Stay put');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 40 WHERE id = {$taskId}");
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $projectId, null);
+
+        self::assertSame(422, $response->getStatusCode());
+        $body = json_decode($response->getBody(), true);
+        self::assertStringContainsString('update_task', $body['error']);
+        self::assertStringContainsString('move_task_to_group', $body['error']);
+
+        $row = $this->pdo->query("SELECT project_id, short_id, section_id FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($projectId, (int) $row['project_id']);
+        self::assertSame(40, (int) $row['short_id'], 'a rejected same-project move must not renumber the task');
+        self::assertSame($sectionId, (int) $row['section_id'], 'a rejected same-project move must not relocate the task to Backlog');
+    }
+
+    /**
+     * SORT ORDER floor requirement (D1b Task 12c review round 1): the moved
+     * task lands at the END of the target section, not carrying over
+     * whatever sort_order it happened to have in its source section.
+     */
+    public function testMoveToProjectPlacesTheTaskAtTheEndOfTheTargetSection(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Sort Order Source');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Sort Order Target');
+        $targetSectionId = $this->makeSectionDirect(7, $targetProjectId);
+        $this->makeTaskDirect(7, $targetProjectId, $targetSectionId, 'Already there A', null, false, null, 0);
+        $this->makeTaskDirect(7, $targetProjectId, $targetSectionId, 'Already there B', null, false, null, 1);
+
+        // The source's OWN sort_order (5) must not travel across the move.
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Moving task', null, false, null, 5);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, null);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame(2, $payload['data']['sortOrder'], 'must land AFTER the target section\'s existing tasks (0, 1), not carry over the source\'s own sort_order (5)');
+    }
+
+    /**
+     * RESPONSE FIELD floor requirement (D1b Task 12c review round 1):
+     * previousShortId/newShortId must fall back to the bare integer, not go
+     * silently null, when a project's (nullable) prefix column is unset.
+     */
+    public function testMoveToProjectFallsBackToBareShortIdWhenAProjectHasNoPrefix(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'No Prefix Source'); // prefix left NULL.
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'No Prefix Target'); // prefix left NULL.
+        $this->makeSectionDirect(7, $targetProjectId);
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'No prefix task');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 7 WHERE id = {$taskId}");
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, null);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('7', $payload['data']['previousShortId'], 'must fall back to the bare integer, not go silently null, when the source project has no prefix');
+        self::assertSame('1', $payload['data']['newShortId'], 'must fall back to the bare integer, not go silently null, when the target project has no prefix');
+    }
+
+    /**
      * ATOMICITY floor requirement: if the write fails, the task keeps its
      * original project_id/short_id. Forced deterministically via
      * `default_transaction_read_only` -- every statement (including
@@ -1707,6 +1788,41 @@ final class TenantIsolationOuTest extends TestCase
 
         $row = $this->pdo->query("SELECT project_id FROM tasker_tasks WHERE id = {$ownTaskId}")->fetch(PDO::FETCH_ASSOC);
         self::assertSame($ownProjectId, (int) $row['project_id'], 'a rejected cross-OU move must not have moved anything');
+    }
+
+    /**
+     * REGRESSION TEST (D1b Task 12c review round 1), full route: the exact
+     * scenario the review named as "plausible on a retry, or when the same
+     * project resolves from two identifier forms" — task_id given as its
+     * short id (which names the project via its PREFIX) and target_project_id
+     * given as that SAME prefix. Both resolve to the same project through
+     * two different identifier forms; the route must still reject it.
+     */
+    public function testMoveTaskRejects422WhenTargetProjectIsTheTasksCurrentProject(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'Same Project Route');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TDE' WHERE id = {$projectId}");
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Stay put');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 40 WHERE id = {$taskId}");
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/move', (string) json_encode([
+            'task_id' => 'TDE-40',
+            'target_project_id' => 'TDE',
+        ]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTask($request);
+
+        self::assertSame(422, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT project_id, short_id FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($projectId, (int) $row['project_id']);
+        self::assertSame(40, (int) $row['short_id'], 'a rejected same-project move must not renumber the task');
     }
 
     // ==================== ShortIdAllocator (Task 2: short_id allocation) ====================
@@ -2533,11 +2649,11 @@ final class TenantIsolationOuTest extends TestCase
 
         $handler = new TasksApiHandler($this->pdo);
 
-        $grouped = json_decode($handler->moveToGroup(7, null, $taskId, $groupId, null)->getBody(), true);
+        $grouped = json_decode($handler->moveToGroup(7, null, $taskId, $groupId, true, null)->getBody(), true);
         self::assertSame($groupId, $grouped['data']['groupId']);
 
-        $ungrouped = json_decode($handler->moveToGroup(7, null, $taskId, null, null)->getBody(), true);
-        self::assertNull($ungrouped['data']['groupId'], 'group_id null must un-group, per the original contract');
+        $ungrouped = json_decode($handler->moveToGroup(7, null, $taskId, null, true, null)->getBody(), true);
+        self::assertNull($ungrouped['data']['groupId'], 'explicit group_id:null must un-group, per the original contract');
     }
 
     public function testMoveToGroupRejectsAGroupIdFromADifferentSection(): void
@@ -2554,7 +2670,7 @@ final class TenantIsolationOuTest extends TestCase
         $taskId = $this->makeTaskDirect(7, $projectId, $taskSectionId, 'Movable');
 
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->moveToGroup(7, null, $taskId, $groupInOtherSection, null);
+        $response = $handler->moveToGroup(7, null, $taskId, $groupInOtherSection, true, null);
 
         self::assertSame(422, $response->getStatusCode());
     }
@@ -2578,7 +2694,7 @@ final class TenantIsolationOuTest extends TestCase
         $taskId = $this->makeTaskDirect(7, $projectId, $sourceSectionId, 'Moving with its new group');
 
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->moveToGroup(7, null, $taskId, $groupInTargetSection, $targetSectionId);
+        $response = $handler->moveToGroup(7, null, $taskId, $groupInTargetSection, true, $targetSectionId);
 
         self::assertSame(200, $response->getStatusCode());
         $payload = json_decode($response->getBody(), true);
@@ -2595,7 +2711,7 @@ final class TenantIsolationOuTest extends TestCase
         $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Movable');
 
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->moveToGroup(7, null, $taskId, null, $foreignSectionId);
+        $response = $handler->moveToGroup(7, null, $taskId, null, false, $foreignSectionId);
 
         self::assertSame(422, $response->getStatusCode());
     }
@@ -2607,7 +2723,7 @@ final class TenantIsolationOuTest extends TestCase
         $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
 
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->moveToGroup(7, null, $otherTaskId, null, null);
+        $response = $handler->moveToGroup(7, null, $otherTaskId, null, false, null);
 
         self::assertSame(404, $response->getStatusCode());
     }
@@ -2627,7 +2743,7 @@ final class TenantIsolationOuTest extends TestCase
         $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
 
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->moveToGroup(7, 2, $siblingTaskId, null, null);
+        $response = $handler->moveToGroup(7, 2, $siblingTaskId, null, false, null);
 
         self::assertSame(404, $response->getStatusCode());
     }
@@ -2638,6 +2754,8 @@ final class TenantIsolationOuTest extends TestCase
      * (the live original exposes no MCP reordering tool at all — see
      * parity-allowlist.php['move_task_to_group']). null (the default) must
      * leave sort_order untouched, matching every other optional field here.
+     * $groupProvided: false throughout, matching the real route shape of a
+     * pure reorder call (`{task_id, sort_order}`, no group_id key at all).
      */
     public function testMoveToGroupStillReordersViaSortOrder(): void
     {
@@ -2647,14 +2765,104 @@ final class TenantIsolationOuTest extends TestCase
 
         $handler = new TasksApiHandler($this->pdo);
 
-        $reorderResponse = $handler->moveToGroup(7, null, $taskId, null, null, 5);
+        $reorderResponse = $handler->moveToGroup(7, null, $taskId, null, false, null, 5);
         self::assertSame(200, $reorderResponse->getStatusCode());
         $reordered = json_decode($reorderResponse->getBody(), true);
         self::assertSame(5, $reordered['data']['sortOrder']);
 
         // Omitting sort_order (null, the default) must leave it untouched.
-        $unchanged = json_decode($handler->moveToGroup(7, null, $taskId, null, null)->getBody(), true);
+        $unchanged = json_decode($handler->moveToGroup(7, null, $taskId, null, false, null)->getBody(), true);
         self::assertSame(5, $unchanged['data']['sortOrder'], 'omitting sort_order must leave the previous value in place');
+    }
+
+    /**
+     * REGRESSION TEST (D1b Task 12c review round 1): a pure reorder call
+     * (group_id key ABSENT — $groupProvided: false) on an ALREADY-GROUPED
+     * task must leave its group_id untouched. Before this fix,
+     * moveToGroup() wrote `group_id = :group_id` unconditionally with
+     * $groupId collapsed to null whenever the key was absent, so exactly
+     * this call — the drag-and-drop reorder that justified rehoming
+     * sort_order onto this tool in the first place — silently un-grouped
+     * the task it reordered. This is the direct replacement for
+     * testMoveKeepsTheGroupWhenSectionIdIsEchoedUnchanged(), deleted along
+     * with the now-retired move() (whole-branch review finding I1's own
+     * regression coverage), applied to move_task_to_group's own reorder path.
+     */
+    public function testMoveToGroupReorderLeavesAnAlreadyGroupedTasksGroupUntouched(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Grouped Reorder Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId = $this->makeGroupDirect(7, $sectionId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Grouped, about to reorder', null, false, null, 1, $groupId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToGroup(7, null, $taskId, null, false, null, 9);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame($groupId, $payload['data']['groupId'], 'a pure reorder call must not un-group an already-grouped task');
+        self::assertSame(9, $payload['data']['sortOrder']);
+    }
+
+    // ==================== TaskerPlugin::moveTaskToGroup() route -- sort_order validation (D1b Task 12c review round 1) ====================
+
+    /**
+     * REGRESSION TEST: sort_order used to be cast, not validated
+     * (`(int) $decoded['sort_order']`), so a non-numeric value silently
+     * coerced to 0/1 instead of 400ing — the one field on this route that
+     * didn't either resolve an identifier or validate its shape.
+     */
+    public function testMoveTaskToGroupRejects400ForANonIntegerSortOrder(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'Bad Sort Order Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Do not reorder me', null, false, null, 3);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/group', (string) json_encode([
+            'task_id' => (string) $taskId,
+            'sort_order' => 'abc',
+        ]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTaskToGroup($request);
+
+        self::assertSame(400, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT sort_order FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(3, (int) $row['sort_order'], 'a rejected sort_order must not silently coerce to 0 and apply anyway');
+    }
+
+    /**
+     * REGRESSION TEST: an EXPLICIT `sort_order: null` used to be cast
+     * straight to 0 -- a real reorder to the top -- rather than being
+     * treated as "leave unchanged", the same way an absent sort_order key
+     * already was.
+     */
+    public function testMoveTaskToGroupTreatsExplicitNullSortOrderAsLeaveUnchanged(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'Null Sort Order Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Keep my position', null, false, null, 3);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/group', (string) json_encode([
+            'task_id' => (string) $taskId,
+            'sort_order' => null,
+        ]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTaskToGroup($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame(3, $payload['data']['sortOrder'], 'explicit null must leave sort_order unchanged, not reset it to 0');
     }
 
     // ==================== Environment (OU) aliases (D1b Task 10) ====================

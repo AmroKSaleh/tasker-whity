@@ -504,26 +504,45 @@ final class OriginalContractParityTest extends TestCase
      * the named behavioural test has to be real and in the tree before the
      * property may appear on our side without failing.
      *
-     * REGRESSION FIX (review finding): the previous version only checked
-     * `str_contains($source, "function {$method}(")` — satisfied by declaring
-     * the waived property, adding an EMPTY-BODIED method with the matching
-     * `dischargedBy` name (`public function testFoo(): void {}`), and deleting
-     * the now-stale allowlist entry. That sequence made staleAllowlistEntries()
+     * REGRESSION FIX (review round 1 finding, first pass): the previous
+     * version only checked `str_contains($source, "function {$method}(")` —
+     * satisfied by declaring the waived property, adding an EMPTY-BODIED
+     * method with the matching `dischargedBy` name, and deleting the
+     * now-stale allowlist entry. That sequence made staleAllowlistEntries()
      * pass — the method existed — while the behaviour it claimed to prove was
-     * never implemented, and the whole suite still went green. Now the
-     * method's own BODY (matched via brace-counting, not just its signature)
-     * must contain at least one call that looks like `assertSomething(` or
-     * `expectException(` — the two forms this codebase's own tests actually
-     * use (see ShortIdAllocatorTest::testWithRetryDoesNotTreatAnUnrelatedConstraintViolationAsARace()
+     * never implemented, and the whole suite still went green. The method's
+     * own BODY must contain at least one call that looks like
+     * `assertSomething(` or `expectException(` — the two forms this
+     * codebase's own tests actually use (see
+     * ShortIdAllocatorTest::testWithRetryDoesNotTreatAnUnrelatedConstraintViolationAsARace()
      * for a real expectException()-only example) — before the method counts
      * as a genuine behavioural test.
+     *
+     * REGRESSION FIX (review round 1 finding, SECOND pass): the first pass's
+     * own {@see self::methodBody()} had two more holes review found, both in
+     * THIS file: (1) it matched the assertion regex against RAW body text, so
+     * a body containing only `{ /* assertSame() would go here *\/ }` — the
+     * exact false-positive shape a lazy discharge could produce — passed;
+     * (2) it found the FIRST textual match of `function <name>(` anywhere in
+     * the file, including inside a comment or docblock — this very
+     * docblock's own prose (two paragraphs up, describing the empty-stub
+     * regression by name) is itself now a live example: it is english text
+     * ABOUT a method signature, not one, and a naive scan could confuse the
+     * two. Fixed by tokenizing with `token_get_all()` (see methodBody()'s
+     * own doc) instead of scanning raw characters: it locates a REAL
+     * `T_FUNCTION` declaration whose name token matches $method (never text
+     * inside a `T_COMMENT`/`T_DOC_COMMENT`, which are their own token kinds,
+     * not raw substrings), and the reconstructed body it returns has every
+     * comment and string-literal token already stripped, so the assertion
+     * regex can only match a genuine token sequence, never a comment or a
+     * string that merely mentions one.
      *
      * NOT AIRTIGHT, deliberately not claimed to be: nothing here can prove the
      * assertion checks the RIGHT thing, only that some assertion exists. A
      * method that asserts `self::assertTrue(true)` still passes this check.
-     * It closes the specific gap the review demonstrated (an empty stub) —
-     * it is not, and cannot be, a substitute for actually reading the test
-     * when discharging an entry.
+     * It closes the specific gaps review demonstrated — it is not, and cannot
+     * be, a substitute for actually reading the test when discharging an
+     * entry.
      */
     private static function behaviourTestExists(string $method): bool
     {
@@ -547,34 +566,97 @@ final class OriginalContractParityTest extends TestCase
     }
 
     /**
-     * The source text between $method's opening `{` and its matching closing
-     * `}`, found by counting braces from the first `{` after the method's
-     * signature — good enough to tell an empty stub from a real test body
-     * without a full PHP parser. Braces inside string interpolation
-     * (`"{$var}"`) or embedded JSON/text literals stay balanced in pairs, so
-     * a plain counter handles this codebase's actual test files correctly;
-     * it is not immune to a stray unmatched brace inside a comment or string,
-     * which would only make this check MORE conservative (return null / no
-     * body found), never less.
+     * The text of $method's real body — between its OWN opening `{` and its
+     * matching closing `}` — with every comment and string-literal TOKEN
+     * already stripped, so a body that only ever MENTIONS an assertion (in a
+     * comment, or inside a string) can never be confused with one that
+     * actually CALLS one.
+     *
+     * Uses `token_get_all()` rather than scanning raw characters (review
+     * round 1, second pass — see behaviourTestExists()'s own docblock for
+     * the two holes this closes): PHP's tokenizer already knows the
+     * difference between a `T_FUNCTION` declaration, a `T_COMMENT`, and a
+     * `T_STRING` identifier, so this walks tokens looking for a REAL
+     * function declaration whose name token equals $method exactly (never a
+     * textual match inside a comment/docblock/string — which are their own
+     * distinct token kinds here, not raw substrings the way the previous,
+     * character-scanning version treated them), then brace-counts at the
+     * TOKEN level from its opening `{` (a `{`/`}` inside a comment or string
+     * is already folded into that ONE token, so it can never be
+     * miscounted as a real brace the way scanning raw characters could
+     * risk). The first (topmost) matching declaration in the file wins,
+     * matching every other file/method lookup in this class.
+     *
+     * @return string|null the reconstructed body (comments/strings removed,
+     *         everything else — including whitespace — left as-is), or null
+     *         if $method has no real declaration with a body in $source.
      */
     private static function methodBody(string $source, string $method): ?string
     {
-        if (preg_match('/function\s+' . preg_quote($method, '/') . '\s*\([^)]*\)[^{;]*\{/', $source, $m, PREG_OFFSET_CAPTURE) !== 1) {
-            return null;
-        }
+        $tokens = token_get_all("<?php\n" . $source);
+        $count = count($tokens);
 
-        $openBrace = $m[0][1] + strlen($m[0][0]) - 1;
-        $depth = 0;
-        $length = strlen($source);
-        for ($i = $openBrace; $i < $length; $i++) {
-            if ($source[$i] === '{') {
-                $depth++;
-            } elseif ($source[$i] === '}') {
-                $depth--;
-                if ($depth === 0) {
-                    return substr($source, $openBrace + 1, $i - $openBrace - 1);
+        for ($i = 0; $i < $count; $i++) {
+            $token = $tokens[$i];
+            if (!is_array($token) || $token[0] !== T_FUNCTION) {
+                continue;
+            }
+
+            $nameIndex = $i + 1;
+            while ($nameIndex < $count && is_array($tokens[$nameIndex]) && in_array($tokens[$nameIndex][0], [T_WHITESPACE, T_COMMENT, T_DOC_COMMENT], true)) {
+                $nameIndex++;
+            }
+            if (!is_array($tokens[$nameIndex]) || $tokens[$nameIndex][0] !== T_STRING || $tokens[$nameIndex][1] !== $method) {
+                continue; // Not a declaration of $method (could be a closure, a different method, or unrelated).
+            }
+
+            // Advance past the signature (parameter list, return type) to
+            // this declaration's own opening brace. A bare `;` first means
+            // an abstract/interface method — no body to check.
+            $openBrace = null;
+            for ($j = $nameIndex + 1; $j < $count; $j++) {
+                $text = is_array($tokens[$j]) ? $tokens[$j][1] : $tokens[$j];
+                if ($text === '{') {
+                    $openBrace = $j;
+                    break;
+                }
+                if ($text === ';') {
+                    return null;
                 }
             }
+            if ($openBrace === null) {
+                return null;
+            }
+
+            $depth = 1;
+            $body = '';
+            for ($k = $openBrace + 1; $k < $count; $k++) {
+                $token = $tokens[$k];
+                $text = is_array($token) ? $token[1] : $token;
+
+                if ($text === '{') {
+                    $depth++;
+                } elseif ($text === '}') {
+                    $depth--;
+                    if ($depth === 0) {
+                        return $body;
+                    }
+                }
+
+                // Comments and string-literal tokens are dropped entirely —
+                // see this method's own docblock for why.
+                if (is_array($token) && in_array(
+                    $token[0],
+                    [T_COMMENT, T_DOC_COMMENT, T_CONSTANT_ENCAPSED_STRING, T_ENCAPSED_AND_WHITESPACE],
+                    true
+                )) {
+                    continue;
+                }
+
+                $body .= $text;
+            }
+
+            return null; // Unbalanced braces -- malformed source.
         }
 
         return null;

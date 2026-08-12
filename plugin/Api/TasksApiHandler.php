@@ -510,13 +510,28 @@ final class TasksApiHandler
      * file's own docblock for the full reasoning every other OU-aware
      * method in this class already documents.
      *
-     * group_id ABSENT and group_id EXPLICIT NULL are IDENTICAL at this
-     * layer: both arrive here as a plain `null` (D1b Task 9 brief
-     * resolution #3 — the route layer, TaskerPlugin::moveTaskToGroup(),
-     * collapses the two statuses via its own resolveGroupMembership()
-     * before ever calling this method). move_task_to_group exists SOLELY to
-     * set group membership, so there is no "leave unchanged" form for
-     * group_id the way section_id (and now $sortOrder) have.
+     * $groupId/$groupProvided (REVISED, D1b Task 12c review round 1):
+     * group_id ABSENT and group_id EXPLICIT NULL used to be IDENTICAL at
+     * this layer (D1b Task 9 brief resolution #3, "move_task_to_group exists
+     * SOLELY to set group membership, so there is no leave unchanged form")
+     * — true when this method had no OTHER reason to be called. Once
+     * $sortOrder (below) made a PURE REORDER call
+     * (`{task_id, sort_order: 3}`, no group_id at all — exactly the
+     * drag-and-drop call that justified rehoming sort_order here) a real,
+     * expected shape, collapsing "absent" into "ungroup" made every such
+     * call silently un-group the task it reordered — a regression of the
+     * IDENTICAL invariant whole-branch review finding I1 protected on the
+     * now-retired move() (see its own former docblock in git history), whose
+     * own regression test was deleted along with it. $groupProvided
+     * restores the distinction: `false` (group_id key ABSENT from the
+     * request — TaskerPlugin::moveTaskToGroup() sets this from
+     * resolveMoveDestinationId()'s own 'absent' status) leaves group_id
+     * COMPLETELY UNTOUCHED, not even read; `true` with $groupId null means
+     * EXPLICIT null, which still ungroups exactly as before; `true` with a
+     * real id sets it. This is deliberately the ONE place in this class
+     * where absent and explicit-null now differ — move_task_to_group is no
+     * longer solely a membership-setter now that it also reorders, and a
+     * reorder-only call has no group opinion at all to express.
      *
      * $sortOrder (D1b Task 12c, ADDITIVE — see
      * parity-allowlist.php['move_task_to_group']): the live original exposes
@@ -534,6 +549,7 @@ final class TasksApiHandler
         ?int $callerOuId,
         int $taskId,
         ?int $groupId,
+        bool $groupProvided,
         ?int $sectionId,
         ?int $sortOrder = null
     ): Response {
@@ -553,12 +569,16 @@ final class TasksApiHandler
         // current (unchanged) section_id.
         $targetSectionId = $sectionId ?? (int) $row['section_id'];
 
-        if ($groupId !== null && !$this->groupBelongsToSection($tenantId, $groupId, $targetSectionId)) {
+        if ($groupProvided && $groupId !== null && !$this->groupBelongsToSection($tenantId, $groupId, $targetSectionId)) {
             return Response::error('group_id must belong to the target section', 422);
         }
 
-        $fields = ['group_id = :group_id'];
-        $params = [':id' => $taskId, ':tenant_id' => $tenantId, ':group_id' => $groupId];
+        $fields = [];
+        $params = [':id' => $taskId, ':tenant_id' => $tenantId];
+        if ($groupProvided) {
+            $fields[] = 'group_id = :group_id';
+            $params[':group_id'] = $groupId;
+        }
         if ($sectionId !== null) {
             $fields[] = 'section_id = :section_id';
             $params[':section_id'] = $sectionId;
@@ -566,6 +586,12 @@ final class TasksApiHandler
         if ($sortOrder !== null) {
             $fields[] = 'sort_order = :sort_order';
             $params[':sort_order'] = $sortOrder;
+        }
+
+        if ($fields === []) {
+            // None of group_id/section_id/sort_order were actually supplied
+            // -- e.g. a bare {task_id} call. Nothing to change.
+            return Response::json(['data' => $this->toPublicTask($row)], 200);
         }
         $fields[] = 'updated_at = CURRENT_TIMESTAMP';
 
@@ -636,16 +662,47 @@ final class TasksApiHandler
      * project that never went through create_project) does this 404 —
      * exactly like create_task's own analogous edge case.
      *
+     * SAME-PROJECT REJECTION (D1b Task 12c review round 1): $targetProjectId
+     * equal to the task's OWN current project — plausible on a retry, or
+     * when the same project resolves from two different identifier forms —
+     * is rejected with 422 BEFORE any allocation or write happens, pointing
+     * at update_task/move_task_to_group, matching the original's own tool
+     * description ("For same-project moves use update_task or
+     * move_task_to_group"). Without this, ShortIdAllocator::next() counts
+     * the task's OWN row in its MAX(short_id) computation, so a same-project
+     * "move" would renumber it upward (TDE-40 -> TDE-41), unconditionally
+     * clear group_id, and reset section_id to Backlog — destroying the
+     * task's stable external identity and board placement with NOTHING on
+     * this surface able to undo it (no tool sets a short id).
+     *
      * SHORT ID REASSIGNMENT: the task's short_id is reassigned into
      * $targetProjectId's OWN sequence via
      * {@see \Tasker\Domain\ShortIdAllocator::withRetry()} — the SAME
      * allocator create() uses, so a moved task's new short id follows
      * exactly the rule a freshly created task in the target project would.
-     * The vacated short_id in the SOURCE project is never reused or
-     * backfilled — UNIQUE (project_id, short_id) is scoped PER PROJECT (see
-     * AddTaskerTaskShortIdUnique), so a gap left behind there is harmless,
-     * and the original itself never compacts a project's short id sequence
-     * either.
+     *
+     * SHORT IDS ARE NOT STABLE REFERENCES ACROSS A MOVE (OR A DELETE) —
+     * CORRECTED CLAIM (D1b Task 12c review round 1): this docblock used to
+     * assert the vacated short_id in the SOURCE project "is never reused or
+     * backfilled." That is FALSE and has been removed. ShortIdAllocator::next()
+     * computes `COALESCE(MAX(short_id), 0) + 1` for the project — a plain
+     * live aggregate, not a monotonic counter — so once the highest-numbered
+     * task in a project moves (or is deleted; delete_task frees a number the
+     * IDENTICAL way, and this is not something 12c introduced), the very
+     * next create_task in that SAME project is allocated that EXACT number
+     * again. Since {@see \Tasker\Access\IdentifierResolver::resolveTask()}
+     * resolves short ids by (prefix, short_id), every STORED reference to
+     * the old "SRC-40" — a KB entry, another task's detail text, an agent's
+     * own memory of what it was working on — then silently addresses a
+     * DIFFERENT, live task once a new one claims that number, and
+     * update_task/complete_task/delete_task would mutate the wrong row. This
+     * is the same wrong-row class D1b Task 12b fixed for milestone `index`,
+     * but the fix here is NOT this task's to make: the mechanism is
+     * inherited (delete_task already has it), and a durable fix (a
+     * monotonic per-project counter) is a migration plus an allocator
+     * redesign that deserves its own review, not a fold-in. Tracked
+     * separately; this docblock states the true, current behaviour instead
+     * of a false guarantee.
      *
      * ATOMICITY — DELIBERATELY NOT an explicit `beginTransaction()`/`commit()`
      * pair, even though the brief asks to "wrap the allocation and the
@@ -668,11 +725,26 @@ final class TasksApiHandler
      * propagates untouched, nothing was ever written, and the task keeps its
      * original project_id/short_id.
      *
+     * SORT ORDER (D1b Task 12c review round 1): the moved task is placed at
+     * the END of the target section — `MAX(sort_order) + 1` among the
+     * target section's existing tasks (0 for an empty one) — computed
+     * DELIBERATELY rather than left at whatever value the source project's
+     * own ordering happened to carry, which is what this method did before
+     * this fix (the source section's sort_order has no meaning in a
+     * DIFFERENT section's ordering, so carrying it across landed the task at
+     * an arbitrary position, not a chosen one).
+     *
      * THE RESPONSE reports what changed, matching the original's own
      * documented behaviour ("the response reports what was dropped"):
-     * previousShortId/newShortId as human-readable "PREFIX-N" strings (an
-     * agent that knows a task as TDE-31 needs to learn it is now WCP-14, or
-     * every subsequent call by short id fails), droppedGroup (group_id is
+     * previousShortId/newShortId as human-readable "PREFIX-N" strings when
+     * the relevant project has a prefix (an agent that knows a task as
+     * TDE-31 needs to learn it is now WCP-14, or every subsequent call by
+     * short id fails), falling back to the BARE short_id integer when a
+     * project's `prefix` column (nullable) is unset — the caller still needs
+     * SOME form to re-address the task by, and a silent null would be worse
+     * than an ugly-but-honest bare number. newShortId is rendered from the
+     * RE-READ `$updated` row, not the allocator's own return value — the row
+     * is the honest, post-write source of truth. droppedGroup (group_id is
      * reset unconditionally — a group belongs to a section which belongs to
      * the source project, so nothing about it can travel), and
      * landedInBacklog (true whenever the Backlog substitute above actually
@@ -683,6 +755,14 @@ final class TasksApiHandler
      * edges dropped) — do not exist in this backend at all (D1/D1b never
      * ported flows), so there is nothing to unlink or drop; the tool
      * description says so rather than implying either happened.
+     *
+     * KNOWN, RECORDED, NOT FIXED HERE: a 404 ("Task not found") can still be
+     * returned AFTER a fully committed move, if the re-read via
+     * findScoped() immediately below finds nothing — the same
+     * read-after-write pattern every other mutator in this class already
+     * has (update()/complete()/uncomplete()/setPinned()/moveToGroup() all
+     * re-read after writing and 404 identically if that read comes up
+     * empty). Not specific to this method, not addressed here.
      */
     public function moveToProject(
         int $tenantId,
@@ -703,6 +783,13 @@ final class TasksApiHandler
         $oldShortId   = $row['short_id'] !== null ? (int) $row['short_id'] : null;
         $hadGroup     = $row['group_id'] !== null;
 
+        if ($oldProjectId === $targetProjectId) {
+            return Response::error(
+                'task_id is already in the target project; for a same-project move use update_task or move_task_to_group',
+                422
+            );
+        }
+
         // A foreign or unresolved target section lands the task in the
         // TARGET's own Backlog instead — never an error. See this method's
         // own docblock for why literal "no section" cannot exist here.
@@ -715,22 +802,25 @@ final class TasksApiHandler
             return Response::error('Target project has no backlog section', 404);
         }
 
+        $newSortOrder = $this->nextSortOrderInSection($tenantId, $sectionId);
+
         try {
-            $newShortId = ShortIdAllocator::withRetry(
+            ShortIdAllocator::withRetry(
                 $this->db,
                 $tenantId,
                 $targetProjectId,
-                function (int $candidate) use ($tenantId, $taskId, $targetProjectId, $sectionId): void {
+                function (int $candidate) use ($tenantId, $taskId, $targetProjectId, $sectionId, $newSortOrder): void {
                     $idCol = $this->idColumn();
                     $stmt = $this->db->prepare(
                         "UPDATE tasker_tasks
                          SET project_id = :project_id, section_id = :section_id, group_id = NULL,
-                             short_id = :short_id, updated_at = CURRENT_TIMESTAMP
+                             short_id = :short_id, sort_order = :sort_order, updated_at = CURRENT_TIMESTAMP
                          WHERE {$idCol} = :id AND tenant_id = :tenant_id"
                     );
                     $stmt->bindValue(':project_id', $targetProjectId, PDO::PARAM_INT);
                     $stmt->bindValue(':section_id', $sectionId, PDO::PARAM_INT);
                     $stmt->bindValue(':short_id', $candidate, PDO::PARAM_INT);
+                    $stmt->bindValue(':sort_order', $newSortOrder, PDO::PARAM_INT);
                     $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
                     $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
                     $stmt->execute();
@@ -753,18 +843,59 @@ final class TasksApiHandler
             'target_id' => $taskId,
         ]);
 
+        // The re-read row, not the allocator's own return value, is the
+        // honest post-write source for the new short_id (see this method's
+        // own docblock).
+        $newShortId = $updated['short_id'] !== null ? (int) $updated['short_id'] : null;
+
         $prefixes = $this->projectPrefixes($tenantId, $oldProjectId, $targetProjectId);
         $oldPrefix = $prefixes[$oldProjectId] ?? null;
         $newPrefix = $prefixes[$targetProjectId] ?? null;
 
         $task = $this->toPublicTask($updated);
         $task['previousProjectId'] = $oldProjectId;
-        $task['previousShortId']   = ($oldPrefix !== null && $oldShortId !== null) ? "{$oldPrefix}-{$oldShortId}" : null;
-        $task['newShortId']        = $newPrefix !== null ? "{$newPrefix}-{$newShortId}" : null;
+        // Falls back to the bare integer when the relevant project has no
+        // prefix (a nullable column) -- the caller still needs SOME form to
+        // re-address the task by; a silent null would be worse than an
+        // ugly-but-honest bare number.
+        $task['previousShortId']   = self::renderShortId($oldPrefix, $oldShortId);
+        $task['newShortId']        = self::renderShortId($newPrefix, $newShortId);
         $task['droppedGroup']      = $hadGroup;
         $task['landedInBacklog']   = $sectionId !== $resolvedSectionId;
 
         return Response::json(['data' => $task], 200);
+    }
+
+    /**
+     * "PREFIX-N" when $prefix is set, the bare integer (as a string) when it
+     * is not, or null when $shortId itself is null. Shared by
+     * previousShortId/newShortId above so the two never drift into
+     * independently-typed fallback rules.
+     */
+    private static function renderShortId(?string $prefix, ?int $shortId): ?string
+    {
+        if ($shortId === null) {
+            return null;
+        }
+
+        return $prefix !== null ? "{$prefix}-{$shortId}" : (string) $shortId;
+    }
+
+    /**
+     * The sort_order a task newly placed into $sectionId should get: the END
+     * of the section (`MAX(sort_order) + 1`, or 0 for an empty section) —
+     * {@see self::moveToProject()}'s own deliberate placement, rather than
+     * silently carrying over whatever sort_order the task happened to have
+     * in its SOURCE section (meaningless in a different section's ordering).
+     */
+    private function nextSortOrderInSection(int $tenantId, int $sectionId): int
+    {
+        $stmt = $this->db->prepare(
+            'SELECT COALESCE(MAX(sort_order), -1) + 1 FROM tasker_tasks WHERE tenant_id = :tenant_id AND section_id = :section_id'
+        );
+        $stmt->execute([':tenant_id' => $tenantId, ':section_id' => $sectionId]);
+
+        return (int) $stmt->fetchColumn();
     }
 
     /**

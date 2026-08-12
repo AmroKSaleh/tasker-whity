@@ -2839,16 +2839,30 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
     /**
      * POST /api/tasker/tasks/group — the original's move_task_to_group:
-     * group membership (plus, ADDITIVELY, sort_order — D1b Task 12c),
-     * deliberately narrower than the now cross-project moveTask() above.
+     * move a task into a group, un-group it, move it between sections, AND
+     * (ADDITIVELY, D1b Task 12c) reorder it — deliberately narrower in scope
+     * per-field than the now cross-project moveTask() above, but four
+     * independent things can each be requested in one call.
      *
-     * group_id ABSENT and group_id EXPLICIT NULL both un-group (D1b Task 9
-     * brief resolution #3) — see {@see self::resolveGroupMembership()}'s own
-     * docblock for why. sort_order is read as a plain integer straight off
-     * the decoded body — no identifier resolution needed, it is never an
-     * identifier — and left untouched (null) when the key is absent, exactly
-     * like {@see \Tasker\Api\TasksApiHandler::moveToGroup()}'s own $sortOrder
-     * parameter treats it.
+     * group_id ABSENT vs EXPLICIT NULL now DIFFER (D1b Task 12c review round
+     * 1 — see {@see \Tasker\Api\TasksApiHandler::moveToGroup()}'s own
+     * docblock for the full reasoning): ABSENT (the key is not in the
+     * request at all) leaves group_id COMPLETELY UNTOUCHED — the shape a
+     * pure reorder call (`{task_id, sort_order: 3}`) actually has, and which
+     * used to silently un-group the task before this fix. EXPLICIT NULL
+     * still un-groups, exactly as D1b Task 9 established. Read directly via
+     * {@see self::resolveMoveDestinationId()} (not the now-retired
+     * resolveGroupMembership(), which collapsed exactly this distinction)
+     * — its own 'absent' status maps to $groupProvided = false.
+     *
+     * sort_order is read as a plain integer straight off the decoded body —
+     * no identifier resolution needed, it is never an identifier — but
+     * VALIDATED, not just cast: absent OR explicit null both leave it
+     * unchanged (null); a non-integer, non-numeric-string value (a bool, an
+     * array, a non-numeric string) 400s rather than silently coercing to 0/1
+     * the way a bare `(int)` cast would (review round 1 finding — every
+     * OTHER field on this route either resolves an identifier or validates
+     * its shape; sort_order was the one silent exception).
      *
      * Delegates to {@see \Tasker\Api\TasksApiHandler::moveToGroup()}, which
      * is OU-aware (D1b Task 9 brief resolution #2) — this route resolves
@@ -2886,9 +2900,8 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         // Optional: no "leave unchanged" meaning is lost by collapsing
-        // 'absent'/'explicit_null' to the same null value here the way
-        // resolveGroupMembership() must for group_id below — a task simply
-        // stays in its current section when this key is not supplied.
+        // 'absent'/'explicit_null' to the same null value here — a task
+        // simply stays in its current section when this key is not supplied.
         $section = $this->resolveMoveDestinationId(
             $decoded,
             'section_id',
@@ -2905,8 +2918,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
         $sectionId = $section['status'] === 'resolved' ? $section['value'] : null;
 
-        $group = $this->resolveGroupMembership(
+        // group_id: 'absent' -> $groupProvided false, group_id left
+        // completely untouched by TasksApiHandler::moveToGroup(). 'resolved'
+        // -> $groupProvided true, value carries the real id. Anything else
+        // ('explicit_null' included) -> $groupProvided true, value null,
+        // which moveToGroup() treats as an explicit un-group. See this
+        // method's own docblock and moveToGroup()'s for the full reasoning.
+        $group = $this->resolveMoveDestinationId(
             $decoded,
+            'group_id',
             $pdo,
             $tenantId,
             $ou['ouId'],
@@ -2918,18 +2938,23 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         if ($group['status'] === 'unresolved') {
             return Response::error('Group not found', 404);
         }
-        // 'ungroup' (absent OR explicit null) and 'resolved' both carry the
-        // right value directly — null for the former, a real id for the
-        // latter — with no further mapping needed here.
+        $groupProvided = $group['status'] !== 'absent';
         $groupId = $group['value'];
 
-        // sort_order (D1b Task 12c, ADDITIVE): a plain integer, never an
-        // identifier, so no IdentifierResolver involvement — absent leaves
-        // it null, which TasksApiHandler::moveToGroup() itself treats as
-        // "leave unchanged".
-        $sortOrder = array_key_exists('sort_order', $decoded) ? (int) $decoded['sort_order'] : null;
+        // sort_order (D1b Task 12c, ADDITIVE): absent or explicit null both
+        // leave it unchanged; anything else must be a genuine integer.
+        $sortOrder = null;
+        if (array_key_exists('sort_order', $decoded) && $decoded['sort_order'] !== null) {
+            $rawSortOrder = $decoded['sort_order'];
+            $isIntegerLike = is_int($rawSortOrder)
+                || (is_string($rawSortOrder) && preg_match('/^-?\d+$/', $rawSortOrder) === 1);
+            if (!$isIntegerLike) {
+                return Response::error('sort_order must be an integer', 400);
+            }
+            $sortOrder = (int) $rawSortOrder;
+        }
 
-        return (new TasksApiHandler($pdo))->moveToGroup($tenantId, $ou['ouId'], $taskId, $groupId, $sectionId, $sortOrder);
+        return (new TasksApiHandler($pdo))->moveToGroup($tenantId, $ou['ouId'], $taskId, $groupId, $groupProvided, $sectionId, $sortOrder);
     }
 
     /**
@@ -3273,7 +3298,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * Cases 3/4 (project_id genuinely omitted) are decided by
      * {@see self::resolveRankTasksOmittedProjectId()}, a pure composition
      * helper extracted for the same reason resolveCreateTaskSectionId()/
-     * resolveGroupMembership()/mergeFromReplace() elsewhere in this file
+     * resolveMoveDestinationId()/mergeFromReplace() elsewhere in this file
      * are: this route method itself calls resolvePdo(), making it otherwise
      * unreachable from PHPUnit — see TaskerPluginTest for that helper's own
      * direct Reflection coverage of all three of ITS outcomes. Case 1's
@@ -3991,7 +4016,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * and still passed every existing test, silently destroying a project's
      * accumulated Foundation context on the very next partial update.
      * Extracted here, matching the exact shape already used three times in
-     * this same file ({@see self::resolveGroupMembership()},
+     * this same file ({@see self::resolveMoveDestinationId()},
      * {@see self::isJsonObject()}, {@see self::bodyParamBool()} itself) for
      * composition logic a route method's own resolvePdo() call makes
      * otherwise untestable — see TaskerPluginTest for direct coverage of
@@ -4220,14 +4245,20 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * underlying handler methods themselves do on whatever they are handed.
      *
      * USED BY (D1b Task 12c): {@see self::moveTaskToGroup()}'s own
-     * section_id (both directly, and indirectly for group_id via
-     * {@see self::resolveGroupMembership()}). move_task's OWN section_id/
-     * group_id resolution used to live here too, before Task 12c ported
-     * move_task to the original's actual cross-project contract — that
-     * route resolves target_section_id directly via
-     * IdentifierResolver::resolveSection() now, with no "leave unchanged"
-     * concept to preserve (a cross-project move has no "current" section to
-     * default to). See git history for move_task's former usage here.
+     * section_id AND group_id, both directly — group_id used to go through a
+     * separate resolveGroupMembership() wrapper that collapsed 'absent' and
+     * 'explicit_null' into one 'ungroup' outcome, correct back when
+     * move_task_to_group existed SOLELY to set group membership; retired
+     * once $sortOrder made a pure-reorder call (no group_id at all) a real
+     * shape, since that collapse silently un-grouped every such call (review
+     * round 1 finding — see moveToGroup()'s own docblock in TasksApiHandler
+     * for the full reasoning). move_task's OWN section_id/group_id
+     * resolution used to live here too, before Task 12c ported move_task to
+     * the original's actual cross-project contract — that route resolves
+     * target_section_id directly via IdentifierResolver::resolveSection()
+     * now, with no "leave unchanged" concept to preserve (a cross-project
+     * move has no "current" section to default to). See git history for
+     * move_task's former usage here.
      *
      * Five outcomes, distinguished the same way resolveOptionalParentId()'s
      * three distinguish theirs — a bare `?int` cannot tell "absent" apart
@@ -4235,13 +4266,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      *
      *   - status 'absent': the key is not in $decoded at all —
      *     moveToGroup()'s own section_id parameter must see null (its "leave
-     *     unchanged" case).
+     *     unchanged" case), and its own group_id/$groupProvided pair must
+     *     see $groupProvided = false (ALSO "leave unchanged" — see that
+     *     method's own docblock for why this is new as of Task 12c).
      *   - status 'explicit_null': the key IS present with a literal null
-     *     value — group_id's own "explicit null means un-group" (see
-     *     {@see self::resolveGroupMembership()}'s docblock); section_id has
-     *     no such meaning, but callers decide what to do with it (letting
-     *     moveToGroup()'s own project-membership check reject it is enough —
-     *     no separate handling needed here).
+     *     value — group_id's own "explicit null means un-group" (unchanged
+     *     since D1b Task 9); section_id has no such meaning, but callers
+     *     decide what to do with it (letting moveToGroup()'s own
+     *     project-membership check reject it is enough — no separate
+     *     handling needed here).
      *   - status 'malformed': present, a string/int, but classifies as
      *     malformed_short_id. Callers 400.
      *   - status 'unresolved': present, classifies as a real form, but
@@ -4295,55 +4328,6 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         return $resolved === null
             ? ['status' => 'unresolved', 'value' => null]
             : ['status' => 'resolved', 'value' => $resolved];
-    }
-
-    /**
-     * Resolve move_task_to_group's own group_id (D1b Task 9): unlike
-     * {@see self::resolveMoveDestinationId()}'s own section_id caller (where
-     * ABSENT means "leave the section unchanged"), move_task_to_group's
-     * group_id has no "unchanged" concept at all — it exists
-     * SOLELY to set group membership (brief resolution #3), so an absent key
-     * and an explicit null must behave IDENTICALLY: both un-group. Delegates
-     * every other distinction (malformed/unresolved/resolved) straight to
-     * resolveMoveDestinationId(), then collapses its 'absent' and
-     * 'explicit_null' statuses into one 'ungroup' outcome.
-     *
-     * FOUR outcomes (one fewer than resolveMoveDestinationId()'s five,
-     * because 'absent' and 'explicit_null' are no longer distinguishable
-     * here):
-     *   - 'malformed': looks like a short id but is not one. Callers 400.
-     *   - 'unresolved': supplied, classifies as a real form, but $resolver
-     *     found nothing (wrong tenant/OU, or genuinely absent). Callers
-     *     404 — this must NEVER collapse into 'ungroup': a caller who named
-     *     a specific, wrong group must not silently have their task
-     *     un-grouped instead of seeing an error.
-     *   - 'ungroup': the key was absent OR explicitly null. value is
-     *     always null.
-     *   - 'resolved': present, resolves to a real id. value carries it.
-     *
-     * $resolver is IdentifierResolver::resolveGroup(), injected for the same
-     * Reflection-testability reason resolveMoveDestinationId()'s own
-     * $resolver is — see TaskerPluginTest.
-     *
-     * @param array<string, mixed> $decoded
-     * @param callable(\PDO, int, ?int, string|int|null): ?int $resolver
-     * @return array{status: 'malformed'|'unresolved'|'ungroup'|'resolved', value: ?int}
-     */
-    private function resolveGroupMembership(
-        array $decoded,
-        \PDO $pdo,
-        int $tenantId,
-        ?int $callerOuId,
-        callable $resolver
-    ): array {
-        $destination = $this->resolveMoveDestinationId($decoded, 'group_id', $pdo, $tenantId, $callerOuId, $resolver);
-
-        if ($destination['status'] === 'absent' || $destination['status'] === 'explicit_null') {
-            return ['status' => 'ungroup', 'value' => null];
-        }
-
-        /** @var array{status: 'malformed'|'unresolved'|'resolved', value: ?int} $destination */
-        return $destination;
     }
 
     /**

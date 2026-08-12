@@ -789,124 +789,21 @@ final class TaskerPluginTest extends TestCase
     }
 
     /**
-     * D1b Task 9 (move_task_to_group): unlike resolveMoveDestinationId()
-     * above — whose FIVE outcomes keep 'absent' and 'explicit_null' distinct
-     * because move_task's own group_id has a genuine "leave unchanged"
-     * meaning for the first — move_task_to_group has no such meaning at all:
-     * it exists SOLELY to set group membership (brief resolution #3), so an
-     * absent key and an explicit null must produce the IDENTICAL outcome.
-     * resolveGroupMembership() collapses resolveMoveDestinationId()'s five
-     * outcomes into four for exactly that reason. Exercised via Reflection
-     * for the same reason as every other composition helper in this file:
-     * moveTaskToGroup() itself calls resolvePdo(), unreachable from PHPUnit.
+     * D1b Task 9 introduced resolveGroupMembership(), a wrapper collapsing
+     * resolveMoveDestinationId()'s 'absent' and 'explicit_null' statuses
+     * into one 'ungroup' outcome — correct while move_task_to_group existed
+     * SOLELY to set group membership. D1b Task 12c review round 1 retired it
+     * outright: once $sortOrder made a pure-reorder call (no group_id key at
+     * all) a real shape, that collapse silently un-grouped the task being
+     * reordered. TaskerPlugin::moveTaskToGroup() now reads group_id directly
+     * via resolveMoveDestinationId() (see that method's own docblock,
+     * updated for this) and derives `$groupProvided = status !== 'absent'`
+     * inline — trivial enough that it needs no dedicated Reflection seam of
+     * its own; it is exercised end to end by TenantIsolationOuTest's own
+     * "TasksApiHandler::moveToGroup()" section instead (including the new
+     * grouped-task reorder regression test). See git history for the five
+     * tests that used to live here.
      */
-    private function invokeResolveGroupMembership(
-        array $decoded,
-        PDO $pdo,
-        int $tenantId,
-        ?int $callerOuId,
-        callable $resolver
-    ): array {
-        $plugin = new TaskerPlugin();
-        $method = new \ReflectionMethod(TaskerPlugin::class, 'resolveGroupMembership');
-        $method->setAccessible(true);
-
-        /** @var array{status: string, value: ?int} $result */
-        $result = $method->invoke($plugin, $decoded, $pdo, $tenantId, $callerOuId, $resolver);
-
-        return $result;
-    }
-
-    public function testResolveGroupMembershipTreatsAnAbsentKeyAsUngroup(): void
-    {
-        $pdo = new PDO('sqlite::memory:');
-        $called = false;
-        $resolver = function () use (&$called): ?int {
-            $called = true;
-
-            return 99;
-        };
-
-        $result = $this->invokeResolveGroupMembership(['task_id' => 'TDE-1'], $pdo, 7, null, $resolver);
-
-        self::assertSame('ungroup', $result['status']);
-        self::assertNull($result['value']);
-        self::assertFalse($called, 'an absent group_id must un-group without ever calling the resolver');
-    }
-
-    public function testResolveGroupMembershipTreatsAnExplicitNullAsUngroupIdentically(): void
-    {
-        $pdo = new PDO('sqlite::memory:');
-        $called = false;
-        $resolver = function () use (&$called): ?int {
-            $called = true;
-
-            return 99;
-        };
-
-        $result = $this->invokeResolveGroupMembership(['group_id' => null], $pdo, 7, null, $resolver);
-
-        self::assertSame(
-            'ungroup',
-            $result['status'],
-            'explicit null must produce the IDENTICAL outcome as an absent key -- there is no "leave unchanged" form here'
-        );
-        self::assertNull($result['value']);
-        self::assertFalse($called);
-    }
-
-    public function testResolveGroupMembershipRejectsAMalformedShortIdWithoutCallingTheResolver(): void
-    {
-        $pdo = new PDO('sqlite::memory:');
-        $called = false;
-        $resolver = function () use (&$called): ?int {
-            $called = true;
-
-            return 99;
-        };
-
-        $result = $this->invokeResolveGroupMembership(['group_id' => 'AB-xyz'], $pdo, 7, null, $resolver);
-
-        self::assertSame('malformed', $result['status']);
-        self::assertNull($result['value']);
-        self::assertFalse($called);
-    }
-
-    public function testResolveGroupMembershipReportsUnresolvedWhenTheResolverFindsNothingRatherThanUngrouping(): void
-    {
-        $pdo = new PDO('sqlite::memory:');
-        $resolver = fn (PDO $pdo, int $tenantId, ?int $callerOuId, $raw): ?int => null;
-
-        $result = $this->invokeResolveGroupMembership(['group_id' => 999], $pdo, 7, null, $resolver);
-
-        self::assertSame(
-            'unresolved',
-            $result['status'],
-            'a supplied group_id that does not resolve must 404 -- it must NEVER be silently treated as "ungroup"'
-        );
-        self::assertNull($result['value']);
-    }
-
-    public function testResolveGroupMembershipCallsTheResolverWithTheExactTupleWhenSupplied(): void
-    {
-        $pdo = new PDO('sqlite::memory:');
-        $seen = null;
-        $resolver = function (PDO $calledPdo, int $tenantId, ?int $callerOuId, $raw) use (&$seen, $pdo): ?int {
-            $seen = [$calledPdo === $pdo, $tenantId, $callerOuId, $raw];
-
-            return 42;
-        };
-
-        $result = $this->invokeResolveGroupMembership(['group_id' => 'TDE'], $pdo, 7, 3, $resolver);
-
-        self::assertSame('resolved', $result['status']);
-        self::assertSame(42, $result['value']);
-        self::assertSame(
-            [true, 7, 3, 'TDE'],
-            $seen,
-            'the resolver must receive the SAME pdo, tenantId, callerOuId, and raw identifier untouched'
-        );
-    }
 
     /**
      * Task review finding #4 (D1b Task 6): createTask()'s "section_id
