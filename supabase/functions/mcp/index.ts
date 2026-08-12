@@ -24,12 +24,19 @@ const RESOURCE_METADATA_URL = 'https://smarttasksxdd.netlify.app/.well-known/oau
 // ── Scoring (mirrors scoring.js) ─────────────────────────────
 const PRIORITY_SCORES: Record<string, number> = { rush: 100, high: 60, medium: 30, low: 10 }
 
+// An unset priority used to score 0 and then be dropped by the `score > 0` filter below, so a task
+// nobody had triaged became UNRANKABLE rather than last. Zero was doing double duty as "no priority
+// set" and as the exclusion threshold. It now ranks just below `low`.
+const UNSET_PRIORITY_SCORE = 5
+// The pin used to `return 9999` BEFORE priority, due date or skip count were read, so every pinned
+// task tied and fell back to the creation-date tiebreak — six tasks pinned in one batch became
+// indistinguishable. Additive keeps pins on top AND ordered sensibly among themselves.
+const PIN_BONUS = 1000
+
 function scoreTask(task: any, now = new Date()): number {
   if (task.status === 'done') return -1
-  if (task.status === 'in_progress') return -1
   if (task.tags?.includes('reference')) return -1
-  if (task.pinned) return 9999
-  let score = PRIORITY_SCORES[task.priority] ?? 0
+  let score = PRIORITY_SCORES[task.priority] ?? UNSET_PRIORITY_SCORE
   if (task.due_date) {
     const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
     const due = new Date(task.due_date)
@@ -40,15 +47,32 @@ function scoreTask(task: any, now = new Date()): number {
     else if (diff <= 3) score += 20
   }
   if (task.skip_count > 0) score = Math.max(1, Math.round(score / (1 + task.skip_count * 0.3)))
+  if (task.pinned) score += PIN_BONUS
   return score
 }
 
-function rankTasks(tasks: any[]): any[] {
-  return tasks
-    .map(t => ({ t, score: scoreTask(t) }))
+// in_progress tasks used to score -1 and vanish from every ranked view — on one board that hid 8 of
+// 36 open tasks including a live production compromise, and it once recommended the blocked half of
+// a pair while hiding the half that unblocks it. Started work IS work and must stay visible, but it
+// is not a candidate for "what should I START next" — so it is SPLIT OUT, never dropped.
+function partitionRanked(tasks: any[]): { inFlight: any[]; next: any[]; withheldReference: number } {
+  const scored = tasks.map(t => ({ t, score: scoreTask(t) }))
+  const live = scored
     .filter(({ score }) => score > 0)
     .sort((a, b) => b.score - a.score || new Date(a.t.created_at).getTime() - new Date(b.t.created_at).getTime())
     .map(({ t, score }) => ({ ...t, _score: score }))
+  return {
+    inFlight: live.filter((t: any) => t.status === 'in_progress'),
+    next: live.filter((t: any) => t.status !== 'in_progress'),
+    // Everything still scoring <= 0 here is reference-tagged: the caller's query already excludes done.
+    withheldReference: scored.filter(({ score }) => score <= 0).length,
+  }
+}
+
+// Next-up only, for callers that want a single list. Kept so the web mirror's three consumers
+// (Front Page "Next Up", ProjectCard, Today) keep their exact current shape.
+function rankTasks(tasks: any[]): any[] {
+  return partitionRanked(tasks).next
 }
 
 // ── Timestamps ───────────────────────────────────────────────
@@ -603,6 +627,24 @@ async function pushTaskToGitHub(
 }
 
 // ── Task resolver helper ──────────────────────────────────────
+// A merged duplicate carries duplicate_of pointing at the task that absorbed it. Resolve that to a
+// usable reference so a reader arriving at the dead ID gets a live one to follow, not just a UUID.
+// Returns null for ordinary tasks, so callers can spread it conditionally.
+async function resolveMergeTarget(sb: any, userId: string, task: any) {
+  if (!task?.duplicate_of) return null
+  const { data: canon } = await sb.from('tasks')
+    .select('id, short_id, text, status, project_id')
+    .eq('id', task.duplicate_of).eq('user_id', userId).maybeSingle()
+  if (!canon) return { id: task.duplicate_of, note: 'canonical task not found or not visible to you' }
+  const cp = await resolveProject(sb, userId, canon.project_id)
+  return {
+    id: canon.id,
+    short_id: cp?.prefix && canon.short_id != null ? `${cp.prefix}-${canon.short_id}` : null,
+    text: canon.text,
+    status: canon.status,
+  }
+}
+
 async function resolveTask(sb: any, userId: string, taskRef: string) {
   // Accept PREFIX-NNN short IDs (e.g. TDE-31)
   const shortMatch = taskRef.match(/^([A-Za-z]{2,6})-(\d+)$/)
@@ -613,7 +655,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
     const project = await resolveProject(sb, userId, prefix)
     if (project) {
       const { data: task } = await sb.from('tasks')
-        .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict, tags')
+        .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict, tags, duplicate_of')
         .eq('project_id', project.id).eq('short_id', shortId).eq('user_id', userId)
         .maybeSingle()
       if (task) return task
@@ -621,7 +663,7 @@ async function resolveTask(sb: any, userId: string, taskRef: string) {
   }
   // Fall back to UUID
   const { data } = await sb.from('tasks')
-    .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict, tags').eq('id', taskRef).eq('user_id', userId).maybeSingle()
+    .select('id, text, detail, input, output, status, short_id, flow_id, flow_step, project_id, section_id, kind, seed_target, seed_open_questions, review_enabled, review_bar, review_verdict, tags, duplicate_of').eq('id', taskRef).eq('user_id', userId).maybeSingle()
   return data ?? null
 }
 
@@ -3857,25 +3899,30 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const [{ data: projects }, tasks, { data: envRows }, { data: us }] = await Promise.all([
         projQuery,
         // Paged: an unbounded select here truncated at 1000 rows and under-reported every project.
-        fetchAllRows(() => sb.from('tasks').select('project_id, status').eq('user_id', userId).is('is_deleted', false)),
+        fetchAllRows(() => sb.from('tasks').select('project_id, status, flow_id').eq('user_id', userId).is('is_deleted', false)),
         sb.from('environments').select('id, name, sort_order').eq('user_id', userId).eq('is_deleted', false).order('sort_order'),
         sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle(),
       ])
       if (!projects?.length) return envFilter ? 'No projects in that Environment.' : 'No projects found.'
-      const counts: Record<string, { total: number; done: number }> = {}
+      // Flow steps are counted SEPARATELY, not folded into the total. list_tasks filters them out
+      // (flow_id IS NULL) and the board never shows them, so a combined total made the header
+      // disagree with every other surface — WCC read 136 here against 77 on the board. Reported as
+      // a split rather than dropped: the steps are real work, they just are not board tasks.
+      const counts: Record<string, { total: number; done: number; steps: number }> = {}
       for (const t of (tasks ?? [])) {
-        if (!counts[t.project_id]) counts[t.project_id] = { total: 0, done: 0 }
+        if (!counts[t.project_id]) counts[t.project_id] = { total: 0, done: 0, steps: 0 }
+        if (t.flow_id) { counts[t.project_id].steps++; continue }
         counts[t.project_id].total++
         if (t.status === 'done') counts[t.project_id].done++
       }
       const activeEnvId = us?.active_environment_id ?? null
       const renderProject = (p: any) => {
-        const c = counts[p.id] ?? { total: 0, done: 0 }
+        const c = counts[p.id] ?? { total: 0, done: 0, steps: 0 }
         const pct = c.total > 0 ? Math.round((c.done / c.total) * 100) : 0
         const ctx = p.context ?? {}
         return [
           `## ${p.name}  (prefix: ${p.prefix} | slug: ${p.slug} | id: ${p.id})`,
-          `Progress: ${c.done}/${c.total} tasks · ${pct}%`,
+          `Progress: ${c.done}/${c.total} tasks · ${pct}%${c.steps ? `  (+${c.steps} flow step${c.steps === 1 ? '' : 's'}, not counted above)` : ''}`,
           ctx.goal ? `Goal: ${ctx.goal}` : null,
           ctx.why  ? `Why:  ${ctx.why}`  : null,
         ].filter(Boolean).join('\n')
@@ -5146,12 +5193,25 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       }
       const { data } = await query
       if (!data?.length) return 'No pending tasks.'
-      const ranked = rankTasks(data)
-      return ranked.map((t: any, i: number) => {
+      const { inFlight, next, withheldReference } = partitionRanked(data)
+      const line = (t: any, n?: number) => {
         const shortRef = t.project?.prefix && t.short_id != null ? `${t.project.prefix}-${t.short_id}` : null
-        const badges = [t.priority, t.due_date ? `due ${t.due_date}` : null, t.project?.name, t.pinned ? '★ critical' : null].filter(Boolean).join(', ')
-        return `${i + 1}. [${shortRef ?? t.id}] ${t.text}  (${badges})  score: ${t._score}`
-      }).join('\n')
+        // "no priority" is spelled out rather than omitted: these tasks used to be dropped entirely,
+        // so the reader needs to see WHY one is sitting at the bottom.
+        const badges = [t.priority ?? 'no priority', t.due_date ? `due ${t.due_date}` : null, t.project?.name, t.pinned ? '★ critical' : null].filter(Boolean).join(', ')
+        return `${n != null ? `${n}. ` : '   '}[${shortRef ?? t.id}] ${t.text}  (${badges})  score: ${t._score}`
+      }
+      const out: string[] = []
+      if (inFlight.length) {
+        out.push(`▶ IN FLIGHT (${inFlight.length}) — already started, so not candidates for what to pick up next`)
+        out.push(...inFlight.map((t: any) => line(t)))
+        out.push('')
+        out.push(`■ NEXT UP (${next.length})`)
+      }
+      out.push(...next.map((t: any, i: number) => line(t, i + 1)))
+      if (withheldReference) out.push('', `(${withheldReference} task${withheldReference === 1 ? '' : 's'} tagged "reference" withheld from the ranking — call list_tasks to see them.)`)
+      if (!inFlight.length && !next.length) return `No rankable tasks.${withheldReference ? ` All ${withheldReference} open task${withheldReference === 1 ? ' is' : 's are'} tagged "reference".` : ''}`
+      return out.join('\n')
     }
 
     case 'resolve_reference': {
@@ -5178,12 +5238,19 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const task = await resolveTask(sb, userId, ref)
       if (task) {
         const project = await resolveProject(sb, userId, task.project_id)
+        // merge_task_as_duplicate records a DISTINCT outcome — status 'done' AND duplicate_of set —
+        // but nothing on the read side ever selected it, so a merged task resolved as a plain
+        // "done" and the reader concluded the work had shipped. The merge note lives only on the
+        // CANONICAL task, which means the direction actually travelled — arriving at the dead ID
+        // from an external reference — was the one with no signal. Forward-point instead.
+        const merged = await resolveMergeTarget(sb, userId, task)
         return JSON.stringify({
           type: 'task', id: task.id,
           short_id: project?.prefix ? `${project.prefix}-${task.short_id}` : task.short_id,
           text: task.text, status: task.status, flow_id: task.flow_id || null,
+          ...(merged ? { merged_into: merged, warning: 'MERGED as a duplicate — this ID is not live work. Its content was absorbed into the canonical task above; read that one for real status.' } : {}),
           project: project ? { id: project.id, prefix: project.prefix, name: project.name } : null,
-          next: 'get_task for full context, milestones, and I/O',
+          next: merged ? `get_task on ${merged.short_id ?? merged.id} — the canonical task` : 'get_task for full context, milestones, and I/O',
         })
       }
 
@@ -5284,6 +5351,14 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         `Created: ${formatStamp(full.created_at, tz)} | Last edited: ${formatStamp(full.updated_at, tz)}${agoLabel(full.updated_at) ? ` (${agoLabel(full.updated_at)})` : ''}`,
       ]
       if (branchName) lines.push(`Branch: ${branchName}`)
+      // A merged duplicate is closed with status 'done' AND duplicate_of set — a deliberately
+      // DISTINCT outcome from a plain 'done'. Nothing on the read side surfaced the difference, so
+      // "done" read as "shipped" when the real work was still open on the canonical task. Say so
+      // before anything else, because everything below describes an absorbed shell, not live work.
+      const mergedInto = await resolveMergeTarget(sb, userId, full)
+      if (mergedInto) {
+        lines.push(`\n⚠ MERGED DUPLICATE — this task is NOT live work. Its content was absorbed into ${mergedInto.short_id ?? mergedInto.id}${mergedInto.text ? ` ("${mergedInto.text}")` : ''}${mergedInto.status ? `, which is ${mergedInto.status}` : ''}. Its 'done' status records the merge, NOT that the work shipped. Read the canonical task for real status.`)
+      }
       // TDE-875: show it here too. A reader who opened the task can see the body, so this is not
       // load-bearing for them — but seeing the line they are about to make stale is what prompts
       // updating it, and the flag tells them the board is currently misrepresenting this task.
@@ -6113,9 +6188,17 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       section('◆ AWAITING YOUR REVIEW — judge escalated', needsReview.map((t: any) => `${ref(t)} — ${t.text}`))
       section('✎ PENDING GUIDANCE — a human left a steering note', guidance.map((g: any) => `${ref(byId.get(g.task_id))} — "${g.body}"`))
       section('⏳ AWAITING INPUT — an agent asked a question and is blocked', [...awaitingInput].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
-      section('⋯ STALE IN-PROGRESS — quiet for 2+ days', [...stale].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
+      // "quiet for 2+ days" read as "nobody touched this", which is NOT what is measured — the
+      // candidate set is built from open agent_sessions only. Say what the clock actually is.
+      section('⋯ STALE IN-PROGRESS — no agent-session activity for 2+ days', [...stale].map((tid) => `${ref(byId.get(tid))} — ${byId.get(tid)?.text ?? ''}`))
       section('⚠ OVERDUE', overdue.map((t: any) => `${ref(t)} — ${t.text} (due ${t.due_date})`))
-      if (lines.length === 1) return 'Nothing needs your attention right now — nothing marked critical, no ready-for-agent work, escalated reviews, pending guidance, blocked agents, stale work, or overdue tasks.'
+      // This empty state used to claim "no stale work" — a claim the code never evaluated. A task
+      // nobody ran an agent against has no session row and so can never go stale, however long it
+      // sits. One board returned the full all-clear while a human gate had blocked 28 flow steps
+      // for 22 days. The false negative runs in the expensive direction: told "nothing needs you",
+      // a person stops looking. Scope the claim to what was actually checked.
+      if (lines.length === 1) return 'Nothing needs your attention right now — nothing marked critical, no ready-for-agent work, escalated reviews, pending guidance, blocked agents, stale agent sessions, or overdue tasks.'
+        + '\n\nNOTE: staleness here is measured on AGENT-SESSION activity ONLY. A task nobody has ever run an agent against has no session row, so it is never checked — however long it has sat. This is not a statement that every task has been touched recently.'
       return lines.join('\n')
     }
 
