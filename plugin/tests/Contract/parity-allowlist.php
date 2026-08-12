@@ -23,45 +23,55 @@ declare(strict_types=1);
  *               core's InputSchemaValidator only enforces `required`, so
  *               undeclared arguments pass straight through and vanish.
  *   SEMANTIC  — the same call does something DIFFERENT here. These are the
- *               dangerous ones. There are THREE left: delete_environment
+ *               dangerous ones. There are FOUR left: delete_environment
  *               reassigns behind a gate that 409s instead of moving anything,
- *               get_task no longer auto-starts a task, and delete_group fails
+ *               get_task no longer auto-starts a task, delete_group fails
  *               SAFE (un-groups instead of the destructive delete_tasks:true
- *               the original also offers). move_task — the collision between
- *               the original's cross-project move and D1's within-project
- *               one — was FIXED in D1b Task 12c (a real port, not a waiver;
- *               see TasksApiHandler::moveToProject()), on top of
- *               delete_section and delete_project (both UNSAFE-direction:
- *               the identical call was a refusal on the original and
- *               irreversible data loss here) and the milestone
+ *               the original also offers), and get_ready_work ignores the
+ *               original's agent_ready gate entirely (WHOLE-BRANCH REVIEW
+ *               I2 — see that entry below for why it carries no
+ *               missing/extra property at all). move_task — the collision
+ *               between the original's cross-project move and D1's
+ *               within-project one — was FIXED in D1b Task 12c (a real
+ *               port, not a waiver; see TasksApiHandler::moveToProject()),
+ *               on top of delete_section and delete_project (both
+ *               UNSAFE-direction: the identical call was a refusal on the
+ *               original and irreversible data loss here) and the milestone
  *               `index` trio (WRONG-ROW: an id-first resolver silently
  *               mutated the wrong milestone) — both FIXED in D1b Task 12b.
  *               See git history for every closed entry.
  *
  * EVERY SEMANTIC ENTRY MUST CARRY `severity => 'semantic'` AND `dischargedBy`,
  * and the test enforces both. The reason is an escape hatch found in review:
- * every SEMANTIC divergence here is expressed as a `missing` property, so
- * declaring that property on the route schema would make the entry stale, force
- * its removal, and turn the build green — with the behaviour unchanged and now
+ * every SEMANTIC divergence used to be expressed as a `missing` property
+ * (get_ready_work, added by WHOLE-BRANCH REVIEW I2, is the one exception —
+ * see its own entry for why it names no property at all), so declaring that
+ * property on the route schema would make the entry stale, force its
+ * removal, and turn the build green — with the behaviour unchanged and now
  * MORE dangerous, because the caller believes the flag is honoured where today
  * it at least fails visibly as "not accepted" (core drops undeclared
  * arguments). So for a semantic entry the rule is inverted: declaring the
  * property FAILS unless the behavioural test named in `dischargedBy` actually
  * exists in the suite. Behaviour first, schema second.
  *
- * 18 entries waiving 56 individual divergences across the 36 shared tools,
- * after D1b Task 12c closed move_task's SEMANTIC entry outright (a real port
- * — see moveTask()/moveToProject() — not a waiver) and opened one new
- * ADDITIVE entry for move_task_to_group's own sort_order (rehoming the
- * reordering capability move_task used to own, since the live original
- * exposes no MCP reordering tool at all) — a net-zero change in entry COUNT
- * that still shrank total divergences by 4. D1b Task 12b fixed four EARLIER
- * routes rather than waiving them — delete_section, delete_project, the
- * milestone `index` trio, and list_groups/create_group's missing project_id
- * — closing 4 entries outright (delete_section, delete_project, list_groups,
+ * 19 entries waiving 56 individual divergences across the 36 shared tools.
+ * D1b Task 12c closed move_task's SEMANTIC entry outright (a real port — see
+ * moveTask()/moveToProject() — not a waiver) and opened one new ADDITIVE
+ * entry for move_task_to_group's own sort_order (rehoming the reordering
+ * capability move_task used to own, since the live original exposes no MCP
+ * reordering tool at all) — a net-zero change in entry COUNT that still
+ * shrank total divergences by 4. D1b Task 12b fixed four EARLIER routes
+ * rather than waiving them — delete_section, delete_project, the milestone
+ * `index` trio, and list_groups/create_group's missing project_id — closing
+ * 4 entries outright (delete_section, delete_project, list_groups,
  * create_group) and dropping the milestone trio's severity from semantic to
  * a plain ADDITIVE remainder (milestone_id itself), on top of the earlier
- * add_milestone fix (also fixed rather than waived — see its entry).
+ * add_milestone fix (also fixed rather than waived — see its entry). That
+ * left 18 entries / 56 divergences / 3 semantic; WHOLE-BRANCH REVIEW I2 then
+ * added get_ready_work as a 19th entry and 4th semantic one, waiving ZERO
+ * additional individual divergences — its argument shape already matches
+ * the original's exactly, so the 56 figure is unchanged even though the
+ * entry count is not. 19 entries / 56 divergences / 4 semantic is current.
  *
  * Divergence keys:
  *   missing      — property the original accepts and we do not
@@ -137,6 +147,48 @@ return [
         'reason' => 'SEMANTIC/fail-safe: we implement the original\'s DEFAULT (un-group) and omit its destructive '
             . 'delete_tasks:true option, so that flag is silently ignored and tasks survive. section_id is ADDITIVE '
             . 'for slug disambiguation, which the original cannot do.',
+    ],
+
+    'get_ready_work' => [
+        // WHOLE-BRANCH REVIEW I2. SEMANTIC, and the odd one out in this file:
+        // every OTHER semantic entry hangs off a `missing`/`extra` property so
+        // OriginalContractParityTest's property-name diff has something to
+        // waive. This one has NOTHING to hang on — get_ready_work's own
+        // argument shape (just `project_id`, optional, on both sides) is
+        // already byte-for-byte identical to the original's. The divergence
+        // is entirely in what the ROUTE DOES with a call it accepts, not in
+        // the call's shape: the original's ready queue is tasks that are BOTH
+        // agent_ready AND pending — a human (or another agent) explicitly
+        // hands a task to the agent, typically via update_task's own
+        // agent_ready flag (see that tool's own DEFERRED entry above), before
+        // it ever appears here. This backend has no agent_ready column at
+        // all, so getReadyWork() ranks and returns EVERY non-done task,
+        // silently widening what an autonomous caller believes it was
+        // explicitly cleared to pick up.
+        //
+        // No `missing`/`extra`/`required`/enum key is set: there is no
+        // property whose presence or absence would make this visible to
+        // testEverySharedToolMatchesTheOriginalsArgumentShape(), so nothing
+        // here can go stale the way the schema-hooked entries can. It exists
+        // solely so the divergence is RECORDED — see this file's own opening
+        // rule that an unlisted divergence fails the build precisely because
+        // an entry is supposed to be the alternative to "invisible", not a
+        // substitute for it. dischargedBy names the test that has to exist
+        // BEFORE this entry may be removed: implementing the agent_ready gate
+        // without that test landing first would be exactly the kind of
+        // silent, unproven fix this file's staleness rule exists to catch on
+        // every OTHER semantic entry, even though the mechanical stale-check
+        // itself cannot enforce it here.
+        'severity' => 'semantic',
+        'dischargedBy' => 'testGetReadyWorkOnlyReturnsTasksMarkedAgentReady',
+        'reason' => 'SEMANTIC: the original\'s ready queue is tasks that are agent_ready AND pending; a human (or '
+            . 'another agent) must explicitly hand a task to the agent before get_ready_work surfaces it. This '
+            . 'backend has no agent_ready column, so getReadyWork() ranks and returns every non-done task '
+            . 'regardless, showing an autonomous caller strictly more work than the original ever would have. No '
+            . 'missing/extra property is waived because get_ready_work\'s own argument shape already matches the '
+            . 'original exactly (agent_ready lives on update_task\'s schema, not this route\'s) — the property-name '
+            . 'diff this test performs cannot see a purely behavioural divergence, which is exactly why this entry '
+            . 'exists.',
     ],
 
     // ── DEFERRED ─────────────────────────────────────────────────────────────
