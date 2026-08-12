@@ -858,12 +858,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     // within-project capability now lives on move_task_to_group
                     // (which gained sort_order for exactly this reason).
                     'description' => 'Move a task to a DIFFERENT project. Reassigns the short ID into the target '
-                        . 'project\'s own sequence; preserves text, detail, priority, status, pinned and due_date. '
-                        . 'group_id is always cleared -- a group belongs to a section in the SOURCE project, so '
-                        . 'nothing about it can travel. This backend has no flows or cross-project I/O edges at all, '
-                        . 'so unlike the original there is nothing to unlink or drop on that front. For a '
-                        . 'SAME-project move (section, group, or board order) use update_task or '
-                        . 'move_task_to_group instead.',
+                        . 'project\'s own sequence; preserves text, detail, priority, status, pinned, due_date and '
+                        . 'completed_at. group_id is always cleared -- a group belongs to a section in the SOURCE '
+                        . 'project, so nothing about it can travel. This backend has no flows or cross-project I/O '
+                        . 'edges at all, so unlike the original there is nothing to unlink or drop on that front. '
+                        . 'target_project_id resolving to the task\'s OWN current project is rejected (422) rather '
+                        . 'than silently renumbering/un-grouping it -- for a SAME-project move (section, group, or '
+                        . 'board order) use update_task or move_task_to_group instead.',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
@@ -884,6 +885,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         200 => ['description' => 'The moved task, plus previousShortId/newShortId, droppedGroup and landedInBacklog'],
                         400 => ['description' => 'task_id/target_project_id/target_section_id looks like a short id but is malformed, or target_project_id is missing'],
                         404 => ['description' => 'Task or target project not found in the caller\'s tenant or OU scope, or the target project has no Backlog section'],
+                        422 => ['description' => 'target_project_id resolves to the task\'s own current project -- use update_task or move_task_to_group for a same-project move'],
                     ],
                 ],
             ],
@@ -904,7 +906,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                             'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
                             'group_id' => [
                                 'type' => ['string', 'null'],
-                                'description' => 'Group UUID, id, or slug. Omitting this key un-groups the task, exactly like passing null explicitly — there is no "leave unchanged" form.',
+                                'description' => 'Group UUID, id, or slug to set. Pass null explicitly to UN-GROUP the task. OMITTING '
+                                    . 'this key entirely leaves its group membership UNCHANGED -- this is what makes a sort_order-only '
+                                    . 'reorder call safe: it never touches group_id at all.',
                             ],
                             'section_id' => [
                                 'type' => 'string',
@@ -914,14 +918,16 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                                 'type' => 'integer',
                                 'description' => 'ADDITIVE: explicit board ordering within the task\'s section. The live original exposes '
                                     . 'NO reordering tool over MCP at all (its drag-and-drop is a web-UI concern served over its own '
-                                    . 'REST layer) -- D2\'s own drag-and-drop frontend needs this here. Optional; omitting it leaves '
-                                    . 'sort_order unchanged.',
+                                    . 'REST layer) -- D2\'s own drag-and-drop frontend needs this here. Optional: omitting the key, or '
+                                    . 'passing it as null, both leave sort_order unchanged (this is what lets a pure reorder call, e.g. '
+                                    . '{task_id, sort_order}, leave group_id alone too -- see group_id\'s own description). Any other '
+                                    . 'value must be an integer or the call 400s.',
                             ],
                         ],
                     ],
                     'responses' => [
                         200 => ['description' => 'The task, in its new group/section/position'],
-                        400 => ['description' => 'task_id, group_id, or section_id looks like a short id but is malformed'],
+                        400 => ['description' => 'task_id, group_id, or section_id looks like a short id but is malformed, or sort_order is not an integer'],
                         404 => ['description' => 'Task, group, or section not found in the caller\'s tenant or OU scope'],
                         422 => ['description' => 'section_id does not belong to the task\'s own project, or group_id does not belong to the target section'],
                     ],
