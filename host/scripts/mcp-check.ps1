@@ -45,10 +45,60 @@ if (-not (Test-Path -Path $snapshot)) {
     Write-Error "MCP tool surface check COULD NOT RUN (infrastructure/setup problem, NOT drift): snapshot not found at $snapshot" -ErrorAction Continue
     exit 2
 }
-$snap = Get-Content -Path $snapshot -Raw
+# D1b Task 14 FIX (review round 2): mcp-tools.ps1 now writes this file
+# WITHOUT a BOM (strict JSON.parse elsewhere rejects one). Without an
+# explicit -Encoding here, Windows PowerShell 5.1's Get-Content falls back
+# to the system codepage for a BOM-less file, silently mangling every
+# non-ASCII character (an em dash round-tripped as "â€”") -- caught by this
+# task's own new tool-level drift diff reporting a false "changed" for
+# every tool whose description has one. -Encoding UTF8 makes the read
+# explicit rather than relying on BOM sniffing.
+$snap = Get-Content -Path $snapshot -Raw -Encoding UTF8
 
 if ($live.Trim() -ne $snap.Trim()) {
-    Write-Error 'MCP tool surface DRIFTED from docs/mcp-tool-surface.json' -ErrorAction Continue
+    # D1b Task 14 FIX (review round 2): the brief's own acceptance bar is
+    # "FAIL naming the drift" -- this used to satisfy that only via a manual
+    # follow-up probe, not the check itself. Diff the two tool lists by name
+    # (added/removed) and, for names present in both, by description/
+    # inputSchema (a renamed property, a widened enum, a changed required
+    # list) so the failure message says WHAT changed, not just THAT it did.
+    $liveTools = $null
+    $snapTools = $null
+    try {
+        $liveTools = $live | ConvertFrom-Json
+        $snapTools = $snap | ConvertFrom-Json
+    } catch {
+        # Malformed JSON on either side -- fall through to the generic
+        # message below rather than letting a parse error masquerade as
+        # "could not run" (this IS drift; the transport returned something).
+    }
+
+    if ($null -ne $liveTools -and $null -ne $snapTools) {
+        $liveByName = @{}
+        foreach ($t in $liveTools) { $liveByName[$t.name] = $t }
+        $snapByName = @{}
+        foreach ($t in $snapTools) { $snapByName[$t.name] = $t }
+
+        $added   = @($liveByName.Keys | Where-Object { -not $snapByName.ContainsKey($_) } | Sort-Object)
+        $removed = @($snapByName.Keys | Where-Object { -not $liveByName.ContainsKey($_) } | Sort-Object)
+        $changed = @(
+            $liveByName.Keys | Where-Object { $snapByName.ContainsKey($_) } | Sort-Object | Where-Object {
+                ($liveByName[$_] | ConvertTo-Json -Depth 12 -Compress) -ne
+                ($snapByName[$_] | ConvertTo-Json -Depth 12 -Compress)
+            }
+        )
+
+        if ($added.Count -gt 0)   { Write-Error "MCP tool surface DRIFTED: ADDED tool(s) not in the snapshot: $($added -join ', ')" -ErrorAction Continue }
+        if ($removed.Count -gt 0) { Write-Error "MCP tool surface DRIFTED: MISSING tool(s) present in the snapshot but not live: $($removed -join ', ')" -ErrorAction Continue }
+        if ($changed.Count -gt 0) { Write-Error "MCP tool surface DRIFTED: CHANGED tool(s) (description/inputSchema differs): $($changed -join ', ')" -ErrorAction Continue }
+        if ($added.Count -eq 0 -and $removed.Count -eq 0 -and $changed.Count -eq 0) {
+            # Only whitespace/ordering differs from the byte-level compare above.
+            Write-Error 'MCP tool surface DRIFTED from docs/mcp-tool-surface.json (formatting/whitespace only -- no tool name or schema differs)' -ErrorAction Continue
+        }
+    } else {
+        Write-Error 'MCP tool surface DRIFTED from docs/mcp-tool-surface.json (unable to parse one side as JSON to name the drift -- see raw output above)' -ErrorAction Continue
+    }
+
     exit 1
 }
 

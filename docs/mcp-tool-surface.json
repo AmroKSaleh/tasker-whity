@@ -1,4 +1,4 @@
-﻿[
+[
     {
         "name":  "__init_tasker_session",
         "description":  "First call of any Tasker session: preferences plus the directive playbook",

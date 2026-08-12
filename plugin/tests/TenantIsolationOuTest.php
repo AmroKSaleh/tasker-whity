@@ -3499,6 +3499,25 @@ final class TenantIsolationOuTest extends TestCase
         self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, 2, null, null));
     }
 
+    /**
+     * D1b Task 14 FIX (review round 2): testResolveProjectFallsBackToTheDefaultOnlyWhenInScope
+     * above re-validates a stale default across an OU boundary, but both of
+     * its fixtures live in tenant 7 throughout -- it never varies the
+     * TENANT. Criterion 5 claims the resolver cannot cross a tenant OR OU
+     * boundary for any of its identifier forms, including the empty/default
+     * form; this was asserted by inspection (projectByColumn() binds
+     * tenant_id unconditionally) rather than proven by a test that actually
+     * crosses tenants. Closes that gap directly: a caller in tenant 7 whose
+     * stored default project id happens to number-match a real project that
+     * belongs to tenant 9 must get a miss, not tenant 9's project.
+     */
+    public function testResolveProjectDefaultDoesNotCrossATenantBoundary(): void
+    {
+        $foreignDefault = $this->makeProjectDirect(9, null, 'Foreign Default Project');
+
+        self::assertNull(IdentifierResolver::resolveProject($this->pdo, 7, null, null, $foreignDefault));
+    }
+
     public function testResolveTaskAcceptsAShortIdAndRefusesItAcrossAnOuBoundary(): void
     {
         $this->makeOu(1, 7, null);
@@ -3516,6 +3535,33 @@ final class TenantIsolationOuTest extends TestCase
 
         // A caller in sibling OU 2 must not, because the PROJECT is out of scope.
         self::assertNull(IdentifierResolver::resolveTask($this->pdo, 7, 2, 'SIB-31'));
+    }
+
+    /**
+     * D1b Task 14 FIX (review round 2): the sibling test above proves the OU
+     * boundary for the short_id form but keeps the caller and the hidden
+     * task in the SAME tenant throughout, so the resolver's tenant_id
+     * binding (IdentifierResolver::resolveTask()'s task SELECT and the
+     * projectByColumn() prefix lookup it depends on) was asserted by
+     * inspection, not by a test that actually varies the tenant. Closes
+     * that gap: a short_id that resolves cleanly for its own tenant must
+     * still miss for a caller in a DIFFERENT tenant, even with NO OU
+     * restriction at all -- the most permissive case, so if tenant scoping
+     * ever broke, nothing else in the suite would catch it for this form.
+     */
+    public function testResolveTaskRefusesAShortIdAcrossATenantBoundary(): void
+    {
+        $foreign = $this->makeProjectDirect(9, null, 'Foreign Short Id Project');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'FSP' WHERE id = {$foreign}");
+        $sectionId = $this->makeSectionDirect(9, $foreign);
+        $taskId    = $this->makeTaskDirect(9, $foreign, $sectionId, 'Foreign tenant task');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$taskId}");
+
+        // Its own tenant resolves it fine.
+        self::assertSame($taskId, IdentifierResolver::resolveTask($this->pdo, 9, null, 'FSP-1'));
+
+        // Tenant 7, unrestricted by OU, must NOT reach tenant 9's task by short id.
+        self::assertNull(IdentifierResolver::resolveTask($this->pdo, 7, null, 'FSP-1'));
     }
 
     // Task review finding #1: resolveSection()/resolveGroup() (via

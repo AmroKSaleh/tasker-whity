@@ -137,6 +137,28 @@ services:
       - "3010:3000"
     volumes:
       - ./.core:/app
+      # D1b Task 14 FIX (root-caused in review): this service's `npm ci
+      # --include=dev` installs against host/.core's real npm workspaces
+      # (package.json: "web", "packages/*", "templates/*"). Without these
+      # shadows, that install writes node_modules straight through the bind
+      # mount above onto the HOST'S disk — every `host:up`, not once. On
+      # Windows, some of those trees (observed: root, web, packages/ui,
+      # templates/tauri-desktop) contain POSIX symlinks under node_modules/.bin
+      # that Docker Desktop's build-context file sync cannot transfer
+      # ("invalid file request ... node_modules/.bin/vite"), which then breaks
+      # the bootstrap/frankenphp `context: ./.core` BUILD the next time either
+      # image needs rebuilding — a fresh clone with no image cache yet, or any
+      # `--build` after a Dockerfile change. Named volumes here mean npm's
+      # writes land in Docker-managed storage instead of the bind-mounted
+      # checkout, so host/.core's on-disk tree never grows these trees at all.
+      # One shadow per workspace root that has ever been observed getting its
+      # own nested node_modules (npm's dedupe algorithm mostly hoists to the
+      # top-level one, which is also shadowed); a workspace added later that
+      # needs its own nested tree would need a new line here too.
+      - tasker_admin_node_modules:/app/node_modules
+      - tasker_admin_web_node_modules:/app/web/node_modules
+      - tasker_admin_packages_ui_node_modules:/app/packages/ui/node_modules
+      - tasker_admin_templates_tauri_desktop_node_modules:/app/templates/tauri-desktop/node_modules
     command:
       - sh
       - -c
@@ -149,3 +171,7 @@ services:
 
 volumes:
   tasker_pgdata:
+  tasker_admin_node_modules:
+  tasker_admin_web_node_modules:
+  tasker_admin_packages_ui_node_modules:
+  tasker_admin_templates_tauri_desktop_node_modules:

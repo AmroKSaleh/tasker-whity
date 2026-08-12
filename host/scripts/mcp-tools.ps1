@@ -105,29 +105,35 @@ try {
         throw "MCP tools/list failed: [$($response.error.code)] $($response.error.message)"
     }
 
-    # Kept in sync with every 'operationId' declared in TaskerPlugin.php's
-    # route table — verify with:
-    #   git grep -oE "'operationId' => '[^']+'" plugin/TaskerPlugin.php |
-    #     sed "s/.*=> '//;s/'$//" | sort -u
-    # and diff the result against this array. Task 5's review caught this
-    # list silently missing two Task-3 tools (__init_tasker_session,
-    # set_default_project) that predated it; nothing enforces this list
-    # automatically, so re-run that comparison whenever a task adds a route.
-    $taskerToolNames = @(
-        '__init_tasker_session', 'set_default_project',
-        'list_pings', 'create_ping', 'tag_ping',
-        'list_environments', 'create_environment', 'rename_environment', 'delete_environment',
-        'list_projects', 'create_project', 'update_project', 'delete_project', 'get_project',
-        'list_sections', 'create_section', 'update_section', 'rename_section', 'delete_section',
-        'list_groups', 'create_group', 'update_group', 'rename_group', 'delete_group',
-        'list_tasks', 'create_task', 'update_task', 'move_task', 'move_task_to_group', 'delete_task',
-        'complete_task', 'uncomplete_task', 'pin_task', 'unpin_task', 'tag_task', 'get_ready_work',
-        'rank_tasks', 'get_my_attention',
-        'list_milestones', 'add_milestone', 'complete_milestone', 'uncomplete_milestone', 'update_milestone', 'delete_milestone',
-        'get_board', 'get_task',
-        'get_task_discussion', 'set_task_discussion',
-        'update_project_context'
-    )
+    # D1b Task 14 FIX (review round 2): this used to be a hand-maintained
+    # array, kept in sync with 'operationId' declarations by manual
+    # discipline alone. That failed twice already (Task 5's review caught it
+    # missing __init_tasker_session/set_default_project; the whole point of
+    # this comment used to be "re-run this grep by hand whenever a route is
+    # added"). Worse, a hand-maintained ALLOWLIST-style filter makes an
+    # ADDED tool invisible rather than loud: if a future task adds a 50th
+    # route and forgets to add its name here, tools/list's response still
+    # contains it, but Where-Object silently drops it before mcp-check.ps1
+    # ever sees it — so the "live" surface stays 49-shaped and compares
+    # equal to a now-stale 49-tool snapshot. A rename or removal is caught
+    # (the name that vanishes from the filtered set changes the JSON), but
+    # an addition never is. Deriving the name list from the same source of
+    # truth TaskerPlugin.php's route table IS closes that gap by
+    # construction: a new operationId shows up here automatically, so it
+    # shows up in the live JSON, so it diffs against the committed snapshot
+    # like any other real change.
+    $pluginFile = Join-Path $repoRoot 'plugin\TaskerPlugin.php'
+    if (-not (Test-Path $pluginFile)) {
+        throw "Cannot derive the Tasker tool-name filter: $pluginFile not found."
+    }
+    $pluginSource = Get-Content -Path $pluginFile -Raw
+    $taskerToolNames = [regex]::Matches($pluginSource, "'operationId'\s*=>\s*'([^']+)'") |
+        ForEach-Object { $_.Groups[1].Value } |
+        Sort-Object -Unique
+    if ($taskerToolNames.Count -eq 0) {
+        throw "Derived zero operationIds from $pluginFile -- regex or file contents changed unexpectedly."
+    }
+
     $tools = $response.result.tools |
         Where-Object { $taskerToolNames -contains $_.name } |
         Sort-Object name |
@@ -143,7 +149,14 @@ try {
 
     if ($Write) {
         $target = Join-Path $repoRoot 'docs\mcp-tool-surface.json'
-        Set-Content -Path $target -Value $json -Encoding UTF8
+        # D1b Task 14 FIX (review round 2): PowerShell 5.1's `-Encoding UTF8`
+        # (on Set-Content/Out-File) always prepends a BOM -- harmless to this
+        # script's own string comparisons, but a strict JSON.parse (every
+        # other language/tool that reads this file) rejects a BOM outright.
+        # UTF8Encoding($false) is the actual "no preamble" incantation; there
+        # is no bare "UTF8NoBOM" -Encoding value in Windows PowerShell 5.1.
+        $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+        [System.IO.File]::WriteAllText($target, $json, $utf8NoBom)
         Write-Host "Wrote $target"
     } else {
         Write-Output $json
