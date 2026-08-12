@@ -9,6 +9,7 @@ use PHPUnit\Framework\TestCase;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\TaskerPlugin;
 use Whity\Sdk\Http\Request;
+use Whity\Sdk\Http\Response;
 use Whity\Sdk\PluginInterface;
 use Whity\Sdk\PluginRequirementsInterface;
 
@@ -1331,6 +1332,69 @@ final class TaskerPluginTest extends TestCase
         self::assertNull($result['milestoneId']);
     }
 
+    private function invokeMilestoneTargetError(array $target): ?Response
+    {
+        $plugin = new TaskerPlugin();
+        $method = new \ReflectionMethod(TaskerPlugin::class, 'milestoneTargetError');
+        $method->setAccessible(true);
+
+        /** @var Response|null $result */
+        $result = $method->invoke($plugin, $target);
+
+        return $result;
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW I7: milestoneTargetError() is the single mapping
+     * from resolveMilestoneTarget()'s status to an HTTP response for all five
+     * milestone MUTATION routes (complete_milestone, uncomplete_milestone,
+     * delete_milestone, update_milestone, add_milestone). Every status it can
+     * receive is already produced and asserted by the
+     * testResolveMilestoneTarget*() tests above and exercised end-to-end by
+     * the route-level tests elsewhere in this suite — but nothing, until now,
+     * asserted WHICH CODE each status maps to. Swapping 400 and 404 in the
+     * match arms (or reordering 'task_not_found' and 'milestone_not_found')
+     * would still leave every one of those 351+ other tests green, because
+     * they each exercise only ONE status at a time and mostly just check
+     * "some 4xx came back" or assert on the body message, not the numeric
+     * code paired with the RIGHT status. This asserts the whole match
+     * exhaustively, one status per row, so that swap is no longer invisible.
+     */
+    public function testMilestoneTargetErrorMapsEveryStatusToItsOwnCode(): void
+    {
+        $cases = [
+            'malformed_task' => ['code' => 400, 'needle' => 'task_id looks like a short id but is malformed'],
+            'task_not_found' => ['code' => 404, 'needle' => 'Task not found'],
+            'malformed_milestone' => ['code' => 400, 'needle' => 'milestone_id looks like a short id but is malformed'],
+            'milestone_not_found' => ['code' => 404, 'needle' => 'Milestone not found'],
+        ];
+
+        foreach ($cases as $status => $expected) {
+            $response = $this->invokeMilestoneTargetError(['status' => $status, 'taskId' => null, 'milestoneId' => null]);
+
+            self::assertNotNull($response, "{$status} must produce a Response, not null");
+            self::assertSame($expected['code'], $response->getStatusCode(), "{$status} must map to {$expected['code']}");
+            self::assertStringContainsString(
+                $expected['needle'],
+                json_decode($response->getBody(), true)['error'],
+                "{$status}'s message must name what actually went wrong, not a generic one shared with another status"
+            );
+        }
+
+        // 'resolved' is the one status that means "proceed" -- the caller
+        // must get null, not a Response it would otherwise return early on.
+        self::assertNull(
+            $this->invokeMilestoneTargetError(['status' => 'resolved', 'taskId' => 55, 'milestoneId' => 7]),
+            'resolved must map to null so the five milestone routes proceed instead of erroring'
+        );
+
+        // The four error codes must be genuinely distinguishable from each
+        // other -- this would catch e.g. malformed_task and malformed_milestone
+        // both silently mapping to the same code the same way.
+        $codes = array_map(static fn (array $c): int => $c['code'], $cases);
+        self::assertSame([400, 404, 400, 404], array_values($codes), 'malformed_* must be 400 and *_not_found must be 404, not swapped');
+    }
+
     /**
      * D1b Task 9 brief resolution #8: update_project_context's `context`
      * must be a genuine JSON OBJECT — a scalar, a string, or a JSON array
@@ -1731,5 +1795,76 @@ final class TaskerPluginTest extends TestCase
         }
 
         return array_values(array_unique($keys));
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW I3: nine READ routes each declared only [200, 404]
+     * in their own `responses` while their handlers already 400 a malformed
+     * short id — the same gap this class's own testEveryRouteGuardsEvery...()
+     * docblock names: "another task added an undeclared-400 to twelve
+     * mutation routes and stopped before the reads." The handlers were never
+     * wrong; only the schema was silent about a code path a caller can
+     * genuinely hit ("TDE-abc" for a numeric-looking-but-malformed short id),
+     * which matters here specifically because
+     * OriginalContractParityTest/mcp-tools.ps1's derived surface is built
+     * FROM these `responses` arrays.
+     *
+     * rename_section/rename_group are asserted here too, but only to prove
+     * they ALREADY declare 400 — investigating I3's own suggestion to "fold
+     * them in" found both routes (aliases of update_section/update_group)
+     * already carrying it, so there was nothing to change on those two.
+     *
+     * @return array<string, string> operationId => path, for error messages
+     */
+    private static function operationIdToResponses(): array
+    {
+        $routes = (new TaskerPlugin())->getRoutes();
+
+        $byOperationId = [];
+        foreach ($routes as $route) {
+            $schema = is_array($route['schema'] ?? null) ? $route['schema'] : [];
+            $operationId = is_string($schema['operationId'] ?? null) ? $schema['operationId'] : null;
+            if ($operationId === null) {
+                continue;
+            }
+            $responses = is_array($schema['responses'] ?? null) ? $schema['responses'] : [];
+            $byOperationId[$operationId] = array_keys($responses);
+        }
+
+        return $byOperationId;
+    }
+
+    public function testNineReadRoutesNowDeclare400ForAMalformedShortId(): void
+    {
+        $responses = self::operationIdToResponses();
+
+        $expectedToDeclare400 = [
+            'get_project', 'list_sections', 'list_groups', 'list_tasks',
+            'get_ready_work', 'get_board', 'get_task', 'list_milestones',
+            'get_task_discussion',
+        ];
+
+        $missing = [];
+        foreach ($expectedToDeclare400 as $operationId) {
+            self::assertArrayHasKey($operationId, $responses, "{$operationId} must exist in getRoutes()");
+            if (!in_array(400, $responses[$operationId], true)) {
+                $missing[] = $operationId;
+            }
+        }
+
+        self::assertSame(
+            [],
+            $missing,
+            'these read routes 400 a malformed short id in their handler but do not declare it: '
+                . implode(', ', $missing)
+        );
+    }
+
+    public function testRenameSectionAndRenameGroupAlreadyDeclare400(): void
+    {
+        $responses = self::operationIdToResponses();
+
+        self::assertContains(400, $responses['rename_section'], 'rename_section already declares 400 -- verifying, not fixing');
+        self::assertContains(400, $responses['rename_group'], 'rename_group already declares 400 -- verifying, not fixing');
     }
 }
