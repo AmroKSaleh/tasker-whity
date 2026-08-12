@@ -80,7 +80,15 @@ jobs:
 
       - name: PHPStan
         working-directory: plugin
-        run: php vendor/bin/phpstan analyse
+        # --memory-limit=512M is REQUIRED, not tuning (whole-branch review
+        # finding B1): this step used to crash outright in this exact image —
+        # "PHPStan process crashed because it reached configured PHP memory
+        # limit: 128M", exit 1 — because php:8.4-cli's default memory_limit is
+        # 128M and a level-6 analysis of this plugin needs more. PHPStan's
+        # limit is a CLI flag only (phpstan.neon has no equivalent parameter),
+        # so it is repeated here and in host/scripts/plugin-stan.ps1 so
+        # `npm run plugin:stan` matches CI without a manual -d override.
+        run: php vendor/bin/phpstan analyse --memory-limit=512M
 
   app:
     runs-on: ubuntu-latest
