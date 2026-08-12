@@ -129,6 +129,14 @@ final class TaskDiscussionsApiHandler
      * no ou_id column, so this joins up to tasker_projects (the only table
      * that does) and applies {@see OuScopeResolver::whereFragment()} there —
      * the same static-SQL-template pattern used throughout this fix.
+     *
+     * D1b Task 13 FIX: this join used to bind tenant_id on tasker_tasks only,
+     * never on tasker_projects — a divergence from
+     * {@see \Tasker\Api\TasksApiHandler::findVisible()}'s own both-sides
+     * convention (this codebase's standard; see that method's own doc). Not
+     * reachable through any route today (no route can create a cross-tenant
+     * task->project link), but fixed here as the natural moment since this
+     * task is already touching every sibling join.
      */
     private function taskVisible(int $tenantId, ?int $callerOuId, int $taskId): bool
     {
@@ -138,10 +146,11 @@ final class TaskDiscussionsApiHandler
         $stmt = $this->db->prepare(
             "SELECT 1 FROM tasker_tasks t
              JOIN tasker_projects p ON p.id = t.project_id
-             WHERE t.id = :id AND t.tenant_id = :tenant_id AND {$ouClause}"
+             WHERE t.id = :id AND t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
         );
         $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
         $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
         $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
         $stmt->execute();

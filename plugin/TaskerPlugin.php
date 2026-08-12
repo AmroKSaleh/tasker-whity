@@ -351,6 +351,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         201 => ['description' => 'The created project'],
                         400 => ['description' => 'name missing/empty/too long, or prefix malformed'],
+                        409 => ['description' => 'A project with this name already exists in the tenant'],
                         422 => ['description' => 'environment_id is outside the caller\'s scope'],
                     ],
                 ],
@@ -544,7 +545,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The updated section'],
                         400 => ['description' => 'A supplied field is invalid'],
-                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -569,7 +570,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The renamed section'],
-                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -604,7 +605,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
-                        404 => ['description' => 'Section not found in the caller\'s tenant'],
+                        404 => ['description' => 'Section not found in the caller\'s tenant or OU scope'],
                         409 => ['description' => 'Cannot delete a project\'s last remaining section, or the section '
                             . 'still has tasks/groups and delete_tasks was not true'],
                     ],
@@ -703,7 +704,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The updated group'],
                         400 => ['description' => 'A supplied field is invalid'],
-                        404 => ['description' => 'Group not found in the caller\'s tenant'],
+                        404 => ['description' => 'Group not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -728,7 +729,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The renamed group'],
-                        404 => ['description' => 'Group not found in the caller\'s tenant'],
+                        404 => ['description' => 'Group not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -752,7 +753,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
-                        404 => ['description' => 'Group not found in the caller\'s tenant'],
+                        404 => ['description' => 'Group not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -836,7 +837,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The updated task'],
                         400 => ['description' => 'text empty/too long, priority invalid, or status not one of pending/in_progress/done'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -952,7 +953,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -975,7 +976,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The completed task'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -998,7 +999,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The reopened task'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1021,7 +1022,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The pinned task'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1044,7 +1045,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The unpinned task'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1069,7 +1070,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         201 => ['description' => 'Tag attached'],
                         400 => ['description' => 'tag_id missing or not a positive integer'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1278,7 +1279,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The completed milestone'],
-                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1303,7 +1304,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The reopened milestone'],
-                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1332,7 +1333,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         200 => ['description' => 'The updated milestone'],
                         400 => ['description' => 'summary empty or too long'],
-                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1357,7 +1358,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
-                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task or milestone not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1376,7 +1377,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The discussion (empty shape if none yet)'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1401,7 +1402,8 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The saved discussion'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        400 => ['description' => 'Request body must be a JSON object, reason must be a string, or messages must be an array'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -2295,7 +2297,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Section not found', 404);
         }
 
-        return (new SectionsApiHandler($pdo))->update($tenantId, $sectionId, $request->getBody());
+        return (new SectionsApiHandler($pdo))->update($tenantId, $ou['ouId'], $sectionId, $request->getBody());
     }
 
     /**
@@ -2355,7 +2357,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
         $deleteTasks = $this->paramBool($request, 'delete_tasks', false);
 
-        return (new SectionsApiHandler($pdo))->delete($tenantId, $sectionId, $deleteTasks);
+        return (new SectionsApiHandler($pdo))->delete($tenantId, $ou['ouId'], $sectionId, $deleteTasks);
     }
 
     /**
@@ -2530,7 +2532,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Group not found', 404);
         }
 
-        return (new GroupsApiHandler($pdo))->update($tenantId, $groupId, $request->getBody());
+        return (new GroupsApiHandler($pdo))->update($tenantId, $ou['ouId'], $groupId, $request->getBody());
     }
 
     /**
@@ -2578,7 +2580,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Group not found', 404);
         }
 
-        return (new GroupsApiHandler($pdo))->delete($tenantId, $groupId);
+        return (new GroupsApiHandler($pdo))->delete($tenantId, $ou['ouId'], $groupId);
     }
 
     /**
@@ -2761,7 +2763,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->update($tenantId, $taskId, $request->getBody());
+        return (new TasksApiHandler($pdo))->update($tenantId, $ou['ouId'], $taskId, $request->getBody());
     }
 
     /**
@@ -2997,7 +2999,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->delete($tenantId, $taskId);
+        return (new TasksApiHandler($pdo))->delete($tenantId, $ou['ouId'], $taskId);
     }
 
     /**
@@ -3028,7 +3030,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->complete($tenantId, $taskId);
+        return (new TasksApiHandler($pdo))->complete($tenantId, $ou['ouId'], $taskId);
     }
 
     /**
@@ -3059,7 +3061,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->uncomplete($tenantId, $taskId);
+        return (new TasksApiHandler($pdo))->uncomplete($tenantId, $ou['ouId'], $taskId);
     }
 
     /**
@@ -3090,7 +3092,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->pin($tenantId, $taskId);
+        return (new TasksApiHandler($pdo))->pin($tenantId, $ou['ouId'], $taskId);
     }
 
     /**
@@ -3121,7 +3123,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->unpin($tenantId, $taskId);
+        return (new TasksApiHandler($pdo))->unpin($tenantId, $ou['ouId'], $taskId);
     }
 
     /**
@@ -3152,7 +3154,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Task not found', 404);
         }
 
-        return (new TasksApiHandler($pdo))->tag($tenantId, $taskId, $request->getBody());
+        return (new TasksApiHandler($pdo))->tag($tenantId, $ou['ouId'], $taskId, $request->getBody());
     }
 
     /**
@@ -3590,7 +3592,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return $error;
         }
 
-        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, (int) $target['milestoneId'], true);
+        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, $ou['ouId'], (int) $target['milestoneId'], true);
     }
 
     /**
@@ -3620,7 +3622,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return $error;
         }
 
-        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, (int) $target['milestoneId'], false);
+        return (new MilestonesApiHandler($pdo))->setChecked($tenantId, $ou['ouId'], (int) $target['milestoneId'], false);
     }
 
     /**
@@ -3647,7 +3649,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return $error;
         }
 
-        return (new MilestonesApiHandler($pdo))->update($tenantId, (int) $target['milestoneId'], $request->getBody());
+        return (new MilestonesApiHandler($pdo))->update($tenantId, $ou['ouId'], (int) $target['milestoneId'], $request->getBody());
     }
 
     /**
@@ -3679,7 +3681,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return $error;
         }
 
-        return (new MilestonesApiHandler($pdo))->delete($tenantId, (int) $target['milestoneId']);
+        return (new MilestonesApiHandler($pdo))->delete($tenantId, $ou['ouId'], (int) $target['milestoneId']);
     }
 
     /**

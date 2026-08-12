@@ -18,13 +18,31 @@ use Tasker\Migrations\CreateTaskerMilestonesTable;
  * of runtime branching. The two tests that exercised create() directly
  * (testCreateDefaultsCheckedToFalse, testCreateRejectsATaskOutsideTheCallersTenant)
  * moved to TenantIsolationOuTest.php (Postgres-backed), alongside new
- * OU-boundary regression tests proving the fix. Every OTHER test below only
- * ever used create() as a convenience fixture-builder for some other method
- * under test (toggle/update/delete/listForTask) — those now build their
- * milestone fixture via insertMilestoneDirect() (a raw INSERT bypassing
- * create() entirely) so they stay on SQLite unchanged in every other
- * respect. listForTask() itself remains tenant-scoped only (finding I7) and
- * has no Postgres-only syntax, so it keeps its SQLite coverage as-is.
+ * OU-boundary regression tests proving the fix. listForTask() itself remains
+ * tenant-scoped only (finding I7) and has no Postgres-only syntax, so it
+ * keeps its SQLite coverage as-is.
+ *
+ * NOTE ON WHAT ELSE MOVED (D1b Task 13): update()/delete()/setChecked() (the
+ * complete_milestone/uncomplete_milestone backing method) were the "out of
+ * C1's scope" half of the fix above — they take the MILESTONE's own id
+ * directly, not a task id — but tasker_milestones.id is EQUALLY a plain
+ * sequential BIGSERIAL, so they are now OU-aware too, via
+ * MilestonesApiHandler::findVisible(), which — like create()'s own check
+ * above — calls OuScopeResolver::whereFragment() unconditionally. Every test
+ * that exercised update()/delete()/setChecked() directly
+ * (testUpdateChangesSummaryAndDetail, testUpdateRejects404ForAMilestoneOutsideTheCallersTenant,
+ * testDeleteRemovesTheMilestone, testDeleteRejects404ForAMilestoneOutsideTheCallersTenant,
+ * testCompleteIsIdempotentRatherThanAToggle, testUncompleteSetsCheckedFalse)
+ * moved to TenantIsolationOuTest.php, alongside new sibling-OU boundary
+ * tests (negative and positive control) neither predecessor covered.
+ * toggle() — dead code, not wired to any route (see its own docblock) —
+ * calls setChecked() too, so testToggleFlipsCheckedState() cascaded into
+ * requiring Postgres as well and moved alongside it, purely as a
+ * consequence of setChecked() becoming OU-aware, not a deliberate change to
+ * toggle() itself. testToggleRejects404ForAMilestoneOutsideTheCallersTenant()
+ * stays here unchanged: it 404s at the earlier findScoped() check inside
+ * toggle() itself, before setChecked() (and its OU-aware join) is ever
+ * reached.
  */
 final class MilestonesApiHandlerTest extends TestCase
 {
@@ -68,17 +86,6 @@ final class MilestonesApiHandlerTest extends TestCase
         return (int) $this->pdo->lastInsertId();
     }
 
-    public function testToggleFlipsCheckedState(): void
-    {
-        $id = $this->insertMilestoneDirect(7, 1, 'Toggle me');
-
-        $first = json_decode($this->handler->toggle(7, $id)->getBody(), true);
-        $second = json_decode($this->handler->toggle(7, $id)->getBody(), true);
-
-        self::assertTrue($first['data']['checked']);
-        self::assertFalse($second['data']['checked']);
-    }
-
     public function testToggleRejects404ForAMilestoneOutsideTheCallersTenant(): void
     {
         $id = $this->insertMilestoneDirect(9, 2, 'Other tenant');
@@ -119,78 +126,4 @@ final class MilestonesApiHandlerTest extends TestCase
         self::assertSame(404, $response->getStatusCode());
     }
 
-    public function testUpdateChangesSummaryAndDetail(): void
-    {
-        $id = $this->insertMilestoneDirect(7, 1, 'Original');
-
-        $response = $this->handler->update(7, $id, json_encode(['summary' => 'Edited', 'detail' => 'more info']));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('Edited', $payload['data']['summary']);
-        self::assertSame('more info', $payload['data']['detail']);
-    }
-
-    public function testUpdateRejects404ForAMilestoneOutsideTheCallersTenant(): void
-    {
-        $id = $this->insertMilestoneDirect(9, 2, 'Other tenant');
-
-        $response = $this->handler->update(7, $id, json_encode(['summary' => 'Should fail']));
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testDeleteRemovesTheMilestone(): void
-    {
-        $id = $this->insertMilestoneDirect(7, 1, 'Doomed');
-
-        $response = $this->handler->delete(7, $id);
-
-        self::assertSame(204, $response->getStatusCode());
-
-        $count = (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_milestones')->fetchColumn();
-        self::assertSame(0, $count);
-    }
-
-    public function testDeleteRejects404ForAMilestoneOutsideTheCallersTenant(): void
-    {
-        $id = $this->insertMilestoneDirect(9, 2, 'Other tenant');
-
-        $response = $this->handler->delete(7, $id);
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    /**
-     * D1 implemented complete_milestone as a toggle. That was wrong: the
-     * original app has separate complete_milestone and uncomplete_milestone
-     * tools, so a toggle makes complete_milestone non-idempotent — calling it
-     * twice un-completes. setChecked() replaces toggle() on the route surface
-     * for exactly this reason.
-     *
-     * NOTE: uses insertMilestoneDirect() rather than handler->create(), like
-     * every other fixture in this class — create()'s task-existence check is
-     * now OU-aware (whole-branch review finding C1) and requires a real
-     * PostgreSQL connection, per this class's own docblock.
-     */
-    public function testCompleteIsIdempotentRatherThanAToggle(): void
-    {
-        $id = $this->insertMilestoneDirect(7, 1, 'Idempotent');
-
-        $first  = json_decode($this->handler->setChecked(7, $id, true)->getBody(), true);
-        $second = json_decode($this->handler->setChecked(7, $id, true)->getBody(), true);
-
-        self::assertTrue($first['data']['checked']);
-        self::assertTrue($second['data']['checked'], 'complete_milestone twice must stay complete, not flip back');
-    }
-
-    public function testUncompleteSetsCheckedFalse(): void
-    {
-        $id = $this->insertMilestoneDirect(7, 1, 'Reopen me');
-        $this->handler->setChecked(7, $id, true);
-
-        $payload = json_decode($this->handler->setChecked(7, $id, false)->getBody(), true);
-
-        self::assertFalse($payload['data']['checked']);
-    }
 }

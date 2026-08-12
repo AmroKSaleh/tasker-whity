@@ -17,27 +17,38 @@ use Whity\Sdk\Http\Response;
  * attachment for tasker_tasks, plus the OU-scoped readyWork()/getOne()/
  * moveToGroup()/moveToProject() queries.
  *
- * update()/delete()/complete()/uncomplete()/pin()/unpin()/tag() are
- * tenant-scoped only — a caller only ever reaches an individual task's id
- * after already holding it from an OU-scoped list (listForSection()/
- * listFiltered() or get_board), so re-checking OU scope on every
- * single-task mutation would be redundant. readyWork() is one exception: it
- * is reached directly by project id, not through a task the caller already
- * holds, so it re-derives and checks OU visibility itself, exactly like
- * get_board. getOne() (D1b Task 8), moveToGroup() (D1b Task 9) and
- * moveToProject() (D1b Task 12c) are three more: all are the caller's FIRST
- * hop straight to a task by identifier — a get and, more seriously, a
- * MUTATION — reachable by simply guessing a sequential BIGSERIAL id, so all
- * three re-derive and check OU visibility via {@see self::findVisible()}
- * rather than trusting the task id the way update()/delete()/etc. do. See
- * getOne()'s own docblock for the full reasoning, which moveToGroup()'s and
- * moveToProject()'s docblocks both refer back to. moveToProject() ALSO
- * re-derives and checks the TARGET project's own OU visibility, via
- * {@see self::isProjectVisible()} — the same belt-and-braces defence
- * {@see \Tasker\Api\ProjectsApiHandler::delete()} already applies to its own
- * OU-scoped findScoped() re-check, even though its route (like moveToProject()'s
- * own route, {@see \Tasker\TaskerPlugin::moveTask()}) already resolved the
- * identifier through {@see \Tasker\Access\IdentifierResolver} first.
+ * D1b Task 13 FIX: update()/delete()/complete()/uncomplete()/pin()/unpin()/
+ * tag() used to be tenant-scoped only, on the theory that a caller only ever
+ * reaches an individual task's id after already holding it from an OU-scoped
+ * list (listForSection()/listFiltered() or get_board) — so re-checking OU
+ * scope on every single-task mutation was thought redundant. That reasoning
+ * does not hold: tasker_tasks.id is a plain sequential BIGSERIAL, exactly
+ * like tasker_projects.id/tasker_sections.id, so an OU-restricted caller
+ * could reach a sibling OU's task by simply counting upward through ids,
+ * bypassing whatever OU-scoped list they were "supposed" to discover it
+ * through. All seven now call {@see self::findVisible()} — the SAME
+ * OU-aware, both-tenant-sides join getOne()/moveToGroup()/moveToProject()
+ * already use — either as their existing findScoped()-based front-door check
+ * (update()/delete()/tag()), or as a new pre-check added before the write for
+ * the methods that used to write first and infer 404 from rowCount() === 0
+ * (complete()/uncomplete()/setPinned()).
+ *
+ * readyWork() is reached directly by project id, not through a task the
+ * caller already holds, so it re-derives and checks OU visibility itself,
+ * exactly like get_board. getOne() (D1b Task 8), moveToGroup() (D1b Task 9)
+ * and moveToProject() (D1b Task 12c) are the caller's FIRST hop straight to a
+ * task by identifier — a get and, more seriously, a MUTATION — reachable by
+ * simply guessing a sequential BIGSERIAL id, so all three re-derive and check
+ * OU visibility via {@see self::findVisible()} rather than trusting the task
+ * id the way update()/delete()/etc. used to. See getOne()'s own docblock for
+ * the full reasoning, which moveToGroup()'s and moveToProject()'s docblocks
+ * both refer back to. moveToProject() ALSO re-derives and checks the TARGET
+ * project's own OU visibility, via {@see self::isProjectVisible()} — the same
+ * belt-and-braces defence {@see \Tasker\Api\ProjectsApiHandler::delete()}
+ * already applies to its own OU-scoped findScoped() re-check, even though its
+ * route (like moveToProject()'s own route, {@see \Tasker\TaskerPlugin::moveTask()})
+ * already resolved the identifier through {@see \Tasker\Access\IdentifierResolver}
+ * first.
  *
  * TasksApiHandler::move() (within-project section/group/sort_order changes)
  * was RETIRED in D1b Task 12c, not merely renamed: it was move_task's own
@@ -251,15 +262,23 @@ final class TasksApiHandler
         // column, so this joins up to tasker_projects (the only table that
         // does) and applies OuScopeResolver there. Confines create() to a
         // real PostgreSQL connection — see TenantIsolationOuTest.
+        //
+        // D1b Task 13 FIX: this join used to bind tenant_id on tasker_sections
+        // only, never on tasker_projects — a divergence from findVisible()'s
+        // own both-sides convention below (this codebase's standard). Not
+        // reachable through any route today (no route can create a
+        // cross-tenant section->project link), but fixed here as the natural
+        // moment since this task is already touching every sibling join.
         $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
         $ouClause = OuScopeResolver::whereFragment('p.ou_id');
         $section = $this->db->prepare(
             "SELECT s.id, s.project_id FROM tasker_sections s
              JOIN tasker_projects p ON p.id = s.project_id
-             WHERE s.id = :id AND s.tenant_id = :tenant_id AND {$ouClause}"
+             WHERE s.id = :id AND s.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
         );
         $section->bindValue(':id', $sectionId, PDO::PARAM_INT);
         $section->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $section->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
         $section->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
         $section->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
         $section->execute();
@@ -357,9 +376,9 @@ final class TasksApiHandler
      * it, since it was a defect this same task introduced, not a
      * pre-existing one.
      */
-    public function update(int $tenantId, int $taskId, string $body): Response
+    public function update(int $tenantId, ?int $callerOuId, int $taskId, string $body): Response
     {
-        $row = $this->findScoped($taskId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $taskId);
         if ($row === null) {
             return Response::error('Task not found', 404);
         }
@@ -959,9 +978,9 @@ final class TasksApiHandler
      * DELETE, since the row still needs to exist for the earlier
      * findScoped() 404 check but detachAll() itself does not depend on it.
      */
-    public function delete(int $tenantId, int $taskId): Response
+    public function delete(int $tenantId, ?int $callerOuId, int $taskId): Response
     {
-        $row = $this->findScoped($taskId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $taskId);
         if ($row === null) {
             return Response::error('Task not found', 404);
         }
@@ -990,9 +1009,21 @@ final class TasksApiHandler
 
     /**
      * POST /api/tasker/tasks/{id}/complete
+     *
+     * D1b Task 13 FIX: this used to write straight through with a plain
+     * tenant_id predicate and infer 404 from rowCount() === 0 — safe only
+     * because the route resolved task_id through IdentifierResolver first.
+     * {@see self::findVisible()} is now checked BEFORE the UPDATE, matching
+     * the defence-in-depth this class's own update()/delete() (and
+     * moveToGroup()/moveToProject()) already apply: a handler must not rely
+     * solely on its route having done the OU check.
      */
-    public function complete(int $tenantId, int $taskId): Response
+    public function complete(int $tenantId, ?int $callerOuId, int $taskId): Response
     {
+        if ($this->findVisible($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
         try {
             $idCol = $this->idColumn();
             $stmt = $this->db->prepare(
@@ -1027,9 +1058,16 @@ final class TasksApiHandler
      * POST /api/tasker/tasks/{id}/uncomplete — the opposite of complete().
      * Restores status to 'pending' (there is no "previous status" tracked to
      * restore instead — plain pending/in_progress/done only, per §5).
+     *
+     * OU-aware via findVisible() checked before the write — see complete()'s
+     * own docblock (D1b Task 13) for the full reasoning, identical here.
      */
-    public function uncomplete(int $tenantId, int $taskId): Response
+    public function uncomplete(int $tenantId, ?int $callerOuId, int $taskId): Response
     {
+        if ($this->findVisible($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
         try {
             $idCol = $this->idColumn();
             $stmt = $this->db->prepare(
@@ -1060,18 +1098,26 @@ final class TasksApiHandler
         }
     }
 
-    public function pin(int $tenantId, int $taskId): Response
+    public function pin(int $tenantId, ?int $callerOuId, int $taskId): Response
     {
-        return $this->setPinned($tenantId, $taskId, true);
+        return $this->setPinned($tenantId, $callerOuId, $taskId, true);
     }
 
-    public function unpin(int $tenantId, int $taskId): Response
+    public function unpin(int $tenantId, ?int $callerOuId, int $taskId): Response
     {
-        return $this->setPinned($tenantId, $taskId, false);
+        return $this->setPinned($tenantId, $callerOuId, $taskId, false);
     }
 
-    private function setPinned(int $tenantId, int $taskId, bool $pinned): Response
+    /**
+     * OU-aware via findVisible() checked before the write — see complete()'s
+     * own docblock (D1b Task 13) for the full reasoning, identical here.
+     */
+    private function setPinned(int $tenantId, ?int $callerOuId, int $taskId, bool $pinned): Response
     {
+        if ($this->findVisible($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
         // $pinnedAtClause is a fixed internal literal, never user input — kept
         // consistent with this plugin's CURRENT_TIMESTAMP convention rather
         // than computing a PHP-side timestamp that could drift from the DB's.
@@ -1125,10 +1171,13 @@ final class TasksApiHandler
      * existence leak) BEFORE the association is written, and the actual
      * write is delegated to core's own {@see EntityTagRepository::attach()}
      * — the canonical, single writer for entity_tags — rather than a
-     * hand-rolled INSERT here. A task outside the caller's tenant reports
-     * 404, never a cross-tenant existence leak.
+     * hand-rolled INSERT here. A task outside the caller's tenant OR OU scope
+     * reports 404, never a cross-tenant/cross-OU existence leak (D1b Task 13:
+     * the existence check below used to be tenant-scoped only via a plain
+     * SELECT; now uses {@see self::findVisible()}, matching this class's own
+     * update()/delete()/complete()/uncomplete()/setPinned()).
      */
-    public function tag(int $tenantId, int $taskId, string $body): Response
+    public function tag(int $tenantId, ?int $callerOuId, int $taskId, string $body): Response
     {
         $decoded = json_decode($body, true);
         $tagId = is_array($decoded) && isset($decoded['tag_id']) ? (int) $decoded['tag_id'] : 0;
@@ -1136,10 +1185,7 @@ final class TasksApiHandler
             return Response::error('tag_id is required and must be a positive integer', 400);
         }
 
-        $idCol = $this->idColumn();
-        $find = $this->db->prepare("SELECT {$idCol} FROM tasker_tasks WHERE {$idCol} = :id AND tenant_id = :tenant_id");
-        $find->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
-        if ($find->fetch() === false) {
+        if ($this->findVisible($tenantId, $callerOuId, $taskId) === null) {
             return Response::error('Task not found', 404);
         }
 

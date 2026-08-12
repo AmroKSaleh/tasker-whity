@@ -21,17 +21,24 @@ use Whity\Sdk\Http\Response;
  * project in the tenant. list()/create()'s parent-existence check is now
  * OU-aware (projectVisible(), below), joining straight to tasker_projects and
  * applying OuScopeResolver — the exact same static-SQL-template pattern
- * {@see ProjectsApiHandler::findScoped()} already uses. update()/delete() are
- * unaffected: they take the SECTION's own id directly (not a project id path
- * parameter), which is explicitly out of this fix's scope (a separate,
- * not-yet-decided question — see the plan's fix-wave notes).
+ * {@see ProjectsApiHandler::findScoped()} already uses.
  *
- * Postgres-only for list()/create() specifically, same reasoning as
- * ProjectsApiHandler: OuScopeResolver::whereFragment()'s `= ANY(:scope)` is
- * PostgreSQL-only syntax that SQLite's PDO::prepare() rejects outright, so
- * those two methods are exercised only against a real PostgreSQL connection
- * (see TenantIsolationOuTest). update()/delete() remain plain tenant-scoped
- * queries and keep their SQLite-backed unit test coverage.
+ * D1b Task 13 FIX: update()/delete() used to be the "explicitly out of
+ * scope" half of C1's own fix — they take the SECTION's own id directly, not
+ * a project id path parameter, but tasker_sections.id is EQUALLY a plain
+ * sequential BIGSERIAL, so an OU-restricted caller could reach a sibling OU's
+ * section by counting upward through ids just as easily as through a project
+ * id. Both now call {@see self::findVisible()} first — the same
+ * defence-in-depth pattern this class's own create() (and
+ * GroupsApiHandler::create()/TasksApiHandler::create()) already apply to
+ * their OWN parent-existence checks even after their routes started
+ * pre-resolving the identifier via IdentifierResolver.
+ *
+ * Postgres-only for list()/create()/update()/delete() specifically, same
+ * reasoning as ProjectsApiHandler: OuScopeResolver::whereFragment()'s
+ * `= ANY(:scope)` is PostgreSQL-only syntax that SQLite's PDO::prepare()
+ * rejects outright, so all four methods are exercised only against a real
+ * PostgreSQL connection (see TenantIsolationOuTest).
  *
  * delete() refuses to remove a project's last remaining section — every
  * project must always have at least one, the invariant ProjectsApiHandler's
@@ -146,9 +153,9 @@ final class SectionsApiHandler
         }
     }
 
-    public function update(int $tenantId, int $sectionId, string $body): Response
+    public function update(int $tenantId, ?int $callerOuId, int $sectionId, string $body): Response
     {
-        $row = $this->findScoped($sectionId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $sectionId);
         if ($row === null) {
             return Response::error('Section not found', 404);
         }
@@ -208,9 +215,9 @@ final class SectionsApiHandler
      * delete_section default — see this class's own docblock for why that
      * default changed here (it used to always cascade).
      */
-    public function delete(int $tenantId, int $sectionId, bool $deleteTasks = false): Response
+    public function delete(int $tenantId, ?int $callerOuId, int $sectionId, bool $deleteTasks = false): Response
     {
-        $row = $this->findScoped($sectionId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $sectionId);
         if ($row === null) {
             return Response::error('Section not found', 404);
         }
@@ -357,6 +364,47 @@ final class SectionsApiHandler
              FROM tasker_sections WHERE {$idCol} = :id AND tenant_id = :tenant_id"
         );
         $stmt->execute([':id' => $id, ':tenant_id' => $tenantId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * OU-aware section lookup for {@see self::update()}/{@see self::delete()}
+     * (D1b Task 13) — see this class's own docblock for why those two, like
+     * list()/create() before them, must not trust a caller-supplied section
+     * id at face value. Joins through to the section's OWN project (the only
+     * table with an ou_id column) and applies
+     * {@see OuScopeResolver::whereFragment()} there, unconditionally, one
+     * static SQL template — this is new code, so tenant_id is bound
+     * explicitly on BOTH sides of the join (`:tenant_id` on tasker_sections,
+     * `:tenant_id_p` on tasker_projects), matching
+     * {@see \Tasker\Access\IdentifierResolver::taskByColumn()}'s own
+     * precedent, not the child-table-only binding this class's own
+     * projectVisible() (a pre-existing, separately-tracked carry-over) still
+     * has. Confines update()/delete() to a real PostgreSQL connection — see
+     * TenantIsolationOuTest.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function findVisible(int $tenantId, ?int $callerOuId, int $sectionId): ?array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT s.id AS id, s.public_id, s.tenant_id, s.project_id, s.name, s.slug, s.description, s.sort_order, s.view_prefs, s.created_at
+             FROM tasker_sections s
+             JOIN tasker_projects p ON p.id = s.project_id
+             WHERE s.id = :id AND s.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $sectionId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
         return is_array($row) ? $row : null;

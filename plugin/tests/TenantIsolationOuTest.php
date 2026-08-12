@@ -226,6 +226,40 @@ final class TenantIsolationOuTest extends TestCase
         // code path, so this table's absence went unnoticed until the
         // route-level tests below exercised it for real.
         (new CreateTaskerUserPrefsTable())->up($this->pdo);
+
+        // D1b Task 13: minimal shape of whity-core's own taxonomy tables
+        // (host/.core/database/migrations/063_create_taxonomy_tables.php),
+        // needed by the TasksApiHandler::tag() tests moved here from the
+        // old SQLite-backed TasksApiHandlerTest.php (tag()'s own
+        // existence check is now OU-aware, see that class's own docblock).
+        // FK REFERENCES to tag_groups/tenants are omitted -- this file's own
+        // established "close enough, no cross-table FKs" convention (see
+        // memberships/organizational_units above) -- but the
+        // (entity_type, entity_id, tag_id) PRIMARY KEY is kept, since
+        // EntityTagRepository::attach() relies on it for its own
+        // ON CONFLICT ... DO NOTHING upsert.
+        $this->pdo->exec('
+            CREATE TABLE IF NOT EXISTS tags (
+                id BIGSERIAL PRIMARY KEY,
+                tenant_id INTEGER NOT NULL,
+                group_id BIGINT NOT NULL,
+                name VARCHAR(128) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        ');
+        $this->pdo->exec('
+            CREATE TABLE IF NOT EXISTS entity_tags (
+                tenant_id INTEGER NOT NULL,
+                entity_type VARCHAR(128) NOT NULL,
+                entity_id BIGINT NOT NULL,
+                tag_id BIGINT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                PRIMARY KEY (entity_type, entity_id, tag_id)
+            )
+        ');
+        $this->pdo->exec('DELETE FROM entity_tags WHERE tenant_id IN (7, 9)');
+        $this->pdo->exec('DELETE FROM tags WHERE tenant_id IN (7, 9)');
     }
 
     /**
@@ -462,6 +496,21 @@ final class TenantIsolationOuTest extends TestCase
         $stmt->execute();
 
         return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * Insert one `tags` row owned by $tenantId with the given $id (D1b Task
+     * 13, for the TasksApiHandler::tag() tests moved here), so
+     * TagRepository::find($tenantId, $id) succeeds. $id is supplied
+     * explicitly (never relying on the BIGSERIAL sequence), matching
+     * makeOu()'s own explicit-id convention.
+     */
+    private function makeTag(int $tenantId, int $id): void
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO tags (id, tenant_id, group_id, name) VALUES (:id, :tenant_id, 1, :name)'
+        );
+        $stmt->execute([':id' => $id, ':tenant_id' => $tenantId, ':name' => 'tag-' . $id]);
     }
 
     public function testUserInParentOuSeesProjectInChildOu(): void
@@ -829,12 +878,12 @@ final class TenantIsolationOuTest extends TestCase
 
         $handler = new TasksApiHandler($this->pdo);
 
-        $pinned = $handler->pin(7, $taskId);
+        $pinned = $handler->pin(7, null, $taskId);
         self::assertSame(200, $pinned->getStatusCode());
         $pinnedPayload = json_decode($pinned->getBody(), true);
         self::assertTrue($pinnedPayload['data']['pinned']);
 
-        $unpinned = $handler->unpin(7, $taskId);
+        $unpinned = $handler->unpin(7, null, $taskId);
         self::assertSame(200, $unpinned->getStatusCode(), 'unpin() must not 500 when binding pinned = false against Postgres');
         $unpinnedPayload = json_decode($unpinned->getBody(), true);
         self::assertFalse($unpinnedPayload['data']['pinned'], 'a real boolean false, not a truthy string representation of it');
@@ -991,6 +1040,212 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(404, $response->getStatusCode());
     }
 
+    // ==================== SectionsApiHandler::update()/delete() (D1b Task 13) ====================
+    //
+    // update()/delete() moved here from the old (now removed, see git
+    // history) SQLite-backed SectionsApiHandlerTest.php: both now call
+    // findVisible(), which -- like list()/create() above -- calls
+    // OuScopeResolver::whereFragment() unconditionally. Every original case
+    // ports over (asserting the same property), plus new sibling-OU
+    // boundary tests (negative AND positive control) neither predecessor
+    // covered, since update()/delete() used to be tenant-scoped only.
+
+    public function testSectionsUpdateChangesNameAndDescription(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $sectionId, json_encode(['name' => 'Renamed', 'description' => 'New subtitle']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Renamed', $payload['data']['name']);
+        self::assertSame('New subtitle', $payload['data']['description']);
+    }
+
+    public function testSectionsUpdateRejects404ForASectionOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $otherSectionId, json_encode(['name' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): a caller restricted to OU 2 must not be able
+     * to update a section belonging to sibling OU 3's project simply by
+     * supplying its id -- the same reasoning that made
+     * SectionsApiHandler::list()/create() OU-aware above, applied to the
+     * section's OWN id instead of its parent project's.
+     */
+    public function testSectionsUpdateRejects404ForASectionInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $siblingSectionId, json_encode(['name' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above -- proves the fixture/section
+     * really is reachable by a caller correctly scoped to it, so the sibling
+     * 404 above cannot be passing merely because the fixture was never
+     * visible at all.
+     */
+    public function testSectionsUpdateSucceedsForASectionInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $ownSectionId, json_encode(['name' => 'Updated in own OU']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Updated in own OU', $payload['data']['name']);
+    }
+
+    public function testSectionsDeleteRejectsTheProjectsLastRemainingSection(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $sectionId);
+
+        self::assertSame(409, $response->getStatusCode());
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE project_id = {$projectId}")->fetchColumn();
+        self::assertSame(1, $count);
+    }
+
+    public function testSectionsDeleteRemovesANonLastSection(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $this->makeSectionDirect(7, $projectId);
+        $extraId = $this->makeSectionDirectNamed(7, $projectId, 'Extra section');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $extraId);
+
+        self::assertSame(204, $response->getStatusCode());
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE project_id = {$projectId}")->fetchColumn();
+        self::assertSame(1, $count);
+    }
+
+    /**
+     * D1b Task 12b (contract parity, unsafe-direction fix, ported from the
+     * old SQLite test of the same name): delete() used to cascade
+     * unconditionally -- asserts the survival case by COUNTING rows
+     * afterwards, not just reading the status code.
+     */
+    public function testSectionsDeleteRefusesANonEmptySectionAndTheTasksSurvive(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $this->makeSectionDirect(7, $projectId);
+        $extraId = $this->makeSectionDirectNamed(7, $projectId, 'Has tasks');
+        $this->makeTaskDirect(7, $projectId, $extraId, 'Task one');
+        $this->makeTaskDirect(7, $projectId, $extraId, 'Task two');
+        $this->makeGroupDirect(7, $extraId, 'Fixture group');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $extraId);
+
+        self::assertSame(409, $response->getStatusCode());
+        $body = json_decode($response->getBody(), true);
+        self::assertStringContainsString('2 task(s)', $body['error']);
+        self::assertStringContainsString('1 group(s)', $body['error']);
+        self::assertStringContainsString('delete_tasks', $body['error']);
+        self::assertSame(2, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE section_id = {$extraId}")->fetchColumn());
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE section_id = {$extraId}")->fetchColumn());
+    }
+
+    /**
+     * STRONGER than its SQLite predecessor
+     * (testDeleteWithDeleteTasksTrueProceedsPastTheGuardForANonEmptySectionSqliteCannotProveTheCascade,
+     * removed): that test could only prove the GUARD was bypassed, because
+     * SQLite does not enforce ON DELETE CASCADE. Real PostgreSQL does, so
+     * this proves the actual cascade -- the section's tasks and groups are
+     * genuinely gone, not merely un-counted.
+     */
+    public function testSectionsDeleteWithDeleteTasksTrueCascadesToTasksAndGroups(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $this->makeSectionDirect(7, $projectId);
+        $extraId = $this->makeSectionDirectNamed(7, $projectId, 'Has tasks');
+        $taskId = $this->makeTaskDirect(7, $projectId, $extraId, 'Doomed task');
+        $this->makeGroupDirect(7, $extraId, 'Doomed group');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $extraId, true);
+
+        self::assertSame(204, $response->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE id = {$extraId}")->fetchColumn());
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE id = {$taskId}")->fetchColumn(), 'the real ON DELETE CASCADE must remove the section\'s tasks');
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE section_id = {$extraId}")->fetchColumn(), 'the real ON DELETE CASCADE must remove the section\'s groups');
+    }
+
+    public function testSectionsDeleteAnAlreadyEmptySectionSucceedsWithoutTheFlag(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Section project');
+        $this->makeSectionDirect(7, $projectId);
+        $extraId = $this->makeSectionDirectNamed(7, $projectId, 'Empty section');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $extraId);
+
+        self::assertSame(204, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the delete_section verb family's own
+     * sibling-OU boundary case -- a SEPARATE handler method/lookup from
+     * update()'s above.
+     */
+    public function testSectionsDeleteRejects404ForASectionInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $this->makeSectionDirect(7, $siblingProjectId); // the project's own Backlog
+        $siblingExtraId = $this->makeSectionDirectNamed(7, $siblingProjectId, 'Sibling extra section');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $siblingExtraId);
+
+        self::assertSame(404, $response->getStatusCode());
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE id = {$siblingExtraId}")->fetchColumn(), 'a rejected cross-OU delete must not remove the section');
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testSectionsDeleteSucceedsForASectionInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $this->makeSectionDirect(7, $ownProjectId); // the project's own Backlog
+        $ownExtraId = $this->makeSectionDirectNamed(7, $ownProjectId, 'Own extra section');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $ownExtraId);
+
+        self::assertSame(204, $response->getStatusCode());
+    }
+
     // ==================== GroupsApiHandler (whole-branch review finding C1) ====================
 
     public function testGroupsCreateStampsTheCallersTenantAndTheGivenSection(): void
@@ -1089,6 +1344,145 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->create(7, 2, $siblingSectionId, json_encode(['name' => 'Should not leak']));
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== GroupsApiHandler::update()/delete() (D1b Task 13) ====================
+    //
+    // update()/delete() moved here from the old (now removed, see git
+    // history) SQLite-backed GroupsApiHandlerTest.php: both now call
+    // findVisible(), which -- like list()/create() above -- calls
+    // OuScopeResolver::whereFragment() unconditionally. Every original case
+    // ports over, plus new sibling-OU boundary tests (negative AND positive
+    // control) neither predecessor covered.
+
+    public function testGroupsUpdateChangesNameAndSortOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Group project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId = $this->makeGroupDirect(7, $sectionId, 'Original');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $groupId, json_encode(['name' => 'Renamed', 'sort_order' => 3]));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Renamed', $payload['data']['name']);
+        self::assertSame(3, $payload['data']['sortOrder']);
+    }
+
+    public function testGroupsUpdateRejects404ForAGroupOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherGroupId = $this->makeGroupDirect(9, $otherSectionId, 'Other tenant group');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->update(7, null, $otherGroupId, json_encode(['name' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): a caller restricted to OU 2 must not be able
+     * to update a group belonging to sibling OU 3's project (via its
+     * section) simply by supplying its id.
+     */
+    public function testGroupsUpdateRejects404ForAGroupInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingGroupId = $this->makeGroupDirect(7, $siblingSectionId, 'Sibling group');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $siblingGroupId, json_encode(['name' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testGroupsUpdateSucceedsForAGroupInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownGroupId = $this->makeGroupDirect(7, $ownSectionId, 'Own group');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $ownGroupId, json_encode(['name' => 'Updated in own OU']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Updated in own OU', $payload['data']['name']);
+    }
+
+    public function testGroupsDeleteRemovesTheGroup(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Group project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId = $this->makeGroupDirect(7, $sectionId, 'Doomed');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $groupId);
+
+        self::assertSame(204, $response->getStatusCode());
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE id = {$groupId}")->fetchColumn();
+        self::assertSame(0, $count);
+    }
+
+    public function testGroupsDeleteRejects404ForAGroupOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherGroupId = $this->makeGroupDirect(9, $otherSectionId, 'Other tenant group');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $otherGroupId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the delete_group verb family's own
+     * sibling-OU boundary case -- a SEPARATE handler method/lookup from
+     * update()'s above.
+     */
+    public function testGroupsDeleteRejects404ForAGroupInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingGroupId = $this->makeGroupDirect(7, $siblingSectionId, 'Sibling group');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $siblingGroupId);
+
+        self::assertSame(404, $response->getStatusCode());
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE id = {$siblingGroupId}")->fetchColumn(), 'a rejected cross-OU delete must not remove the group');
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testGroupsDeleteSucceedsForAGroupInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownGroupId = $this->makeGroupDirect(7, $ownSectionId, 'Own group');
+
+        $handler = new GroupsApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $ownGroupId);
+
+        self::assertSame(204, $response->getStatusCode());
     }
 
     // ==================== TasksApiHandler::create() (whole-branch review finding C1) ====================
@@ -1825,6 +2219,492 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(40, (int) $row['short_id'], 'a rejected same-project move must not renumber the task');
     }
 
+    // ==================== TasksApiHandler::update()/delete()/complete()/pin()/tag() (D1b Task 13) ====================
+    //
+    // These moved here from the old SQLite-backed TasksApiHandlerTest.php:
+    // all now call findVisible(), the OU-aware join getOne()/moveToGroup()/
+    // moveToProject() already use, either as their existing front-door check
+    // (update()/delete()/tag()) or as a new pre-check added before the write
+    // (complete()/uncomplete()/pin()/unpin(), which used to write first and
+    // infer 404 from rowCount() === 0). Every original case ports over, plus
+    // new sibling-OU boundary tests (negative AND positive control) for one
+    // verb family each: update, delete, complete (state-toggle family #1),
+    // pin (state-toggle family #2, its own setPinned() lookup), and tag.
+
+    public function testTasksUpdateChangesTextDetailAndPriority(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Original');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, null, $taskId, json_encode(['text' => 'Edited', 'detail' => 'more info', 'priority' => 'high']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Edited', $payload['data']['text']);
+        self::assertSame('more info', $payload['data']['detail']);
+        self::assertSame('high', $payload['data']['priority']);
+    }
+
+    public function testTasksUpdateRejectsAnInvalidPriority(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Original');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, null, $taskId, json_encode(['priority' => 'urgent-ish']));
+
+        self::assertSame(400, $response->getStatusCode());
+    }
+
+    public function testTasksUpdateAcceptsEachValidStatus(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Status test');
+
+        $handler = new TasksApiHandler($this->pdo);
+        foreach (['in_progress', 'done', 'pending'] as $status) {
+            $response = $handler->update(7, null, $taskId, json_encode(['status' => $status]));
+
+            self::assertSame(200, $response->getStatusCode());
+            $payload = json_decode($response->getBody(), true);
+            self::assertSame($status, $payload['data']['status']);
+        }
+    }
+
+    public function testTasksUpdateRejectsAnInvalidStatus(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Original');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, null, $taskId, json_encode(['status' => 'blocked']));
+
+        self::assertSame(400, $response->getStatusCode());
+        $row = $this->pdo->query("SELECT status FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('pending', $row['status'], 'a rejected status must not partially apply');
+    }
+
+    public function testTasksUpdateToDoneStampsCompletedAt(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Original');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, null, $taskId, json_encode(['status' => 'done']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('done', $payload['data']['status']);
+        self::assertNotNull($payload['data']['completedAt']);
+    }
+
+    public function testTasksUpdateAwayFromDoneClearsCompletedAt(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Original');
+        $this->pdo->exec("UPDATE tasker_tasks SET status = 'done', completed_at = CURRENT_TIMESTAMP WHERE id = {$taskId}");
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, null, $taskId, json_encode(['status' => 'pending']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('pending', $payload['data']['status']);
+        self::assertNull($payload['data']['completedAt']);
+    }
+
+    public function testTasksUpdateWithoutAStatusFieldLeavesCompletedAtUntouched(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Original');
+        $this->pdo->exec("UPDATE tasker_tasks SET status = 'done', completed_at = '2026-01-01 00:00:00' WHERE id = {$taskId}");
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, null, $taskId, json_encode(['text' => 'Edited text only']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Edited text only', $payload['data']['text']);
+        self::assertSame('done', $payload['data']['status'], 'status must be unaffected by a text-only update');
+        self::assertStringStartsWith(
+            '2026-01-01 00:00:00',
+            (string) $payload['data']['completedAt'],
+            'a text-only update must not clear or restamp an existing completed_at'
+        );
+    }
+
+    public function testTasksUpdateRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, null, $otherTaskId, json_encode(['text' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the update_task verb family's own
+     * sibling-OU boundary case.
+     */
+    public function testTasksUpdateRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $siblingTaskId, json_encode(['text' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testTasksUpdateSucceedsForATaskInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $ownTaskId, json_encode(['text' => 'Updated in own OU']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Updated in own OU', $payload['data']['text']);
+    }
+
+    public function testTasksDeleteRemovesTheTask(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Delete project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Doomed');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $taskId);
+
+        self::assertSame(204, $response->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE id = {$taskId}")->fetchColumn());
+    }
+
+    public function testTasksDeleteRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $otherTaskId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * CARRY-OVER FIX (D1b Task 6): deleting a tagged task used to orphan its
+     * entity_tags rows (entity_tags carries no FK to tasker_tasks). Now
+     * cleaned up via core's EntityTagRepository::detachAll().
+     */
+    public function testTasksDeleteRemovesTheTasksEntityTagRows(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Delete project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Tagged then deleted');
+        $this->makeTag(7, 501);
+        $this->pdo->exec("INSERT INTO entity_tags (tenant_id, entity_type, entity_id, tag_id) VALUES (7, 'tasker_task', {$taskId}, 501)");
+
+        $handler = new TasksApiHandler($this->pdo);
+        $handler->delete(7, null, $taskId);
+
+        $orphans = (int) $this->pdo->query("SELECT COUNT(*) FROM entity_tags WHERE entity_type = 'tasker_task' AND entity_id = {$taskId}")->fetchColumn();
+        self::assertSame(0, $orphans);
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the delete_task verb family's own
+     * sibling-OU boundary case -- a SEPARATE handler method/lookup from
+     * update()'s above.
+     */
+    public function testTasksDeleteRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $siblingTaskId);
+
+        self::assertSame(404, $response->getStatusCode());
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE id = {$siblingTaskId}")->fetchColumn(), 'a rejected cross-OU delete must not remove the task');
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testTasksDeleteSucceedsForATaskInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $ownTaskId);
+
+        self::assertSame(204, $response->getStatusCode());
+    }
+
+    public function testTasksCompleteSetsStatusAndCompletedAt(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Complete project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Finish me');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->complete(7, null, $taskId);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('done', $payload['data']['status']);
+        self::assertNotNull($payload['data']['completedAt']);
+    }
+
+    public function testTasksCompleteRejectsATaskOutsideTheCallersTenant(): void
+    {
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->complete(9, null, 999999);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the state-toggle verb family (complete/
+     * uncomplete share one findVisible() pre-check and lookup) -- complete()'s
+     * own sibling-OU case. uncomplete() gained the identical pre-check for
+     * the identical reason and is not independently retested here (same
+     * findVisible() call, different UPDATE literal).
+     */
+    public function testTasksCompleteRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->complete(7, 2, $siblingTaskId);
+
+        self::assertSame(404, $response->getStatusCode());
+        $row = $this->pdo->query("SELECT status FROM tasker_tasks WHERE id = {$siblingTaskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame('pending', $row['status'], 'a rejected cross-OU complete must not have changed the task');
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testTasksCompleteSucceedsForATaskInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->complete(7, 2, $ownTaskId);
+
+        self::assertSame(200, $response->getStatusCode());
+    }
+
+    public function testTasksUncompleteRestoresPendingStatusAndClearsCompletedAt(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Uncomplete project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Flip-flop');
+        $handler = new TasksApiHandler($this->pdo);
+        $handler->complete(7, null, $taskId);
+
+        $response = $handler->uncomplete(7, null, $taskId);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('pending', $payload['data']['status']);
+        self::assertNull($payload['data']['completedAt']);
+    }
+
+    public function testTasksPinAndUnpinToggleThePinnedFlag(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Pin project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Pin me');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $pinned = json_decode($handler->pin(7, null, $taskId)->getBody(), true);
+        self::assertTrue($pinned['data']['pinned']);
+
+        $unpinned = json_decode($handler->unpin(7, null, $taskId)->getBody(), true);
+        self::assertFalse($unpinned['data']['pinned']);
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the pin/unpin verb family (both share one
+     * private setPinned() method and lookup) -- pin()'s own sibling-OU case.
+     */
+    public function testTasksPinRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->pin(7, 2, $siblingTaskId);
+
+        self::assertSame(404, $response->getStatusCode());
+        // ::int cast avoids pdo_pgsql's own boolean-as-string ('f'/'t')
+        // quirk this codebase's own dbTruthy() docblocks document elsewhere.
+        $row = $this->pdo->query("SELECT pinned::int AS pinned FROM tasker_tasks WHERE id = {$siblingTaskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(0, (int) $row['pinned'], 'a rejected cross-OU pin must not have changed the task');
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testTasksPinSucceedsForATaskInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->pin(7, 2, $ownTaskId);
+
+        self::assertSame(200, $response->getStatusCode());
+    }
+
+    public function testTasksTagAttachesAnExistingTagToATask(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Tag project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Taggable');
+        $this->makeTag(7, 601);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->tag(7, null, $taskId, json_encode(['tag_id' => 601]));
+
+        self::assertSame(201, $response->getStatusCode());
+    }
+
+    public function testTasksTagIsIdempotentOnAlreadyAttachedTag(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Tag project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Taggable');
+        $this->makeTag(7, 602);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $first = $handler->tag(7, null, $taskId, json_encode(['tag_id' => 602]));
+        $second = $handler->tag(7, null, $taskId, json_encode(['tag_id' => 602]));
+
+        self::assertSame(201, $first->getStatusCode());
+        self::assertSame(200, $second->getStatusCode());
+
+        $count = (int) $this->pdo->query("SELECT COUNT(*) FROM entity_tags WHERE entity_type = 'tasker_task' AND entity_id = {$taskId}")->fetchColumn();
+        self::assertSame(1, $count);
+    }
+
+    public function testTasksTagRejectsATaskOutsideTheCallersTenant(): void
+    {
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->tag(9, null, 999999, json_encode(['tag_id' => 603]));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * Mirrors PingApiHandlerTest::testTagRejectsATagBelongingToADifferentTenant():
+     * a caller must never be able to attach a tag_id that exists but belongs
+     * to a DIFFERENT tenant -- the tag-ownership check must reject BEFORE any
+     * attempt to write the association.
+     */
+    public function testTasksTagRejectsATagBelongingToADifferentTenant(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Tag project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Taggable');
+        $this->makeTag(9, 604);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->tag(7, null, $taskId, json_encode(['tag_id' => 604]));
+
+        self::assertSame(422, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): tag_task's own sibling-OU boundary case --
+     * tag() used to check task existence via a plain tenant-scoped SELECT;
+     * now findVisible().
+     */
+    public function testTasksTagRejects404ForATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+        $this->makeTag(7, 605);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->tag(7, 2, $siblingTaskId, json_encode(['tag_id' => 605]));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testTasksTagSucceedsForATaskInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+        $this->makeTag(7, 606);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->tag(7, 2, $ownTaskId, json_encode(['tag_id' => 606]));
+
+        self::assertSame(201, $response->getStatusCode());
+    }
+
     // ==================== ShortIdAllocator (Task 2: short_id allocation) ====================
 
     public function testShortIdIsAllocatedSequentiallyPerProject(): void
@@ -1935,6 +2815,250 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->create(7, 2, $siblingTaskId, json_encode(['summary' => 'Should not leak']));
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    // ==================== MilestonesApiHandler::update()/delete()/setChecked() (D1b Task 13) ====================
+    //
+    // update()/delete()/setChecked() (complete_milestone/uncomplete_milestone's
+    // backing method) moved here from the old (now trimmed, see git history)
+    // SQLite-backed MilestonesApiHandlerTest.php: all three now call
+    // findVisible(), which -- like create()'s own check above -- calls
+    // OuScopeResolver::whereFragment() unconditionally. toggle() -- dead
+    // code, not wired to any route -- cascaded along via its own call to
+    // setChecked(); see MilestonesApiHandlerTest's own docblock.
+
+    public function testMilestonesUpdateChangesSummaryAndDetail(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Milestone update project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Task');
+        $milestoneId = $this->makeMilestoneDirect(7, $taskId, 'Original');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->update(7, null, $milestoneId, json_encode(['summary' => 'Edited', 'detail' => 'more info']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Edited', $payload['data']['summary']);
+        self::assertSame('more info', $payload['data']['detail']);
+    }
+
+    public function testMilestonesUpdateRejects404ForAMilestoneOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Other tenant task');
+        $otherMilestoneId = $this->makeMilestoneDirect(9, $otherTaskId, 'Other tenant');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->update(7, null, $otherMilestoneId, json_encode(['summary' => 'Should fail']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): a caller restricted to OU 2 must not be able
+     * to update a milestone belonging (via its task's project) to sibling OU
+     * 3 simply by supplying its id.
+     */
+    public function testMilestonesUpdateRejects404ForAMilestoneInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Sibling task');
+        $siblingMilestoneId = $this->makeMilestoneDirect(7, $siblingTaskId, 'Should not leak');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $siblingMilestoneId, json_encode(['summary' => 'Should not leak']));
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testMilestonesUpdateSucceedsForAMilestoneInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+        $ownMilestoneId = $this->makeMilestoneDirect(7, $ownTaskId, 'Own milestone');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->update(7, 2, $ownMilestoneId, json_encode(['summary' => 'Updated in own OU']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Updated in own OU', $payload['data']['summary']);
+    }
+
+    public function testMilestonesDeleteRemovesTheMilestone(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Milestone delete project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Task');
+        $milestoneId = $this->makeMilestoneDirect(7, $taskId, 'Doomed');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $milestoneId);
+
+        self::assertSame(204, $response->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_milestones WHERE id = {$milestoneId}")->fetchColumn());
+    }
+
+    public function testMilestonesDeleteRejects404ForAMilestoneOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Other tenant task');
+        $otherMilestoneId = $this->makeMilestoneDirect(9, $otherTaskId, 'Other tenant');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $otherMilestoneId);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the delete_milestone verb family's own
+     * sibling-OU boundary case -- a SEPARATE handler method/lookup from
+     * update()'s above.
+     */
+    public function testMilestonesDeleteRejects404ForAMilestoneInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Sibling task');
+        $siblingMilestoneId = $this->makeMilestoneDirect(7, $siblingTaskId, 'Should not leak');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $siblingMilestoneId);
+
+        self::assertSame(404, $response->getStatusCode());
+        self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_milestones WHERE id = {$siblingMilestoneId}")->fetchColumn(), 'a rejected cross-OU delete must not remove the milestone');
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testMilestonesDeleteSucceedsForAMilestoneInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+        $ownMilestoneId = $this->makeMilestoneDirect(7, $ownTaskId, 'Own milestone');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->delete(7, 2, $ownMilestoneId);
+
+        self::assertSame(204, $response->getStatusCode());
+    }
+
+    /**
+     * D1 implemented complete_milestone as a toggle. That was wrong: the
+     * original app has separate complete_milestone and uncomplete_milestone
+     * tools, so a toggle makes complete_milestone non-idempotent.
+     * setChecked() replaces toggle() on the route surface for exactly this
+     * reason.
+     */
+    public function testMilestonesCompleteIsIdempotentRatherThanAToggle(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Milestone complete project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Task');
+        $milestoneId = $this->makeMilestoneDirect(7, $taskId, 'Idempotent');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $first = json_decode($handler->setChecked(7, null, $milestoneId, true)->getBody(), true);
+        $second = json_decode($handler->setChecked(7, null, $milestoneId, true)->getBody(), true);
+
+        self::assertTrue($first['data']['checked']);
+        self::assertTrue($second['data']['checked'], 'complete_milestone twice must stay complete, not flip back');
+    }
+
+    public function testMilestonesUncompleteSetsCheckedFalse(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Milestone uncomplete project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Task');
+        $milestoneId = $this->makeMilestoneDirect(7, $taskId, 'Reopen me');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $handler->setChecked(7, null, $milestoneId, true);
+        $payload = json_decode($handler->setChecked(7, null, $milestoneId, false)->getBody(), true);
+
+        self::assertFalse($payload['data']['checked']);
+    }
+
+    /**
+     * The dead-code toggle() cascade -- see MilestonesApiHandlerTest's own
+     * docblock: this ported unchanged except for living here now, purely
+     * because setChecked() (which toggle() itself calls) became OU-aware.
+     */
+    public function testMilestonesToggleFlipsCheckedState(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Milestone toggle project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Task');
+        $milestoneId = $this->makeMilestoneDirect(7, $taskId, 'Toggle me');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $first = json_decode($handler->toggle(7, $milestoneId)->getBody(), true);
+        $second = json_decode($handler->toggle(7, $milestoneId)->getBody(), true);
+
+        self::assertTrue($first['data']['checked']);
+        self::assertFalse($second['data']['checked']);
+    }
+
+    /**
+     * FLOOR TEST (D1b Task 13): the state-toggle verb family (complete/
+     * uncomplete share one setChecked() method and lookup) -- its own
+     * sibling-OU case.
+     */
+    public function testMilestonesCompleteRejects404ForAMilestoneInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Sibling task');
+        $siblingMilestoneId = $this->makeMilestoneDirect(7, $siblingTaskId, 'Should not leak');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->setChecked(7, 2, $siblingMilestoneId, true);
+
+        self::assertSame(404, $response->getStatusCode());
+        $row = $this->pdo->query("SELECT checked::int AS checked FROM tasker_milestones WHERE id = {$siblingMilestoneId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(0, (int) $row['checked'], 'a rejected cross-OU complete must not have changed the milestone');
+    }
+
+    /**
+     * POSITIVE CONTROL for the test above.
+     */
+    public function testMilestonesCompleteSucceedsForAMilestoneInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own task');
+        $ownMilestoneId = $this->makeMilestoneDirect(7, $ownTaskId, 'Own milestone');
+
+        $handler = new MilestonesApiHandler($this->pdo);
+        $response = $handler->setChecked(7, 2, $ownMilestoneId, true);
+
+        self::assertSame(200, $response->getStatusCode());
     }
 
     // ==================== TaskDiscussionsApiHandler (whole-branch review finding C1) ====================
@@ -2120,6 +3244,29 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->put(7, 2, $siblingTaskId, json_encode(['messages' => []]));
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * POSITIVE CONTROL (D1b Task 13 floor requirement) for the sibling-OU
+     * test above -- proves the fixture is genuinely reachable by a caller
+     * correctly scoped to it, so the 404 above cannot be passing merely
+     * because the fixture was never visible at all. No such positive control
+     * previously existed for set_task_discussion with a non-null caller OU.
+     */
+    public function testDiscussionPutSucceedsForATaskInTheCallersOwnOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Own OU project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Own OU task');
+
+        $handler = new TaskDiscussionsApiHandler($this->pdo);
+        $response = $handler->put(7, 2, $ownTaskId, json_encode(['messages' => [], 'reason' => 'own OU']));
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('own OU', $payload['data']['reason']);
     }
 
     // ==================== BoardApiHandler defensive fallback (whole-branch review finding I1) ====================

@@ -82,6 +82,32 @@ use Tasker\Tests\Support\SqlitePolyfills;
  * forced write failure, and the sibling-OU 404s — lives in
  * TenantIsolationOuTest.php's own "TasksApiHandler::moveToProject()"
  * section, never here.
+ *
+ * NO SQLite COVERAGE FOR update()/delete()/complete()/uncomplete()/pin()/
+ * unpin()/tag() EITHER, AS OF D1b Task 13: these used to be tenant-scoped
+ * only, on the theory that a caller only ever reaches a task id through an
+ * OU-scoped list first (see this class's own docblock in TasksApiHandler for
+ * the fuller reasoning and why it did not hold). All seven now call
+ * findVisible() — the SAME OU-aware, PostgreSQL-only join getOne()/
+ * moveToGroup()/moveToProject() already use — either as their existing
+ * front-door check (update()/delete()/tag()) or as a new pre-check added
+ * before the write (complete()/uncomplete()/pin()/unpin(), which used to
+ * write first and infer 404 from rowCount() === 0). Every test that
+ * exercised these seven methods directly (testCompleteSetsStatusAndCompletedAt,
+ * testCompleteRejectsATaskOutsideTheCallersTenant, testUpdateChangesTextDetailAndPriority,
+ * testUpdateRejectsAnInvalidPriority, testUpdateAcceptsEachValidStatus,
+ * testUpdateRejectsAnInvalidStatus, testUpdateToDoneStampsCompletedAt,
+ * testUpdateAwayFromDoneClearsCompletedAt, testUpdateWithoutAStatusFieldLeavesCompletedAtUntouched,
+ * testUpdateRejects404ForATaskOutsideTheCallersTenant, testDeleteRemovesTheTask,
+ * testDeleteRejects404ForATaskOutsideTheCallersTenant, testDeleteRemovesTheTasksEntityTagRows,
+ * testUncompleteRestoresPendingStatusAndClearsCompletedAt, testPinAndUnpinToggleThePinnedFlag,
+ * testTagAttachesAnExistingTagToATask, testTagIsIdempotentOnAlreadyAttachedTag,
+ * testTagRejectsATaskOutsideTheCallersTenant, testTagRejectsATagBelongingToADifferentTenant)
+ * moved to TenantIsolationOuTest.php, alongside new sibling-OU boundary
+ * tests (negative and positive control) neither predecessor covered.
+ * testPinnedCoercesAPostgresStyleFalseStringToBooleanFalse() stays here
+ * unchanged — it exercises listForSection() (unaffected by this fix), never
+ * pin()/unpin() themselves, despite its name.
  */
 final class TasksApiHandlerTest extends TestCase
 {
@@ -150,57 +176,6 @@ final class TasksApiHandlerTest extends TestCase
     }
 
     /**
-     * Fixture for whity-core's `tags` table (see
-     * host/.core/database/migrations/063_create_taxonomy_tables.php), minus
-     * the FK REFERENCES clauses the in-memory SQLite double doesn't need.
-     * Only the columns TagRepository::find() selects are required.
-     */
-    private function createTagsTable(): void
-    {
-        $this->pdo->exec('
-            CREATE TABLE tags (
-                id INTEGER NOT NULL PRIMARY KEY,
-                tenant_id INTEGER NOT NULL,
-                group_id INTEGER NOT NULL,
-                name VARCHAR(128) NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-                updated_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP)
-            )
-        ');
-    }
-
-    /**
-     * Insert one `tags` row owned by $tenantId with the given $id, so
-     * TasksApiHandler::tag()'s TagRepository::find($tenantId, $id) lookup
-     * succeeds. $id is supplied explicitly (never relying on autoincrement).
-     */
-    private function insertTag(int $id, int $tenantId): void
-    {
-        $stmt = $this->pdo->prepare(
-            'INSERT INTO tags (id, tenant_id, group_id, name) VALUES (:id, :tenant_id, 1, :name)'
-        );
-        $stmt->execute([':id' => $id, ':tenant_id' => $tenantId, ':name' => 'tag-' . $id]);
-    }
-
-    /**
-     * Fixture for whity-core's `entity_tags` table (see Task 1's own
-     * PingApiHandlerTest for the identical shape).
-     */
-    private function createEntityTagsTable(): void
-    {
-        $this->pdo->exec('
-            CREATE TABLE entity_tags (
-                tenant_id INTEGER NOT NULL,
-                entity_type VARCHAR(128) NOT NULL,
-                entity_id BIGINT NOT NULL,
-                tag_id BIGINT NOT NULL,
-                created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-                PRIMARY KEY (entity_type, entity_id, tag_id)
-            )
-        ');
-    }
-
-    /**
      * D1b Task 6: list_tasks generalises listForSection() into project/
      * section/group/status filters. The original's documented contract is
      * "Defaults to excluding DONE tasks. Pass 'all' to include everything" —
@@ -261,25 +236,6 @@ final class TasksApiHandlerTest extends TestCase
         self::assertCount(2, $payload['data']);
     }
 
-    public function testCompleteSetsStatusAndCompletedAt(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Finish me');
-
-        $response = $this->handler->complete(7, $taskId);
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('done', $payload['data']['status']);
-        self::assertNotNull($payload['data']['completedAt']);
-    }
-
-    public function testCompleteRejectsATaskOutsideTheCallersTenant(): void
-    {
-        $response = $this->handler->complete(9, 999);
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
     public function testListForSectionReturnsOnlyThatSectionsTasksForTheCallersTenant(): void
     {
         $this->insertTaskDirect(7, 100, 1, 'A');
@@ -308,199 +264,6 @@ final class TasksApiHandlerTest extends TestCase
         $response = $this->handler->listForSection(7, 2);
 
         self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testUpdateChangesTextDetailAndPriority(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
-
-        $response = $this->handler->update(7, $taskId, json_encode(['text' => 'Edited', 'detail' => 'more info', 'priority' => 'high']));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('Edited', $payload['data']['text']);
-        self::assertSame('more info', $payload['data']['detail']);
-        self::assertSame('high', $payload['data']['priority']);
-    }
-
-    public function testUpdateRejectsAnInvalidPriority(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
-
-        $response = $this->handler->update(7, $taskId, json_encode(['priority' => 'urgent-ish']));
-
-        self::assertSame(400, $response->getStatusCode());
-    }
-
-    /**
-     * D1b Task 11 round 3: update_task gained a status field matching the
-     * original live tool's own three-value enum. Before this, nothing in
-     * this plugin ever wrote 'in_progress' at all -- create() hardcodes
-     * 'pending', complete()/uncomplete() only ever write 'done'/'pending' --
-     * which made AttentionApiHandler's own `stale` bucket (status =
-     * 'in_progress' AND quiet 2+ days) permanently unreachable through any
-     * real write path. This is the fix.
-     */
-    public function testUpdateAcceptsEachValidStatus(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Status test');
-
-        foreach (['in_progress', 'done', 'pending'] as $status) {
-            $response = $this->handler->update(7, $taskId, json_encode(['status' => $status]));
-
-            self::assertSame(200, $response->getStatusCode());
-            $payload = json_decode($response->getBody(), true);
-            self::assertSame($status, $payload['data']['status']);
-        }
-    }
-
-    public function testUpdateRejectsAnInvalidStatus(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
-
-        $response = $this->handler->update(7, $taskId, json_encode(['status' => 'blocked']));
-
-        self::assertSame(400, $response->getStatusCode());
-
-        $row = $this->pdo->query("SELECT status FROM tasker_tasks WHERE rowid = {$taskId}")->fetch(PDO::FETCH_ASSOC);
-        self::assertSame('pending', $row['status'], 'a rejected status must not partially apply');
-    }
-
-    /**
-     * D1b Task 11 round 4: update_task's status write must maintain
-     * completed_at exactly the way complete()/uncomplete() already do —
-     * three transitions, each proving one part of that invariant.
-     */
-    public function testUpdateToDoneStampsCompletedAt(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original');
-
-        $response = $this->handler->update(7, $taskId, json_encode(['status' => 'done']));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('done', $payload['data']['status']);
-        self::assertNotNull(
-            $payload['data']['completedAt'],
-            'update_task setting status to done must stamp completed_at, matching complete()'
-        );
-    }
-
-    public function testUpdateAwayFromDoneClearsCompletedAt(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original', null, null, 'done');
-        $this->pdo->exec("UPDATE tasker_tasks SET completed_at = CURRENT_TIMESTAMP WHERE rowid = {$taskId}");
-
-        $response = $this->handler->update(7, $taskId, json_encode(['status' => 'pending']));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('pending', $payload['data']['status']);
-        self::assertNull(
-            $payload['data']['completedAt'],
-            'update_task moving status away from done must clear completed_at, matching uncomplete()'
-        );
-    }
-
-    /**
-     * The case that matters most: update_task changes only PROVIDED fields,
-     * so a text-only update on an already-done task must not touch
-     * completed_at at all -- neither re-stamping it nor clearing it.
-     */
-    public function testUpdateWithoutAStatusFieldLeavesCompletedAtUntouched(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Original', null, null, 'done');
-        $this->pdo->exec("UPDATE tasker_tasks SET completed_at = '2026-01-01 00:00:00' WHERE rowid = {$taskId}");
-
-        $response = $this->handler->update(7, $taskId, json_encode(['text' => 'Edited text only']));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('Edited text only', $payload['data']['text']);
-        self::assertSame('done', $payload['data']['status'], 'status must be unaffected by a text-only update');
-        self::assertSame(
-            '2026-01-01 00:00:00',
-            $payload['data']['completedAt'],
-            'a text-only update must not clear or restamp an existing completed_at'
-        );
-    }
-
-    public function testUpdateRejects404ForATaskOutsideTheCallersTenant(): void
-    {
-        $response = $this->handler->update(9, 999, json_encode(['text' => 'Should fail']));
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testDeleteRemovesTheTask(): void
-    {
-        // delete() now also calls EntityTagRepository::detachAll() (D1b
-        // Task 6's carry-over fix), which issues a DELETE against
-        // entity_tags unconditionally — that table must exist even when
-        // this particular task was never tagged.
-        $this->createEntityTagsTable();
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Doomed');
-
-        $response = $this->handler->delete(7, $taskId);
-
-        self::assertSame(204, $response->getStatusCode());
-
-        $count = (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_tasks')->fetchColumn();
-        self::assertSame(0, $count);
-    }
-
-    public function testDeleteRejects404ForATaskOutsideTheCallersTenant(): void
-    {
-        $response = $this->handler->delete(9, 999);
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    /**
-     * CARRY-OVER FIX (D1b Task 6): deleting a tagged task used to orphan its
-     * entity_tags rows (entity_tags carries no FK to tasker_tasks). Now
-     * cleaned up via core's EntityTagRepository::detachAll().
-     */
-    public function testDeleteRemovesTheTasksEntityTagRows(): void
-    {
-        $this->pdo->exec('
-            CREATE TABLE entity_tags (
-                tenant_id INTEGER NOT NULL, entity_type VARCHAR(128) NOT NULL, entity_id BIGINT NOT NULL,
-                tag_id BIGINT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT (CURRENT_TIMESTAMP),
-                PRIMARY KEY (entity_type, entity_id, tag_id)
-            )
-        ');
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Tagged then deleted');
-        $this->pdo->exec("INSERT INTO entity_tags (tenant_id, entity_type, entity_id, tag_id) VALUES (7, 'tasker_task', {$taskId}, 11)");
-
-        $this->handler->delete(7, $taskId);
-
-        $orphans = (int) $this->pdo->query("SELECT COUNT(*) FROM entity_tags WHERE entity_type = 'tasker_task' AND entity_id = {$taskId}")->fetchColumn();
-        self::assertSame(0, $orphans);
-    }
-
-    public function testUncompleteRestoresPendingStatusAndClearsCompletedAt(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Flip-flop');
-        $this->handler->complete(7, $taskId);
-
-        $response = $this->handler->uncomplete(7, $taskId);
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame('pending', $payload['data']['status']);
-        self::assertNull($payload['data']['completedAt']);
-    }
-
-    public function testPinAndUnpinToggleThePinnedFlag(): void
-    {
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Pin me');
-
-        $pinned = json_decode($this->handler->pin(7, $taskId)->getBody(), true);
-        self::assertTrue($pinned['data']['pinned']);
-
-        $unpinned = json_decode($this->handler->unpin(7, $taskId)->getBody(), true);
-        self::assertFalse($unpinned['data']['pinned']);
     }
 
     /**
@@ -532,63 +295,5 @@ final class TasksApiHandlerTest extends TestCase
             $payload['data'][0]['pinned'],
             'a naive (bool) cast on the string "f" (pdo_pgsql\'s real false representation) evaluates to true'
         );
-    }
-
-    public function testTagAttachesAnExistingTagToATask(): void
-    {
-        $this->createEntityTagsTable();
-        $this->createTagsTable();
-        $this->insertTag(11, 7);
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Taggable');
-
-        $response = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
-
-        self::assertSame(201, $response->getStatusCode());
-    }
-
-    public function testTagIsIdempotentOnAlreadyAttachedTag(): void
-    {
-        $this->createEntityTagsTable();
-        $this->createTagsTable();
-        $this->insertTag(11, 7);
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Taggable');
-
-        $first = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
-        $second = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
-
-        self::assertSame(201, $first->getStatusCode());
-        self::assertSame(200, $second->getStatusCode());
-
-        $count = (int) $this->pdo->query('SELECT COUNT(*) FROM entity_tags')->fetchColumn();
-        self::assertSame(1, $count);
-    }
-
-    public function testTagRejectsATaskOutsideTheCallersTenant(): void
-    {
-        $this->createEntityTagsTable();
-
-        $response = $this->handler->tag(9, 999, json_encode(['tag_id' => 11]));
-
-        self::assertSame(404, $response->getStatusCode());
-    }
-
-    /**
-     * Mirrors Task 1's PingApiHandlerTest::testTagRejectsATagBelongingToADifferentTenant():
-     * a caller must never be able to attach a tag_id that exists but belongs
-     * to a DIFFERENT tenant — the tag-ownership check must reject this BEFORE
-     * any attempt to write the association. No entity_tags table is created
-     * here deliberately: if the ownership check didn't reject first, the
-     * INSERT would throw on the missing table and surface as a 500, not
-     * silently pass this test as a 422.
-     */
-    public function testTagRejectsATagBelongingToADifferentTenant(): void
-    {
-        $this->createTagsTable();
-        $this->insertTag(11, 9);
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Taggable');
-
-        $response = $this->handler->tag(7, $taskId, json_encode(['tag_id' => 11]));
-
-        self::assertSame(422, $response->getStatusCode());
     }
 }

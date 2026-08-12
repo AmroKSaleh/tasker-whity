@@ -24,6 +24,15 @@ use Whity\Sdk\Http\Response;
  * OuScopeResolver there — confines create() to a real PostgreSQL connection
  * (see TenantIsolationOuTest). listForTask() deliberately stays tenant-only
  * per I7's own note above.
+ *
+ * D1b Task 13 FIX: update()/delete()/setChecked() (the complete_milestone/
+ * uncomplete_milestone backing method) used to be the "out of C1's scope"
+ * half — they take the MILESTONE's own id directly, not a task id — but
+ * tasker_milestones.id is EQUALLY a plain sequential BIGSERIAL, so an
+ * OU-restricted caller could reach a sibling OU's milestone by counting
+ * upward through ids just as easily as through a task id. All three now call
+ * {@see self::findVisible()} first, matching the defence-in-depth pattern
+ * this class's own create() already applies to its own parent check.
  */
 final class MilestonesApiHandler
 {
@@ -121,9 +130,9 @@ final class MilestonesApiHandler
         }
     }
 
-    public function update(int $tenantId, int $milestoneId, string $body): Response
+    public function update(int $tenantId, ?int $callerOuId, int $milestoneId, string $body): Response
     {
-        $row = $this->findScoped($milestoneId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $milestoneId);
         if ($row === null) {
             return Response::error('Milestone not found', 404);
         }
@@ -173,9 +182,9 @@ final class MilestonesApiHandler
         }
     }
 
-    public function delete(int $tenantId, int $milestoneId): Response
+    public function delete(int $tenantId, ?int $callerOuId, int $milestoneId): Response
     {
-        $row = $this->findScoped($milestoneId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $milestoneId);
         if ($row === null) {
             return Response::error('Milestone not found', 404);
         }
@@ -197,9 +206,25 @@ final class MilestonesApiHandler
      * uncomplete_milestone as separate tools, so a toggle cannot express the
      * contract — and it makes complete_milestone non-idempotent, which is
      * worse than merely inconvenient for an agent that retries.
+     *
+     * D1b Task 13 FIX: this used to write straight through with a plain
+     * tenant_id predicate and infer 404 from rowCount() === 0 — see this
+     * class's own docblock. {@see self::findVisible()} is now checked BEFORE
+     * the UPDATE. toggle() (below) passes null for $callerOuId, which
+     * {@see \Tasker\Access\OuScopeResolver::scopeParams()} treats as
+     * "unrestricted" — the same visibility findScoped() gave it before this
+     * fix, since toggle() is tenant-scoped-only by design (no route calls it
+     * with a real caller OU at all; see its own docblock) — but this DOES
+     * mean toggle() now also requires a real PostgreSQL connection, a
+     * cascading consequence of setChecked() becoming OU-aware, not a
+     * deliberate change to toggle() itself.
      */
-    public function setChecked(int $tenantId, int $milestoneId, bool $checked): Response
+    public function setChecked(int $tenantId, ?int $callerOuId, int $milestoneId, bool $checked): Response
     {
+        if ($this->findVisible($tenantId, $callerOuId, $milestoneId) === null) {
+            return Response::error('Milestone not found', 404);
+        }
+
         try {
             $stmt = $this->db->prepare(
                 "UPDATE tasker_milestones SET checked = :checked
@@ -254,7 +279,10 @@ final class MilestonesApiHandler
             return Response::error('Milestone not found', 404);
         }
 
-        return $this->setChecked($tenantId, $milestoneId, !self::dbTruthy($row['checked']));
+        // null $callerOuId -- see setChecked()'s own docblock for why this
+        // preserves toggle()'s pre-existing tenant-scoped-only visibility
+        // rather than actually restricting it to some caller's OU.
+        return $this->setChecked($tenantId, null, $milestoneId, !self::dbTruthy($row['checked']));
     }
 
     /**
@@ -276,6 +304,14 @@ final class MilestonesApiHandler
      * no ou_id column, so this joins up to tasker_projects (the only table
      * that does) and applies {@see OuScopeResolver::whereFragment()} there —
      * the same static-SQL-template pattern used throughout this fix.
+     *
+     * D1b Task 13 FIX: this join used to bind tenant_id on tasker_tasks only,
+     * never on tasker_projects — a divergence from
+     * {@see \Tasker\Api\TasksApiHandler::findVisible()}'s own both-sides
+     * convention (this codebase's standard; see that method's own doc). Not
+     * reachable through any route today (no route can create a cross-tenant
+     * task->project link), but fixed here as the natural moment since this
+     * task is already touching every sibling join.
      */
     private function taskVisible(int $tenantId, ?int $callerOuId, int $taskId): bool
     {
@@ -285,15 +321,57 @@ final class MilestonesApiHandler
         $stmt = $this->db->prepare(
             "SELECT 1 FROM tasker_tasks t
              JOIN tasker_projects p ON p.id = t.project_id
-             WHERE t.id = :id AND t.tenant_id = :tenant_id AND {$ouClause}"
+             WHERE t.id = :id AND t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
         );
         $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
         $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
         $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
         $stmt->execute();
 
         return $stmt->fetch() !== false;
+    }
+
+    /**
+     * OU-aware milestone lookup for {@see self::update()}/
+     * {@see self::delete()}/{@see self::setChecked()} (D1b Task 13) — see
+     * this class's own docblock for why those, like create()'s task-existence
+     * check before them, must not trust a caller-supplied milestone id at
+     * face value. tasker_milestones carries no ou_id of its own — only
+     * tasker_projects does — so this walks up TWO hops (milestone -> task ->
+     * project) and applies {@see OuScopeResolver::whereFragment()} on the
+     * project's ou_id, one static SQL template. This is new code, so
+     * tenant_id is bound explicitly on BOTH tasker_milestones AND
+     * tasker_projects (`:tenant_id` / `:tenant_id_p`), matching
+     * {@see \Tasker\Api\TasksApiHandler::findVisible()}'s own convention.
+     * Confines update()/delete()/setChecked() to a real PostgreSQL connection
+     * — see TenantIsolationOuTest.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function findVisible(int $tenantId, ?int $callerOuId, int $milestoneId): ?array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT m.id AS id, m.public_id, m.tenant_id, m.task_id, m.summary, m.detail, m.checked, m.sort_order, m.created_at
+             FROM tasker_milestones m
+             JOIN tasker_tasks t ON t.id = m.task_id
+             JOIN tasker_projects p ON p.id = t.project_id
+             WHERE m.id = :id AND m.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $milestoneId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($row) ? $row : null;
     }
 
     private static function generateUuidV4(): string

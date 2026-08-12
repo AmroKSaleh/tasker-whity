@@ -20,13 +20,19 @@ use Whity\Sdk\Http\Response;
  * to list/create groups under a section that belongs to a project outside
  * their OU scope. sectionVisible() (below) now joins through to the
  * section's OWN project and applies OuScopeResolver on the project's ou_id —
- * the same static-SQL-template pattern used throughout this fix. update()/
- * delete() are unaffected: they take the GROUP's own id directly, explicitly
- * out of this fix's scope.
+ * the same static-SQL-template pattern used throughout this fix.
  *
- * Postgres-only for list()/create() specifically — see
- * {@see SectionsApiHandler}'s identical note; update()/delete() remain plain
- * tenant-scoped queries and keep their SQLite-backed unit test coverage.
+ * D1b Task 13 FIX: update()/delete() used to be the "explicitly out of
+ * scope" half of C1's own fix — they take the GROUP's own id directly, not a
+ * section id path parameter, but tasker_groups.id is EQUALLY a plain
+ * sequential BIGSERIAL, so an OU-restricted caller could reach a sibling OU's
+ * group by counting upward through ids just as easily as through a section
+ * id. Both now call {@see self::findVisible()} first, matching the
+ * defence-in-depth pattern {@see \Tasker\Api\SectionsApiHandler} applies
+ * identically to its own update()/delete().
+ *
+ * Postgres-only for list()/create()/update()/delete() specifically — see
+ * {@see SectionsApiHandler}'s identical note.
  *
  * DELETE never touches tasker_tasks: a group's tasks are un-grouped (their
  * group_id becomes NULL via the FK's ON DELETE SET NULL), not deleted,
@@ -117,9 +123,9 @@ final class GroupsApiHandler
         }
     }
 
-    public function update(int $tenantId, int $groupId, string $body): Response
+    public function update(int $tenantId, ?int $callerOuId, int $groupId, string $body): Response
     {
-        $row = $this->findScoped($groupId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $groupId);
         if ($row === null) {
             return Response::error('Group not found', 404);
         }
@@ -171,9 +177,9 @@ final class GroupsApiHandler
      * deleted (tasker_tasks.group_id is ON DELETE SET NULL), so removing a
      * group never loses work, unlike removing a section or a project.
      */
-    public function delete(int $tenantId, int $groupId): Response
+    public function delete(int $tenantId, ?int $callerOuId, int $groupId): Response
     {
-        $row = $this->findScoped($groupId, $tenantId);
+        $row = $this->findVisible($tenantId, $callerOuId, $groupId);
         if ($row === null) {
             return Response::error('Group not found', 404);
         }
@@ -202,6 +208,14 @@ final class GroupsApiHandler
      * same static-SQL-template pattern used throughout this fix. See this
      * class's own docblock for why this confines list()/create() to a real
      * PostgreSQL connection.
+     *
+     * D1b Task 13 FIX: this join used to bind tenant_id on tasker_sections
+     * only, never on tasker_projects — a divergence from
+     * {@see \Tasker\Api\TasksApiHandler::findVisible()}'s own both-sides
+     * convention (this codebase's standard; see that method's own doc).
+     * Not reachable through any route today (no route can create a
+     * cross-tenant section->project link), but fixed here as the natural
+     * moment since this task is already touching every sibling join.
      */
     private function sectionVisible(int $tenantId, ?int $callerOuId, int $sectionId): bool
     {
@@ -211,10 +225,11 @@ final class GroupsApiHandler
         $stmt = $this->db->prepare(
             "SELECT 1 FROM tasker_sections s
              JOIN tasker_projects p ON p.id = s.project_id
-             WHERE s.id = :id AND s.tenant_id = :tenant_id AND {$ouClause}"
+             WHERE s.id = :id AND s.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
         );
         $stmt->bindValue(':id', $sectionId, PDO::PARAM_INT);
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
         $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
         $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
         $stmt->execute();
@@ -244,6 +259,46 @@ final class GroupsApiHandler
              FROM tasker_groups WHERE {$idCol} = :id AND tenant_id = :tenant_id"
         );
         $stmt->execute([':id' => $id, ':tenant_id' => $tenantId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        return is_array($row) ? $row : null;
+    }
+
+    /**
+     * OU-aware group lookup for {@see self::update()}/{@see self::delete()}
+     * (D1b Task 13) — see this class's own docblock for why those two, like
+     * list()/create() before them, must not trust a caller-supplied group id
+     * at face value. tasker_groups carries no ou_id of its own — only
+     * tasker_projects does — so this walks up TWO hops (group -> section ->
+     * project) and applies {@see OuScopeResolver::whereFragment()} on the
+     * project's ou_id, one static SQL template. This is new code, so
+     * tenant_id is bound explicitly on BOTH tasker_groups AND tasker_projects
+     * (`:tenant_id` / `:tenant_id_p`), matching
+     * {@see \Tasker\Api\TasksApiHandler::findVisible()}'s own convention.
+     * Confines update()/delete() to a real PostgreSQL connection — see
+     * TenantIsolationOuTest.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function findVisible(int $tenantId, ?int $callerOuId, int $groupId): ?array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT g.id AS id, g.public_id, g.tenant_id, g.section_id, g.name, g.slug, g.sort_order, g.created_at
+             FROM tasker_groups g
+             JOIN tasker_sections s ON s.id = g.section_id
+             JOIN tasker_projects p ON p.id = s.project_id
+             WHERE g.id = :id AND g.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $groupId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
         $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
         return is_array($row) ? $row : null;
