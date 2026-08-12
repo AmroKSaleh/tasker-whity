@@ -1,31 +1,59 @@
 ﻿[
     {
+        "name":  "__init_tasker_session",
+        "description":  "First call of any Tasker session: preferences plus the directive playbook",
+        "inputSchema":  {
+                            "type":  "object"
+                        }
+    },
+    {
         "name":  "add_milestone",
-        "description":  "Add a milestone to a task",
+        "description":  "Add a milestone to a task. The milestone text is passed as text (the original app\u0027s argument name); summary is accepted as an alias for it, and is the name this backend uses for the same field in responses and in update_milestone.",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "taskId":  {
-                                                              "type":  "integer"
-                                                          }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "text":  {
+                                                            "type":  "string",
+                                                            "description":  "Milestone text."
+                                                        },
+                                               "summary":  {
+                                                               "type":  "string",
+                                                               "description":  "Alias of text, kept because it is this backend\u0027s own field name. text wins if both are sent."
+                                                           },
+                                               "sort_order":  {
+                                                                  "type":  "integer"
+                                                              }
                                            },
                             "required":  [
-                                             "taskId"
+                                             "task_id"
                                          ]
                         }
     },
     {
         "name":  "complete_milestone",
-        "description":  "Toggle a milestone\u0027s checked state",
+        "description":  "Mark a milestone complete",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "milestone_id":  {
+                                                                    "type":  "string",
+                                                                    "description":  "Milestone UUID or id. Preferred over index — stable under reordering."
+                                                                },
+                                               "index":  {
+                                                             "type":  "integer",
+                                                             "description":  "Zero-based position within the task\u0027s milestones. Supported for compatibility; racy if milestones are being reordered concurrently."
+                                                         }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
@@ -35,12 +63,39 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "create_environment",
+        "description":  "Create an Environment (organizational unit) — alias of core\u0027s OU create",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "name":  {
+                                                            "type":  "string",
+                                                            "description":  "Environment name"
+                                                        },
+                                               "parent_id":  {
+                                                                 "type":  [
+                                                                              "integer",
+                                                                              "null"
+                                                                          ],
+                                                                 "description":  "Optional parent Environment id."
+                                                             },
+                                               "description":  {
+                                                                   "type":  "string"
+                                                               }
+                                           },
+                            "required":  [
+                                             "name"
                                          ]
                         }
     },
@@ -50,12 +105,20 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "sectionId":  {
-                                                                 "type":  "integer"
-                                                             }
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Section UUID, id, or slug (slug requires project_id)."
+                                                              },
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Needed only when section_id is a slug. Omit to use your default project."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        }
                                            },
                             "required":  [
-                                             "sectionId"
+                                             "name"
                                          ]
                         }
     },
@@ -80,7 +143,28 @@
         "name":  "create_project",
         "description":  "Create a project (with its default Backlog section)",
         "inputSchema":  {
-                            "type":  "object"
+                            "type":  "object",
+                            "properties":  {
+                                               "name":  {
+                                                            "type":  "string",
+                                                            "description":  "Project name"
+                                                        },
+                                               "prefix":  {
+                                                              "type":  "string",
+                                                              "description":  "Optional 2-5 uppercase letters for short ids (e.g. TDE). Derived from the name when omitted."
+                                                          },
+                                               "environment_id":  {
+                                                                      "type":  "string",
+                                                                      "description":  "Optional Environment (OU) to create the project in."
+                                                                  },
+                                               "context":  {
+                                                               "type":  "object",
+                                                               "description":  "The project Foundation: goal, why, scope, definition_of_done and related keys."
+                                                           }
+                                           },
+                            "required":  [
+                                             "name"
+                                         ]
                         }
     },
     {
@@ -89,27 +173,76 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "projectId":  {
-                                                                 "type":  "integer"
-                                                             }
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix, slug, UUID or id. Omit to use your default project."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        }
                                            },
                             "required":  [
-                                             "projectId"
+                                             "name"
                                          ]
                         }
     },
     {
         "name":  "create_task",
-        "description":  "Create a task in a section",
+        "description":  "Create a task",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "sectionId":  {
-                                                                 "type":  "integer"
-                                                             }
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix, slug, UUID or id. Omit to use your default project."
+                                                              },
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Optional. Defaults to the project\u0027s Backlog section."
+                                                              },
+                                               "text":  {
+                                                            "type":  "string",
+                                                            "description":  "Task title"
+                                                        },
+                                               "detail":  {
+                                                              "type":  "string",
+                                                              "description":  "Context. Write so a cold reader with no chat history can act on this task alone."
+                                                          },
+                                               "priority":  {
+                                                                "type":  "string",
+                                                                "enum":  [
+                                                                             "rush",
+                                                                             "high",
+                                                                             "medium",
+                                                                             "low"
+                                                                         ]
+                                                            },
+                                               "due_date":  {
+                                                                "type":  "string",
+                                                                "description":  "ISO date YYYY-MM-DD"
+                                                            }
                                            },
                             "required":  [
-                                             "sectionId"
+                                             "text"
+                                         ]
+                        }
+    },
+    {
+        "name":  "delete_environment",
+        "description":  "Delete an Environment (organizational unit) — alias of core\u0027s OU delete",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "environment_id":  {
+                                                                      "type":  [
+                                                                                   "string",
+                                                                                   "integer"
+                                                                               ],
+                                                                      "description":  "The Environment id to delete."
+                                                                  }
+                                           },
+                            "required":  [
+                                             "environment_id"
                                          ]
                         }
     },
@@ -119,12 +252,16 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "group_id":  {
+                                                                "type":  "string"
+                                                            },
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Needed only when group_id is a slug."
+                                                              }
                                            },
                             "required":  [
-                                             "id"
+                                             "group_id"
                                          ]
                         }
     },
@@ -134,42 +271,65 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "milestone_id":  {
+                                                                    "type":  "string",
+                                                                    "description":  "Milestone UUID or id. Preferred over index — stable under reordering."
+                                                                },
+                                               "index":  {
+                                                             "type":  "integer",
+                                                             "description":  "Zero-based position within the task\u0027s milestones. Supported for compatibility; racy if milestones are being reordered concurrently."
+                                                         }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
     {
         "name":  "delete_project",
-        "description":  "Delete a project and everything under it",
+        "description":  "Permanently delete a project and all its sections, tasks, and milestones. Always confirm with the user before calling this.",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id."
+                                                              },
+                                               "confirmed":  {
+                                                                 "type":  "boolean",
+                                                                 "description":  "Must be true to confirm permanent deletion"
+                                                             }
                                            },
                             "required":  [
-                                             "id"
+                                             "project_id",
+                                             "confirmed"
                                          ]
                         }
     },
     {
         "name":  "delete_section",
-        "description":  "Delete a section (and its groups/tasks)",
+        "description":  "Delete a section. By default REFUSES if the section still has tasks (move them to another section first, e.g. via update_task/move_task_to_group). Pass delete_tasks: true to delete the section together with all its tasks and groups. Irreversible — confirm with the user before calling.",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "section_id":  {
+                                                                  "type":  "string"
+                                                              },
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Needed only when section_id is a slug."
+                                                              },
+                                               "delete_tasks":  {
+                                                                    "type":  "boolean",
+                                                                    "description":  "If true, delete the section AND every task/group in it. If false (default), the section must already be empty or the call is refused."
+                                                                }
                                            },
                             "required":  [
-                                             "id"
+                                             "section_id"
                                          ]
                         }
     },
@@ -179,12 +339,13 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
@@ -194,13 +355,41 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
-                                           },
-                            "required":  [
-                                             "id"
-                                         ]
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                              }
+                                           }
+                        }
+    },
+    {
+        "name":  "get_my_attention",
+        "description":  "The \"what needs me?\" triage for the CALLING USER\u0027S OWN non-done work -- not the whole team\u0027s. Matched by created_by (tasker_tasks has no assignee column). Two buckets in the response: overdue (due_date before today) and stale (in_progress and not updated in 2+ days -- fixed, not configurable). Within EACH bucket, CRITICAL (pinned) tasks are listed first, ahead of the bucket\u0027s own normal order. NOT AVAILABLE ON THIS BACKEND (the original also covers these, but this schema has no such concept yet): tasks awaiting review verdict, pending human guidance, and agent sessions awaiting input. A task qualifying for both available buckets appears in each, not deduplicated. A completed (done) task appears in no bucket. project_id is optional, and omitting it means every project in your OU scope -- NOT your default project, unlike every other tool in this plugin.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix, slug, UUID or id. Omit to search across every project in your OU scope (this does NOT fall back to your default project)."
+                                                              }
+                                           }
+                        }
+    },
+    {
+        "name":  "get_project",
+        "description":  "Get a single project: its sections and every task, regardless of status",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                              },
+                                               "include_notes":  {
+                                                                     "type":  "boolean",
+                                                                     "description":  "Include each task\u0027s detail field. Defaults to false — on a large project this can be very large."
+                                                                 }
+                                           }
                         }
     },
     {
@@ -209,12 +398,26 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                              }
+                                           }
+                        }
+    },
+    {
+        "name":  "get_task",
+        "description":  "Get a single task, including its milestones",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
@@ -224,13 +427,21 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
+                        }
+    },
+    {
+        "name":  "list_environments",
+        "description":  "List the tenant\u0027s Environments (organizational units) — alias of core\u0027s OU list",
+        "inputSchema":  {
+                            "type":  "object"
                         }
     },
     {
@@ -239,13 +450,15 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "sectionId":  {
-                                                                 "type":  "integer"
-                                                             }
-                                           },
-                            "required":  [
-                                             "sectionId"
-                                         ]
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Section UUID, id, or slug (slug requires project_id)."
+                                                              },
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Needed only when section_id is a slug. Omit to use your default project."
+                                                              }
+                                           }
                         }
     },
     {
@@ -254,12 +467,13 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "taskId":  {
-                                                              "type":  "integer"
-                                                          }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "taskId"
+                                             "task_id"
                                          ]
                         }
     },
@@ -274,7 +488,13 @@
         "name":  "list_projects",
         "description":  "List the caller\u0027s OU-scoped projects",
         "inputSchema":  {
-                            "type":  "object"
+                            "type":  "object",
+                            "properties":  {
+                                               "environment_id":  {
+                                                                      "type":  "string",
+                                                                      "description":  "Optional: only projects in this Environment (OU). Omit to see every Environment."
+                                                                  }
+                                           }
                         }
     },
     {
@@ -283,42 +503,97 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "projectId":  {
-                                                                 "type":  "integer"
-                                                             }
-                                           },
-                            "required":  [
-                                             "projectId"
-                                         ]
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                              }
+                                           }
                         }
     },
     {
         "name":  "list_tasks",
-        "description":  "List a section\u0027s tasks",
+        "description":  "List tasks, filtered by project, section, group or status",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "sectionId":  {
-                                                                 "type":  "integer"
-                                                             }
-                                           },
-                            "required":  [
-                                             "sectionId"
-                                         ]
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                              },
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Section UUID or id."
+                                                              },
+                                               "group_id":  {
+                                                                "type":  "string",
+                                                                "description":  "Group UUID or id."
+                                                            },
+                                               "status":  {
+                                                              "type":  "string",
+                                                              "enum":  [
+                                                                           "pending",
+                                                                           "in_progress",
+                                                                           "done",
+                                                                           "all"
+                                                                       ],
+                                                              "description":  "Defaults to excluding done tasks. Pass \"all\" to include everything."
+                                                          }
+                                           }
                         }
     },
     {
         "name":  "move_task",
-        "description":  "Move a task to a different section/group, or reorder it",
+        "description":  "Move a task to a DIFFERENT project",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31) to move"
+                                                           },
+                                               "target_project_id":  {
+                                                                         "type":  "string",
+                                                                         "description":  "Destination project: prefix (e.g. WCP), slug, or UUID"
+                                                                     },
+                                               "target_section_id":  {
+                                                                         "type":  "string",
+                                                                         "description":  "Optional: a section UUID in the TARGET project to drop the task into. If omitted (or not in the target project) the task lands in the target project\u0027s own Backlog section (this backend\u0027s substitute for \"no section\" -- tasker_tasks.section_id cannot be null) -- never an error."
+                                                                     }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id",
+                                             "target_project_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "move_task_to_group",
+        "description":  "Move a task into a group, un-group it, or reorder it",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "group_id":  {
+                                                                "type":  [
+                                                                             "string",
+                                                                             "null"
+                                                                         ],
+                                                                "description":  "Group UUID, id, or slug to set. Pass null explicitly to UN-GROUP the task. OMITTING this key entirely leaves its group membership UNCHANGED -- this is what makes a sort_order-only reorder call safe: it never touches group_id at all."
+                                                            },
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Optional. Also moves the task into this section, and is the section group_id is validated against. Defaults to the task\u0027s current section."
+                                                              },
+                                               "sort_order":  {
+                                                                  "type":  "integer",
+                                                                  "description":  "ADDITIVE: explicit board ordering within the task\u0027s section. The live original exposes NO reordering tool over MCP at all (its drag-and-drop is a web-UI concern served over its own REST layer) -- D2\u0027s own drag-and-drop frontend needs this here. Optional: omitting the key, or passing it as null, both leave sort_order unchanged (this is what lets a pure reorder call, e.g. {task_id, sort_order}, leave group_id alone too -- see group_id\u0027s own description). Any other value must be an integer or the call 400s."
+                                                              }
+                                           },
+                            "required":  [
+                                             "task_id"
                                          ]
                         }
     },
@@ -328,13 +603,128 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
+                        }
+    },
+    {
+        "name":  "rank_tasks",
+        "description":  "Return non-done tasks ranked by priority then due date -- \"what should I work on next?\". D1 dropped skip_count, so unlike the original app this cannot rank by skip-decay. If project_id is omitted, your default project is used when you have one set; otherwise pass confirmed: true to rank across EVERY project in your scope.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project (falls through to confirmed if you have none)."
+                                                              },
+                                               "confirmed":  {
+                                                                 "type":  "boolean",
+                                                                 "description":  "Only needed when project_id is omitted AND you have no default project set. Pass true to rank tasks across ALL projects in your scope."
+                                                             }
+                                           }
+                        }
+    },
+    {
+        "name":  "rename_environment",
+        "description":  "Rename or reparent an Environment (organizational unit) — alias of core\u0027s OU update",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "environment_id":  {
+                                                                      "type":  [
+                                                                                   "string",
+                                                                                   "integer"
+                                                                               ],
+                                                                      "description":  "The Environment id to rename."
+                                                                  },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        },
+                                               "description":  {
+                                                                   "type":  "string"
+                                                               },
+                                               "parent_id":  {
+                                                                 "type":  [
+                                                                              "integer",
+                                                                              "null"
+                                                                          ],
+                                                                 "description":  "New parent Environment id, or null to move to root."
+                                                             }
+                                           },
+                            "required":  [
+                                             "environment_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "rename_group",
+        "description":  "Rename a group (alias of update_group, preserved for existing agents)",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "group_id":  {
+                                                                "type":  "string",
+                                                                "description":  "Group UUID, id, or slug (slug requires section_id)."
+                                                            },
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Needed only when group_id is a slug."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        }
+                                           },
+                            "required":  [
+                                             "group_id",
+                                             "name"
+                                         ]
+                        }
+    },
+    {
+        "name":  "rename_section",
+        "description":  "Rename a section (alias of update_section, preserved for existing agents)",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Section UUID, id, or slug (slug requires project_id)."
+                                                              },
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Needed only when section_id is a slug."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        }
+                                           },
+                            "required":  [
+                                             "section_id",
+                                             "name"
+                                         ]
+                        }
+    },
+    {
+        "name":  "set_default_project",
+        "description":  "Set or clear the caller\u0027s default project",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  [
+                                                                               "string",
+                                                                               "integer",
+                                                                               "null"
+                                                                           ],
+                                                                  "description":  "Project UUID, prefix, slug or id. Null clears the default."
+                                                              }
+                                           }
                         }
     },
     {
@@ -343,12 +733,22 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "messages":  {
+                                                                "type":  "array"
+                                                            },
+                                               "reason":  {
+                                                              "type":  [
+                                                                           "string",
+                                                                           "null"
+                                                                       ]
+                                                          }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
@@ -378,12 +778,41 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "tag_id":  {
+                                                              "type":  "integer"
+                                                          }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id",
+                                             "tag_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "uncomplete_milestone",
+        "description":  "Restore a completed milestone to incomplete",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "milestone_id":  {
+                                                                    "type":  "string",
+                                                                    "description":  "Milestone UUID or id. Preferred over index — stable under reordering."
+                                                                },
+                                               "index":  {
+                                                             "type":  "integer",
+                                                             "description":  "Zero-based position within the task\u0027s milestones. Supported for compatibility; racy if milestones are being reordered concurrently."
+                                                         }
+                                           },
+                            "required":  [
+                                             "task_id"
                                          ]
                         }
     },
@@ -393,12 +822,13 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
@@ -408,27 +838,39 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
     {
         "name":  "update_group",
-        "description":  "Update a group\u0027s name or sort_order",
+        "description":  "Update a group\u0027s name or sort order",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "group_id":  {
+                                                                "type":  "string",
+                                                                "description":  "Group UUID, id, or slug (slug requires section_id)."
+                                                            },
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Needed only when group_id is a slug."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        },
+                                               "sort_order":  {
+                                                                  "type":  "integer"
+                                                              }
                                            },
                             "required":  [
-                                             "id"
+                                             "group_id"
                                          ]
                         }
     },
@@ -438,57 +880,176 @@
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "milestone_id":  {
+                                                                    "type":  "string",
+                                                                    "description":  "Milestone UUID or id. Preferred over index — stable under reordering."
+                                                                },
+                                               "index":  {
+                                                             "type":  "integer",
+                                                             "description":  "Zero-based position within the task\u0027s milestones. Supported for compatibility; racy if milestones are being reordered concurrently."
+                                                         },
+                                               "summary":  {
+                                                               "type":  "string"
+                                                           },
+                                               "detail":  {
+                                                              "type":  [
+                                                                           "string",
+                                                                           "null"
+                                                                       ]
+                                                          },
+                                               "sort_order":  {
+                                                                  "type":  "integer"
+                                                              }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     },
     {
         "name":  "update_project",
-        "description":  "Update a project\u0027s name, ou_id, prefix, or sort_order",
+        "description":  "Update a project\u0027s name, environment, prefix or sort order",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        },
+                                               "prefix":  {
+                                                              "type":  "string",
+                                                              "description":  "2-5 uppercase letters, or null to clear."
+                                                          },
+                                               "environment_id":  {
+                                                                      "type":  "string",
+                                                                      "description":  "Move the project to this Environment (OU)."
+                                                                  },
+                                               "sort_order":  {
+                                                                  "type":  "integer"
+                                                              }
                                            },
                             "required":  [
-                                             "id"
+                                             "project_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "update_project_context",
+        "description":  "Merge or replace a project\u0027s Foundation context",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                              },
+                                               "context":  {
+                                                               "type":  "object",
+                                                               "description":  "The keys to write — goal, why, scope, definition_of_done and related Foundation keys. Merged into the existing context by default (a shallow merge: a nested object you supply replaces the corresponding nested object wholesale, it does not deep-merge inner keys). Pass replace: true to discard the existing context entirely instead."
+                                                           },
+                                               "replace":  {
+                                                               "type":  "boolean",
+                                                               "description":  "When true, context replaces the whole document instead of merging into it. Defaults to false (merge) — the original tool is used to add Foundation keys incrementally."
+                                                           }
+                                           },
+                            "required":  [
+                                             "context"
                                          ]
                         }
     },
     {
         "name":  "update_section",
-        "description":  "Update a section\u0027s name, description, sort_order, or view_prefs",
+        "description":  "Update a section\u0027s name, description, sort order or view preferences",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "section_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Section UUID, id, or slug (slug requires project_id)."
+                                                              },
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Needed only when section_id is a slug."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string"
+                                                        },
+                                               "description":  {
+                                                                   "type":  [
+                                                                                "string",
+                                                                                "null"
+                                                                            ]
+                                                               },
+                                               "sort_order":  {
+                                                                  "type":  "integer"
+                                                              },
+                                               "view_prefs":  {
+                                                                  "type":  "object"
+                                                              }
                                            },
                             "required":  [
-                                             "id"
+                                             "section_id"
                                          ]
                         }
     },
     {
         "name":  "update_task",
-        "description":  "Update a task\u0027s text, detail, priority, or due_date",
+        "description":  "Update a task\u0027s text, detail, priority, due_date, or status",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
-                                               "id":  {
-                                                          "type":  "integer"
-                                                      }
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           },
+                                               "text":  {
+                                                            "type":  "string"
+                                                        },
+                                               "detail":  {
+                                                              "type":  [
+                                                                           "string",
+                                                                           "null"
+                                                                       ]
+                                                          },
+                                               "priority":  {
+                                                                "type":  [
+                                                                             "string",
+                                                                             "null"
+                                                                         ],
+                                                                "enum":  [
+                                                                             "rush",
+                                                                             "high",
+                                                                             "medium",
+                                                                             "low",
+                                                                             null
+                                                                         ]
+                                                            },
+                                               "due_date":  {
+                                                                "type":  [
+                                                                             "string",
+                                                                             "null"
+                                                                         ],
+                                                                "description":  "ISO date YYYY-MM-DD, or null to clear."
+                                                            },
+                                               "status":  {
+                                                              "type":  "string",
+                                                              "enum":  [
+                                                                           "pending",
+                                                                           "in_progress",
+                                                                           "done"
+                                                                       ],
+                                                              "description":  "Setting this to done stamps completed_at; setting it to pending or in_progress clears completed_at -- same as complete_task/uncomplete_task."
+                                                          }
                                            },
                             "required":  [
-                                             "id"
+                                             "task_id"
                                          ]
                         }
     }
