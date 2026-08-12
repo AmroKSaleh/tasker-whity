@@ -3823,6 +3823,25 @@ async function resolveFlowRef(sb: any, userId: string, args: any) {
   return null
 }
 
+// PostgREST caps any unbounded select at max-rows (1000) and returns an arbitrary slice
+// with NO error — so an over-cap account silently reads as SMALLER than it is. On 10 Aug
+// the totals for all 13 projects summed to exactly 1000 while WQW alone held 173.
+// Page explicitly until a short page comes back. The .order() is not cosmetic: without a
+// stable sort, OFFSET windows overlap and skip rows between pages.
+// Takes a FACTORY, not a query — Supabase builders are not safely re-runnable.
+async function fetchAllRows(buildQuery: () => any, pageSize = 1000): Promise<any[]> {
+  const MAX_PAGES = 50
+  const rows: any[] = []
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const from = page * pageSize
+    const { data, error } = await buildQuery().order('id').range(from, from + pageSize - 1)
+    if (error) throw new Error(`paged read failed at offset ${from}: ${error.message}`)
+    rows.push(...(data ?? []))
+    if ((data?.length ?? 0) < pageSize) return rows
+  }
+  return rows
+}
+
 async function runTool(sb: any, userId: string, name: string, args: any, rawParams?: any, tokenActor?: string | null): Promise<string> {
   const logCtx = { tool_name: name, raw_params: rawParams }
   switch (name) {
@@ -3835,9 +3854,10 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
       const envFilter = args.environment_id || null
       let projQuery = sb.from('projects').select('id, name, slug, prefix, context, environment_id').eq('user_id', userId).is('is_deleted', false).order('sort_order')
       if (envFilter) projQuery = projQuery.eq('environment_id', envFilter)
-      const [{ data: projects }, { data: tasks }, { data: envRows }, { data: us }] = await Promise.all([
+      const [{ data: projects }, tasks, { data: envRows }, { data: us }] = await Promise.all([
         projQuery,
-        sb.from('tasks').select('project_id, status').eq('user_id', userId).is('is_deleted', false),
+        // Paged: an unbounded select here truncated at 1000 rows and under-reported every project.
+        fetchAllRows(() => sb.from('tasks').select('project_id, status').eq('user_id', userId).is('is_deleted', false)),
         sb.from('environments').select('id, name, sort_order').eq('user_id', userId).eq('is_deleted', false).order('sort_order'),
         sb.from('user_settings').select('active_environment_id').eq('user_id', userId).maybeSingle(),
       ])
@@ -6038,15 +6058,18 @@ async function runTool(sb: any, userId: string, name: string, args: any, rawPara
         if (!p) return `Project "${args.project_id}" not found.`
         projectFilter = p.id
       }
-      let tq = sb.from('tasks')
-        .select('id, text, short_id, status, priority, due_date, review_verdict, agent_ready, pinned, project_id, project:projects(prefix)')
-        // TDE-882 class: this read never filtered the recycle bin, so soft-deleted tasks could be
-        // reported as needing attention. Found while adding the critical marker below.
-        .is('is_deleted', false)
-        .eq('user_id', userId).neq('status', 'done')
-      if (projectFilter) tq = tq.eq('project_id', projectFilter)
-      const { data: tasksData } = await tq
-      const taskList = tasksData || []
+      // Paged: same unbounded shape as list_projects had. Under the 1000-row cap today,
+      // but it would have started dropping tasks from triage silently once past it.
+      const taskList = await fetchAllRows(() => {
+        let q = sb.from('tasks')
+          .select('id, text, short_id, status, priority, due_date, review_verdict, agent_ready, pinned, project_id, project:projects(prefix)')
+          // TDE-882 class: this read never filtered the recycle bin, so soft-deleted tasks could be
+          // reported as needing attention. Found while adding the critical marker below.
+          .is('is_deleted', false)
+          .eq('user_id', userId).neq('status', 'done')
+        if (projectFilter) q = q.eq('project_id', projectFilter)
+        return q
+      })
       const byId = new Map<string, any>(taskList.map((t: any) => [t.id, t]))
       const taskIds = taskList.map((t: any) => t.id)
       const ref = (t: any) => t?.project?.prefix && t?.short_id != null ? `${t.project.prefix}-${t.short_id}` : (t?.id?.slice(0, 8) ?? '?')
