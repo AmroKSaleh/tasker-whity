@@ -123,28 +123,54 @@ final class ShortIdAllocatorTest extends TestCase
 
     /**
      * A genuinely different failure (here: a NOT NULL violation on a column
-     * the unique index has nothing to do with) must propagate immediately,
+     * the unique index has nothing to do with) must propagate IMMEDIATELY,
      * not be swallowed as a "race" and retried into MAX_ATTEMPTS exhaustion.
      * This is exactly the precision isRaceLoss()'s table/column-name check
      * (rather than bare SQLSTATE 23000) exists to preserve — see its own
      * docblock.
+     *
+     * WHOLE-BRANCH REVIEW consistency fix: a bare expectException(PDOException::class)
+     * here (the previous body) cannot tell "propagated on attempt 1" apart
+     * from "swallowed as a false race, retried MAX_ATTEMPTS (5) times, and
+     * THEN rethrown once retries were exhausted" — isRaceLoss() returning
+     * true by mistake for a NOT NULL violation would still end in a
+     * PDOException reaching the caller, so that alone proves nothing about
+     * the "immediately" this test's own name and docblock claim. Counting
+     * the closure's own invocations is what actually distinguishes the two:
+     * exactly 1 means no retry happened; anything up to 5 would mean this
+     * violation was wrongly treated as a race.
      */
     public function testWithRetryDoesNotTreatAnUnrelatedConstraintViolationAsARace(): void
     {
-        $this->expectException(PDOException::class);
+        $attempts = 0;
 
-        ShortIdAllocator::withRetry(
-            $this->pdo,
-            7,
+        try {
+            ShortIdAllocator::withRetry(
+                $this->pdo,
+                7,
+                1,
+                function (int $candidate) use (&$attempts): void {
+                    $attempts++;
+                    // tenant_id is NOT NULL; omitting it violates a different
+                    // constraint entirely, unrelated to (project_id, short_id).
+                    $stmt = $this->pdo->prepare(
+                        'INSERT INTO tasker_tasks (tenant_id, project_id, short_id) VALUES (NULL, :project_id, :short_id)'
+                    );
+                    $stmt->execute([':project_id' => 1, ':short_id' => $candidate]);
+                }
+            );
+
+            self::fail('withRetry() must let an unrelated constraint violation propagate, not swallow it');
+        } catch (PDOException) {
+            // Expected -- the assertion that matters is on $attempts below,
+            // not merely that SOME PDOException eventually surfaced.
+        }
+
+        self::assertSame(
             1,
-            function (int $candidate): void {
-                // tenant_id is NOT NULL; omitting it violates a different
-                // constraint entirely, unrelated to (project_id, short_id).
-                $stmt = $this->pdo->prepare(
-                    'INSERT INTO tasker_tasks (tenant_id, project_id, short_id) VALUES (NULL, :project_id, :short_id)'
-                );
-                $stmt->execute([':project_id' => 1, ':short_id' => $candidate]);
-            }
+            $attempts,
+            'an unrelated constraint violation must propagate on the FIRST attempt -- any higher count means '
+                . 'isRaceLoss() wrongly treated it as a race and burned retries before giving up'
         );
     }
 }

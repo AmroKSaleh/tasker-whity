@@ -104,10 +104,27 @@ final class TaskDiscussionsApiHandler
         }
 
         try {
+            // WHOLE-BRANCH REVIEW: the ON CONFLICT DO UPDATE arm used to carry
+            // no tenant_id predicate at all, unlike every other write in this
+            // codebase (see this class's own docblock re: the C1/Task 13
+            // OU/tenant conventions applied elsewhere). Safe TODAY only because
+            // of two facts holding simultaneously -- the UNIQUE constraint this
+            // upsert conflicts on is `UNIQUE (task_id)`, task_id is globally
+            // unique (never reused across tenants), and taskVisible() above
+            // already tenant/OU-scoped it before this statement ever runs -- so
+            // an explicit WHERE here is structural defense-in-depth, not a
+            // behaviour change: it can only ever narrow an already-tenant-scoped
+            // conflict target, never widen it. :tenant_id_conflict is a
+            // separate placeholder from :tenant_id (bound to the same value)
+            // rather than reusing the name, matching this codebase's own
+            // convention elsewhere (see e.g. SectionsApiHandler::delete()'s own
+            // docblock) for binding the same value under several placeholder
+            // names within one statement.
             $upsert = $this->db->prepare(
                 'INSERT INTO tasker_task_discussions (public_id, tenant_id, task_id, messages, reason, created_at, updated_at)
                  VALUES (:public_id, :tenant_id, :task_id, :messages, :reason, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
-                 ON CONFLICT (task_id) DO UPDATE SET messages = :messages, reason = :reason, updated_at = CURRENT_TIMESTAMP'
+                 ON CONFLICT (task_id) DO UPDATE SET messages = :messages, reason = :reason, updated_at = CURRENT_TIMESTAMP
+                 WHERE tasker_task_discussions.tenant_id = :tenant_id_conflict'
             );
             $upsert->execute([
                 ':public_id' => self::generateUuidV4(),
@@ -115,6 +132,7 @@ final class TaskDiscussionsApiHandler
                 ':task_id' => $taskId,
                 ':messages' => $encodedMessages,
                 ':reason' => $reason,
+                ':tenant_id_conflict' => $tenantId,
             ]);
 
             return $this->get($tenantId, $callerOuId, $taskId);

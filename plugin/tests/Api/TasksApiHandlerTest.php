@@ -236,9 +236,25 @@ final class TasksApiHandlerTest extends TestCase
         self::assertCount(2, $payload['data']);
     }
 
+    /**
+     * WHOLE-BRANCH REVIEW consistency fix: this test's name claims tenant
+     * scoping, but its body used to insert only ONE task in the whole
+     * fixture — nothing else shared section_id 1, so listFiltered()'s own
+     * `tenant_id = :tenant_id` predicate could be deleted from the query
+     * entirely and this test would still pass (confirmed empirically before
+     * this fix: with that predicate replaced by `1=1`, the count was still
+     * 1). Fixed the way this codebase proves tenant isolation elsewhere: a
+     * second task sharing the EXACT SAME section_id but a DIFFERENT
+     * tenant_id, inserted directly (bypassing the handler, which cannot
+     * itself produce this state) is the one fixture shape that only the
+     * tenant_id predicate — not the section_id predicate, which alone
+     * would also exclude a task in some OTHER section — can be responsible
+     * for excluding.
+     */
     public function testListForSectionReturnsOnlyThatSectionsTasksForTheCallersTenant(): void
     {
         $this->insertTaskDirect(7, 100, 1, 'A');
+        $this->insertTaskDirect(9, 100, 1, 'Same section, different tenant -- must not leak');
 
         $payload = json_decode($this->handler->listForSection(7, 1)->getBody(), true);
 
