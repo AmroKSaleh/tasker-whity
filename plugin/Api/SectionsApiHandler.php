@@ -67,12 +67,23 @@ use Whity\Sdk\Http\Response;
  * The guard and the delete are now ONE atomic statement (see delete()'s own
  * comment): the DELETE's own WHERE clause carries the emptiness check via
  * correlated NOT EXISTS subqueries, so a row it does not see as empty simply
- * is not deleted — no separate round trip, no window. This codebase already
- * avoids SELECT ... FOR UPDATE / advisory locks for Postgres/SQLite
- * portability (see {@see \Tasker\Domain\ShortIdAllocator}'s own docblock);
- * folding the check into the mutating statement itself is the same kind of
- * portable, lock-free technique, applied to a DELETE-guard race instead of
- * ShortIdAllocator's INSERT-race.
+ * is not deleted — no separate round trip, no window. That folding is the same
+ * portable, lock-free technique {@see \Tasker\Domain\ShortIdAllocator} uses for
+ * its INSERT-race, applied to a DELETE-guard race.
+ *
+ * BUT FOLDING DOES NOT GENERALISE, and delete() is the one exception to this
+ * class's otherwise lock-free rule. The emptiness guard is a predicate over
+ * rows the DELETE's own row lock already covers. The LAST-SECTION guard is a
+ * predicate over SIBLING rows the statement never touches, so under READ
+ * COMMITTED two concurrent deletes of DIFFERENT sections never conflict and
+ * both correlated EXISTS checks pass — leaving the project with zero sections
+ * and every task's NOT NULL section_id unsatisfiable. Folding was tried and
+ * empirically failed (an observed 204 where a refusal was required). delete()
+ * therefore takes a genuine SELECT ... FOR UPDATE on the PARENT PROJECT row
+ * inside a transaction, which serialises concurrent deletes without locking the
+ * siblings themselves. See delete()'s own comment for why that row is the right
+ * one to lock. This is the only FOR UPDATE in the plugin, so no other path can
+ * take the same locks in a conflicting order.
  */
 final class SectionsApiHandler
 {
@@ -237,7 +248,7 @@ final class SectionsApiHandler
             // Two changes, and BOTH are needed:
             //
             //  1. The sibling check is folded into each DELETE's own WHERE via a
-            //     correlated EXISTS (see self::siblingExistsClause()), matching
+            //     correlated EXISTS, inlined in the statement below, matching
             //     what a previous task already did for the task/group emptiness
             //     check. This removes the round trip between decision and write,
             //     and it is what produces the refusal.
