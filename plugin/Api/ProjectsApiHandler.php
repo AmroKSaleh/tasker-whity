@@ -50,23 +50,64 @@ final class ProjectsApiHandler
     }
 
     /**
-     * GET /api/tasker/projects — OU-scoped list, newest first.
+     * GET /api/tasker/projects — OU-scoped list, newest first, optionally
+     * narrowed to a single Environment.
+     *
+     * $environmentId IS THE ROUTE'S DECLARED `environment_id` FILTER, and this
+     * parameter did not exist until whole-branch review B4. The route schema
+     * declared the filter ("Optional: only projects in this Environment (OU)")
+     * while listProjects() never read it and this method had nowhere to put it —
+     * the previous slice's exact failure mode (name matches, shape matches, the
+     * argument silently does nothing) surviving into the slice built to
+     * eliminate it. It was also invisible to the guard meant to catch that:
+     * the shape is byte-identical to the original's list_projects, so
+     * OriginalContractParityTest passed green with no allowlist entry and
+     * counted the tool drop-in compatible — it compares schema to schema, never
+     * schema to handler.
+     *
+     * EXACT MATCH, not the caller's descendant subtree: "only projects in this
+     * Environment" means that Environment. A tenant-wide project (ou_id IS
+     * NULL) is therefore excluded by an explicit filter too, even though the
+     * unfiltered list always includes it.
+     *
+     * OUT-OF-SCOPE IS 404, NOT AN EMPTY LIST: an Environment the caller cannot
+     * see — a sibling OU, one that does not exist, or one belonging to another
+     * tenant — is refused indistinguishably, per the architecture's "out of
+     * tenant/OU scope → 404" rule. An empty 200 would read as "that Environment
+     * has no projects" and make this an existence oracle.
      */
-    public function list(int $tenantId, ?int $callerOuId): Response
+    public function list(int $tenantId, ?int $callerOuId, ?int $environmentId = null): Response
     {
+        if ($environmentId !== null && !$this->ouIsInCallersScope($tenantId, $callerOuId, $environmentId)) {
+            return Response::error('Environment not found', 404);
+        }
+
         $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
         $ouClause = OuScopeResolver::whereFragment('ou_id');
 
         try {
+            // ONE static SQL template regardless of whether the filter is in
+            // play — `:all_environments = TRUE OR ou_id = :environment_id`
+            // mirrors OuScopeResolver::whereFragment()'s own
+            // `:unrestricted = TRUE OR …` shape exactly, so no caller-supplied
+            // value ever reaches SQL TEXT and the tenant predicate is never
+            // conditionally assembled. `TRUE OR <anything>` is TRUE in SQL even
+            // when the right side is NULL, so the unfiltered case is unaffected
+            // by :environment_id's placeholder value.
             $stmt = $this->db->prepare(
                 "SELECT id, public_id, tenant_id, ou_id, name, slug, context, prefix, sort_order, created_by, created_at
                  FROM tasker_projects
                  WHERE tenant_id = :tenant_id AND {$ouClause}
+                   AND (:all_environments = TRUE OR ou_id = :environment_id)
                  ORDER BY sort_order ASC, id DESC"
             );
             $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
             $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
             $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+            $stmt->bindValue(':all_environments', $environmentId === null, PDO::PARAM_BOOL);
+            // 0 is an unreachable id (BIGSERIAL starts at 1) and is never
+            // consulted when :all_environments is TRUE.
+            $stmt->bindValue(':environment_id', $environmentId ?? 0, PDO::PARAM_INT);
             $stmt->execute();
 
             /** @var array<int, array<string, mixed>> $rows */

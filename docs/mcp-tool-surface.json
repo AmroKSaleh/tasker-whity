@@ -492,7 +492,7 @@
                             "properties":  {
                                                "environment_id":  {
                                                                       "type":  "string",
-                                                                      "description":  "Optional: only projects in this Environment (OU). Omit to see every Environment."
+                                                                      "description":  "Optional: only projects in this Environment (OU), by integer id. Omit to see every Environment."
                                                                   }
                                            }
                         }
@@ -948,7 +948,7 @@
                             "properties":  {
                                                "project_id":  {
                                                                   "type":  "string",
-                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project — but REQUIRED when replace is true, since a destructive replace is never applied to a project you did not name."
                                                               },
                                                "context":  {
                                                                "type":  "object",

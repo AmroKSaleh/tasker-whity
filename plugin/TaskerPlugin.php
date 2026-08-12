@@ -323,10 +323,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                             'in' => 'query',
                             'required' => false,
                             'schema' => ['type' => 'string'],
-                            'description' => 'Optional: only projects in this Environment (OU). Omit to see every Environment.',
+                            'description' => 'Optional: only projects in this Environment (OU), by integer id. Omit to see every Environment.',
                         ],
                     ],
-                    'responses' => [200 => ['description' => 'The project list']],
+                    'responses' => [
+                        200 => ['description' => 'The project list'],
+                        400 => ['description' => 'environment_id is not an integer id'],
+                        404 => ['description' => 'environment_id names an Environment outside the caller\'s OU scope, or one that does not exist'],
+                    ],
                 ],
             ],
             [
@@ -1916,11 +1920,42 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
         $pdo = $this->resolvePdo();
         $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        // CONSISTENCY FIX (whole-branch review): this used to answer an
+        // unresolved caller MEMBERSHIP with 'Tenant context is required' — the
+        // message for the DIFFERENT failure immediately above it — while ~40
+        // other routes correctly say 'Caller membership could not be resolved'.
+        // list_projects and create_project are the two routes an agent calls
+        // first, so this was the most-seen and least-accurate diagnostic on the
+        // surface.
         if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+            return Response::error('Caller membership could not be resolved', 403);
         }
 
-        return (new ProjectsApiHandler($pdo))->list($tenantId, $callerOu['ouId']);
+        // WHOLE-BRANCH REVIEW B4: the declared `environment_id` query filter is
+        // now actually READ. It was declared on this route's schema and never
+        // consulted here — a silently-ignored argument, the precise failure this
+        // slice existed to eliminate. Read via queryParam() (which covers both
+        // $_GET and the path-embedded form) rather than
+        // parse_url($request->getPath()), per this plugin's own canonical
+        // query accessor.
+        //
+        // A non-numeric value is a 400 naming the argument, matching
+        // ProjectsApiHandler::create()/update()'s own handling of a
+        // non-integer environment_id (see extractOuIdInput()'s docblock for why
+        // only integers are accepted: OU ids are core's, and this plugin has no
+        // OU-identifier resolver). Deliberately NOT a 404, which would read as
+        // "no such Environment" for what is really a malformed argument.
+        $rawEnvironmentId = $this->queryParam($request, 'environment_id');
+        $environmentId = null;
+        if ($rawEnvironmentId !== null && trim($rawEnvironmentId) !== '') {
+            $trimmed = trim($rawEnvironmentId);
+            if (preg_match('/^\d+$/', $trimmed) !== 1) {
+                return Response::error('environment_id must be an integer id', 400);
+            }
+            $environmentId = (int) $trimmed;
+        }
+
+        return (new ProjectsApiHandler($pdo))->list($tenantId, $callerOu['ouId'], $environmentId);
     }
 
     /**
@@ -1937,8 +1972,11 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
         $pdo = $this->resolvePdo();
         $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
+        // CONSISTENCY FIX (whole-branch review): see listProjects() above — this
+        // was the second of the two routes answering an unresolved MEMBERSHIP
+        // with the unresolved-TENANT message, conflating two failure modes.
         if (!$callerOu['resolved']) {
-            return Response::error('Tenant context is required', 403);
+            return Response::error('Caller membership could not be resolved', 403);
         }
         $createdBy = $this->callerProfileId($request) ?? 0;
 

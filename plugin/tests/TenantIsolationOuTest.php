@@ -663,6 +663,82 @@ final class TenantIsolationOuTest extends TestCase
         self::assertNull($payload['data']['ouId'], 'a tenant-root caller must still be able to leave/set a project tenant-wide');
     }
 
+    /**
+     * WHOLE-BRANCH REVIEW B4: list_projects DECLARED an `environment_id` query
+     * filter ("Optional: only projects in this Environment (OU)") that
+     * listProjects() never read and ProjectsApiHandler::list() had no parameter
+     * for. The previous slice's exact failure mode — name matches, shape
+     * matches, the argument silently does nothing — surviving into the slice
+     * built to eliminate it.
+     *
+     * Worse, it was invisible to the guard built to catch it: the shape is
+     * byte-identical to the original's list_projects, so the parity test passes
+     * green with NO allowlist entry and counts this tool drop-in compatible.
+     * OriginalContractParityTest compares schema-to-schema and never
+     * schema-to-handler, so a declared-and-ignored parameter is structurally
+     * outside what it can see.
+     *
+     * Implemented rather than deleted: the original HAS the filter, and an agent
+     * will use it.
+     */
+    public function testListFiltersByEnvironmentId(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $inOu2 = $this->makeProjectDirect(7, 2, 'Lives in OU 2');
+        $inOu3 = $this->makeProjectDirect(7, 3, 'Lives in OU 3');
+        $tenantWide = $this->makeProjectDirect(7, null, 'Tenant-wide');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+
+        // Unfiltered: an unrestricted caller sees all three.
+        $all = array_column(json_decode($handler->list(7, null, null)->getBody(), true)['data'], 'id');
+        self::assertEqualsCanonicalizing([$inOu2, $inOu3, $tenantWide], $all);
+
+        // Filtered to OU 2: only that project. NOT the OU 3 one, and NOT the
+        // tenant-wide one either — "only projects in this Environment" means
+        // exactly that Environment, not "plus everything visible".
+        $filtered = array_column(json_decode($handler->list(7, null, 2)->getBody(), true)['data'], 'id');
+        self::assertSame([$inOu2], $filtered);
+
+        $filteredOu3 = array_column(json_decode($handler->list(7, null, 3)->getBody(), true)['data'], 'id');
+        self::assertSame([$inOu3], $filteredOu3);
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW B4: an Environment outside the caller's own OU scope
+     * must 404 — never a silent empty list, which would read as "that
+     * Environment has no projects" and is exactly the indistinguishability the
+     * architecture requires (out of tenant/OU scope → 404).
+     */
+    public function testListRejectsAnEnvironmentOutsideTheCallersScopeWith404(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $this->makeProjectDirect(7, 3, 'Sibling OU project');
+
+        $handler = new ProjectsApiHandler($this->pdo);
+
+        // Caller restricted to OU 2 asking about its SIBLING OU 3.
+        $response = $handler->list(7, 2, 3);
+        self::assertSame(404, $response->getStatusCode(), 'a sibling OU must 404, not return an empty list');
+
+        // A nonexistent OU is indistinguishable from an out-of-scope one.
+        self::assertSame(404, $handler->list(7, null, 9999)->getStatusCode());
+
+        // An OU belonging to ANOTHER TENANT is equally a 404, never an
+        // existence oracle.
+        $this->makeOu(4, 9, null);
+        self::assertSame(404, $handler->list(7, null, 4)->getStatusCode());
+
+        // The caller's OWN OU still works, so the guard is not simply refusing
+        // everything.
+        self::assertSame(200, $handler->list(7, 2, 2)->getStatusCode());
+    }
+
     public function testUpdateChangesNameAndPrefix(): void
     {
         $projectId = $this->makeProjectDirect(7, null, 'Original Name');
@@ -5173,6 +5249,50 @@ final class TenantIsolationOuTest extends TestCase
         $confirmedResponse = $plugin->deleteProject($confirmedRequest);
         self::assertSame(204, $confirmedResponse->getStatusCode());
         self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn());
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW B4, at the ROUTE level — where the gap actually was.
+     * ProjectsApiHandler::list() had no environment_id parameter at all, and
+     * listProjects() never read the declared query filter, so the argument an
+     * agent sends was dropped on the floor between the schema and the handler.
+     * This drives the real wired path: query string → queryParam() → handler.
+     */
+    public function testListProjectsRouteReadsTheDeclaredEnvironmentIdFilter(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $inOu1 = $this->makeProjectDirect(7, 1, 'Route OU 1 project');
+        $inOu2 = $this->makeProjectDirect(7, 2, 'Route OU 2 project');
+
+        $plugin = new TaskerPlugin();
+
+        $request = $this->hostRequest('GET', '/api/tasker/projects?environment_id=2');
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+        $response = $plugin->listProjects($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $ids = array_column(json_decode($response->getBody(), true)['data'], 'id');
+        self::assertSame([$inOu2], $ids, 'the declared environment_id filter must actually filter, not silently do nothing');
+        self::assertNotContains($inOu1, $ids);
+
+        // Omitted: every Environment, as the description promises.
+        $allRequest = $this->hostRequest('GET', '/api/tasker/projects');
+        $allRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $allIds = array_column(json_decode($plugin->listProjects($allRequest)->getBody(), true)['data'], 'id');
+        self::assertEqualsCanonicalizing([$inOu1, $inOu2], $allIds);
+
+        // Non-numeric: a 400 naming the argument, matching create/update's own
+        // handling of a non-integer environment_id — not a 404 that would read
+        // as "no such Environment".
+        $badRequest = $this->hostRequest('GET', '/api/tasker/projects?environment_id=not-an-id');
+        $badRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $badResponse = $plugin->listProjects($badRequest);
+        self::assertSame(400, $badResponse->getStatusCode());
+        self::assertStringContainsString('environment_id', json_decode($badResponse->getBody(), true)['error']);
     }
 
     /**
