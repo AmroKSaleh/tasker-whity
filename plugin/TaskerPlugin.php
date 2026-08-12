@@ -848,22 +848,42 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:edit',
                 'schema' => [
                     'operationId' => 'move_task',
-                    'summary' => 'Move a task to a different section/group, or reorder it',
+                    'summary' => 'Move a task to a DIFFERENT project',
+                    // D1b Task 12c: ported to the ORIGINAL's actual live contract
+                    // (captured directly from its live MCP server -- the design
+                    // repo's index.ts and docs page are both stale here). This
+                    // used to relocate/reorder a task WITHIN one project -- a
+                    // NAME COLLISION with the original's own move_task, which
+                    // moves a task to a different PROJECT entirely. That
+                    // within-project capability now lives on move_task_to_group
+                    // (which gained sort_order for exactly this reason).
+                    'description' => 'Move a task to a DIFFERENT project. Reassigns the short ID into the target '
+                        . 'project\'s own sequence; preserves text, detail, priority, status, pinned and due_date. '
+                        . 'group_id is always cleared -- a group belongs to a section in the SOURCE project, so '
+                        . 'nothing about it can travel. This backend has no flows or cross-project I/O edges at all, '
+                        . 'so unlike the original there is nothing to unlink or drop on that front. For a '
+                        . 'SAME-project move (section, group, or board order) use update_task or '
+                        . 'move_task_to_group instead.',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
-                        'required' => ['task_id'],
+                        'required' => ['task_id', 'target_project_id'],
                         'properties' => [
-                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
-                            'section_id' => ['type' => 'string'],
-                            'group_id' => ['type' => ['string', 'null']],
-                            'sort_order' => ['type' => 'integer'],
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31) to move'],
+                            'target_project_id' => ['type' => 'string', 'description' => 'Destination project: prefix (e.g. WCP), slug, or UUID'],
+                            'target_section_id' => [
+                                'type' => 'string',
+                                'description' => 'Optional: a section UUID in the TARGET project to drop the task into. If omitted '
+                                    . '(or not in the target project) the task lands in the target project\'s own Backlog section '
+                                    . '(this backend\'s substitute for "no section" -- tasker_tasks.section_id cannot be null) -- '
+                                    . 'never an error.',
+                            ],
                         ],
                     ],
                     'responses' => [
-                        200 => ['description' => 'The moved task'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
-                        422 => ['description' => 'section_id does not belong to the task\'s own project, or group_id does not belong to the target section'],
+                        200 => ['description' => 'The moved task, plus previousShortId/newShortId, droppedGroup and landedInBacklog'],
+                        400 => ['description' => 'task_id/target_project_id/target_section_id looks like a short id but is malformed, or target_project_id is missing'],
+                        404 => ['description' => 'Task or target project not found in the caller\'s tenant or OU scope, or the target project has no Backlog section'],
                     ],
                 ],
             ],
@@ -875,7 +895,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:edit',
                 'schema' => [
                     'operationId' => 'move_task_to_group',
-                    'summary' => 'Move a task into a group, or un-group it',
+                    'summary' => 'Move a task into a group, un-group it, or reorder it',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
@@ -890,10 +910,17 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                                 'type' => 'string',
                                 'description' => 'Optional. Also moves the task into this section, and is the section group_id is validated against. Defaults to the task\'s current section.',
                             ],
+                            'sort_order' => [
+                                'type' => 'integer',
+                                'description' => 'ADDITIVE: explicit board ordering within the task\'s section. The live original exposes '
+                                    . 'NO reordering tool over MCP at all (its drag-and-drop is a web-UI concern served over its own '
+                                    . 'REST layer) -- D2\'s own drag-and-drop frontend needs this here. Optional; omitting it leaves '
+                                    . 'sort_order unchanged.',
+                            ],
                         ],
                     ],
                     'responses' => [
-                        200 => ['description' => 'The task, in its new group'],
+                        200 => ['description' => 'The task, in its new group/section/position'],
                         400 => ['description' => 'task_id, group_id, or section_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task, group, or section not found in the caller\'s tenant or OU scope'],
                         422 => ['description' => 'section_id does not belong to the task\'s own project, or group_id does not belong to the target section'],
@@ -2732,19 +2759,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * POST /api/tasker/tasks/move
+     * POST /api/tasker/tasks/move — the original's move_task, ported (D1b
+     * Task 12c) to its ACTUAL live contract: a CROSS-PROJECT move. task_id
+     * and target_project_id are both resolved HERE via
+     * {@see \Tasker\Access\IdentifierResolver}, which is OU-scoped — a task
+     * or target project outside the caller's tenant/OU scope 404s before
+     * {@see \Tasker\Api\TasksApiHandler::moveToProject()} is ever reached
+     * (which ALSO re-derives and checks both, belt-and-braces — see that
+     * method's own docblock).
      *
-     * section_id/group_id are flexible identifiers (UUID/id — see
-     * {@see self::resolveMoveDestinationId()}), exactly like every other
-     * identifier and filter in this task's routes, NOT bare integers:
-     * {@see \Tasker\Api\TasksApiHandler::move()} itself only ever does a
-     * plain `(int)` cast on whatever it is handed, which silently casts a
-     * UUID/slug to 0 and 422s. Both are resolved HERE, before delegating,
-     * the same way list_tasks resolves its own section_id/group_id filters
-     * — the resolved integers are substituted back into the JSON body move()
-     * decodes, so move()'s own array_key_exists()-based "supplied vs not
-     * supplied"/"explicit null means un-group" logic (see its own docblock)
-     * needs no change at all.
+     * target_project_id is REQUIRED and never falls back to the caller's
+     * default project: a route that mutates must never guess its target —
+     * the same rule {@see self::deleteProject()}'s own docblock states and
+     * enforces for project_id there. An EMPTY (omitted) target_project_id is
+     * therefore a plain 400, checked BEFORE any resolution happens, exactly
+     * like deleteProject()'s own confirmed/project_id ordering.
+     *
+     * target_section_id is OPTIONAL and resolved the SAME way (OU-scoped, via
+     * IdentifierResolver::resolveSection(), parented to $targetProjectId for
+     * its slug/prefix forms) — but unlike task_id/target_project_id, an
+     * unresolved or malformed-looking-but-not-actually-malformed target
+     * section is NEVER an error here: only a genuinely MALFORMED short id
+     * shape 400s (matching every other identifier in this class). Whether
+     * the caller's candidate actually belongs to $targetProjectId is
+     * TasksApiHandler::moveToProject()'s own job (its id/UUID forms are not
+     * parent-checked by resolveSection() itself — see that method's own
+     * doc) — this route only resolves the candidate, never rejects it.
      *
      * @param array<string, string> $params
      */
@@ -2761,80 +2801,54 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
-        $decoded = json_decode($request->getBody(), true);
-        if (!is_array($decoded)) {
-            return Response::error('Request body must be a JSON object', 400);
-        }
-
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
         if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
             return Response::error('task_id looks like a short id but is malformed', 400);
         }
-
         $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
         if ($taskId === null) {
             return Response::error('Task not found', 404);
         }
 
-        $section = $this->resolveMoveDestinationId(
-            $decoded,
-            'section_id',
-            $pdo,
-            $tenantId,
-            $ou['ouId'],
-            [IdentifierResolver::class, 'resolveSection']
-        );
-        if ($section['status'] === 'malformed') {
-            return Response::error('section_id looks like a short id but is malformed', 400);
+        $rawTargetProjectId = $this->identifierFromRequest($request, 'target_project_id');
+        $targetForm = IdentifierResolver::classify($rawTargetProjectId);
+        if ($targetForm === 'malformed_short_id') {
+            return Response::error('target_project_id looks like a short id but is malformed', 400);
         }
-        if ($section['status'] === 'unresolved') {
-            return Response::error('Section not found', 404);
+        if ($targetForm === 'empty') {
+            return Response::error('target_project_id is required', 400);
         }
-        if ($section['status'] === 'resolved') {
-            $decoded['section_id'] = $section['value'];
+        $targetProjectId = IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $rawTargetProjectId);
+        if ($targetProjectId === null) {
+            return Response::error('Target project not found', 404);
         }
 
-        $group = $this->resolveMoveDestinationId(
-            $decoded,
-            'group_id',
-            $pdo,
-            $tenantId,
-            $ou['ouId'],
-            [IdentifierResolver::class, 'resolveGroup']
-        );
-        if ($group['status'] === 'malformed') {
-            return Response::error('group_id looks like a short id but is malformed', 400);
+        $rawTargetSectionId = $this->identifierFromRequest($request, 'target_section_id');
+        if (IdentifierResolver::classify($rawTargetSectionId) === 'malformed_short_id') {
+            return Response::error('target_section_id looks like a short id but is malformed', 400);
         }
-        if ($group['status'] === 'unresolved') {
-            return Response::error('Group not found', 404);
-        }
-        if ($group['status'] === 'resolved') {
-            $decoded['group_id'] = $group['value'];
-        }
-        // 'absent' -> key untouched in $decoded (move() sees no key at all).
-        // 'explicit_null' -> $decoded['group_id'] is already null (move()'s
-        // own "explicit null means un-group" semantics preserved exactly).
+        // Absent, unresolved, or (for id/UUID forms) belonging to a DIFFERENT
+        // project all arrive at moveToProject() as a candidate that is not
+        // usable — resolved here, but never turned into an error here. See
+        // this method's own docblock and moveToProject()'s for why that
+        // final belongs-to-the-target-project check lives there instead.
+        $targetSectionId = IdentifierResolver::resolveSection($pdo, $tenantId, $ou['ouId'], $rawTargetSectionId, $targetProjectId);
 
-        $reencoded = json_encode($decoded);
-        if ($reencoded === false) {
-            return Response::error('Request body must be a JSON object', 400);
-        }
-
-        return (new TasksApiHandler($pdo))->move($tenantId, $taskId, $reencoded);
+        return (new TasksApiHandler($pdo))->moveToProject($tenantId, $ou['ouId'], $taskId, $targetProjectId, $targetSectionId);
     }
 
     /**
      * POST /api/tasker/tasks/group — the original's move_task_to_group:
-     * group membership only, deliberately narrower than moveTask()'s
-     * combined section/group/sort_order scope above.
+     * group membership (plus, ADDITIVELY, sort_order — D1b Task 12c),
+     * deliberately narrower than the now cross-project moveTask() above.
      *
      * group_id ABSENT and group_id EXPLICIT NULL both un-group (D1b Task 9
      * brief resolution #3) — see {@see self::resolveGroupMembership()}'s own
-     * docblock for why this is a deliberate divergence from moveTask()'s own
-     * 'absent' handling right above, which must keep "absent" and "explicit
-     * null" distinct for move_task's different (and separately carry-over-
-     * buggy — see {@see \Tasker\Api\TasksApiHandler::move()}'s own docblock)
-     * group_id semantics.
+     * docblock for why. sort_order is read as a plain integer straight off
+     * the decoded body — no identifier resolution needed, it is never an
+     * identifier — and left untouched (null) when the key is absent, exactly
+     * like {@see \Tasker\Api\TasksApiHandler::moveToGroup()}'s own $sortOrder
+     * parameter treats it.
      *
      * Delegates to {@see \Tasker\Api\TasksApiHandler::moveToGroup()}, which
      * is OU-aware (D1b Task 9 brief resolution #2) — this route resolves
@@ -2909,7 +2923,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         // latter — with no further mapping needed here.
         $groupId = $group['value'];
 
-        return (new TasksApiHandler($pdo))->moveToGroup($tenantId, $ou['ouId'], $taskId, $groupId, $sectionId);
+        // sort_order (D1b Task 12c, ADDITIVE): a plain integer, never an
+        // identifier, so no IdentifierResolver involvement — absent leaves
+        // it null, which TasksApiHandler::moveToGroup() itself treats as
+        // "leave unchanged".
+        $sortOrder = array_key_exists('sort_order', $decoded) ? (int) $decoded['sort_order'] : null;
+
+        return (new TasksApiHandler($pdo))->moveToGroup($tenantId, $ou['ouId'], $taskId, $groupId, $sectionId, $sortOrder);
     }
 
     /**
@@ -4194,32 +4214,41 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
     }
 
     /**
-     * Resolve one of move_task's destination identifiers (section_id or
-     * group_id) from an ALREADY-DECODED request body — TasksApiHandler::move()
-     * itself only ever does a plain `(int)` cast on whatever it is handed,
-     * which silently casts a UUID/slug to 0 and 422s (task review finding);
-     * this is what fixes that, resolving both identifiers before moveTask()
-     * ever delegates to move().
+     * Resolve a destination identifier (section_id or group_id) from an
+     * ALREADY-DECODED request body, tolerating every identifier FORM
+     * (UUID/id/slug/prefix) rather than the plain `(int)` cast the
+     * underlying handler methods themselves do on whatever they are handed.
+     *
+     * USED BY (D1b Task 12c): {@see self::moveTaskToGroup()}'s own
+     * section_id (both directly, and indirectly for group_id via
+     * {@see self::resolveGroupMembership()}). move_task's OWN section_id/
+     * group_id resolution used to live here too, before Task 12c ported
+     * move_task to the original's actual cross-project contract — that
+     * route resolves target_section_id directly via
+     * IdentifierResolver::resolveSection() now, with no "leave unchanged"
+     * concept to preserve (a cross-project move has no "current" section to
+     * default to). See git history for move_task's former usage here.
      *
      * Five outcomes, distinguished the same way resolveOptionalParentId()'s
      * three distinguish theirs — a bare `?int` cannot tell "absent" apart
      * from "explicitly null" apart from "supplied but did not resolve":
      *
-     *   - status 'absent': the key is not in $decoded at all — move()'s own
-     *     `array_key_exists()` check must see it stay absent (its "leave
+     *   - status 'absent': the key is not in $decoded at all —
+     *     moveToGroup()'s own section_id parameter must see null (its "leave
      *     unchanged" case).
      *   - status 'explicit_null': the key IS present with a literal null
      *     value — group_id's own "explicit null means un-group" (see
-     *     move()'s docblock); section_id has no such meaning, but callers
-     *     decide what to do with it (letting move()'s own project-membership
-     *     check reject it is enough — no separate handling needed here).
+     *     {@see self::resolveGroupMembership()}'s docblock); section_id has
+     *     no such meaning, but callers decide what to do with it (letting
+     *     moveToGroup()'s own project-membership check reject it is enough —
+     *     no separate handling needed here).
      *   - status 'malformed': present, a string/int, but classifies as
      *     malformed_short_id. Callers 400.
      *   - status 'unresolved': present, classifies as a real form, but
      *     $resolver found nothing (wrong tenant/OU, or genuinely absent).
-     *     Callers 404 — distinct from move()'s own 422 for "exists, but
-     *     doesn't belong to the target project/section", which only
-     *     triggers once a resolved id reaches move() at all.
+     *     Callers 404 — distinct from moveToGroup()'s own 422 for "exists,
+     *     but doesn't belong to the target project/section", which only
+     *     triggers once a resolved id reaches moveToGroup() at all.
      *   - status 'resolved': present, resolves to a real id. value carries
      *     it; callers substitute it back into $decoded before re-encoding.
      *
@@ -4270,10 +4299,9 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
     /**
      * Resolve move_task_to_group's own group_id (D1b Task 9): unlike
-     * {@see self::resolveMoveDestinationId()} (move_task's group_id, where
-     * ABSENT means "leave unchanged" — see
-     * {@see \Tasker\Api\TasksApiHandler::move()}'s own docblock),
-     * move_task_to_group has no "unchanged" concept at all — it exists
+     * {@see self::resolveMoveDestinationId()}'s own section_id caller (where
+     * ABSENT means "leave the section unchanged"), move_task_to_group's
+     * group_id has no "unchanged" concept at all — it exists
      * SOLELY to set group membership (brief resolution #3), so an absent key
      * and an explicit null must behave IDENTICALLY: both un-group. Delegates
      * every other distinction (malformed/unresolved/resolved) straight to

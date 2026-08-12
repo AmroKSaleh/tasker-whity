@@ -24,7 +24,7 @@ use Tasker\Tests\Support\SqlitePolyfills;
  * regression tests proving the fix, and (D1b Task 6) a new test proving
  * create()'s newly-added detail/due_date fields round-trip correctly. Every
  * OTHER test below only ever used create() as a convenience fixture-builder
- * for some other method under test (update/move/delete/complete/pin/tag/
+ * for some other method under test (update/delete/complete/pin/tag/
  * listForSection) — those build their task fixture via insertTaskDirect() (a
  * raw INSERT bypassing create() entirely) so they stay on SQLite unchanged in
  * every other respect. listForSection() itself remains tenant-scoped only
@@ -54,17 +54,34 @@ use Tasker\Tests\Support\SqlitePolyfills;
  * NO SQLite COVERAGE FOR moveToGroup() EITHER (D1b Task 9, move_task_to_group):
  * the brief for that task sketched this method as tenant-scoped only
  * (`moveToGroup(int $tenantId, int $taskId, ?int $groupId, ?int $sectionId)`),
- * which would have belonged in THIS file, matching move()'s own single-task-id
- * shape above. D1b Task 9's own resolution #2 made it OU-aware instead — for
- * the identical BIGSERIAL-guessing reason that made getOne() OU-aware in
- * D1b Task 8, only stronger here because moveToGroup() is a MUTATION, not a
- * read. It calls {@see \Tasker\Api\TasksApiHandler::findVisible()} for its
- * own pre-check, the same OU-aware, PostgreSQL-only join getOne() uses, so
- * every one of its outcomes — the plain group-set/un-group cases, the
- * cross-section/cross-project 422s, the cross-tenant 404, and the
- * sibling-OU 404 the OU-aware shape specifically requires — lives in
- * TenantIsolationOuTest.php's own "TasksApiHandler::moveToGroup()" section,
- * never here.
+ * which would have belonged in THIS file, matching this class's other
+ * single-task-id mutations. D1b Task 9's own resolution #2 made it OU-aware
+ * instead — for the identical BIGSERIAL-guessing reason that made getOne()
+ * OU-aware in D1b Task 8, only stronger here because moveToGroup() is a
+ * MUTATION, not a read. It calls {@see \Tasker\Api\TasksApiHandler::findVisible()}
+ * for its own pre-check, the same OU-aware, PostgreSQL-only join getOne()
+ * uses, so every one of its outcomes — the plain group-set/un-group cases,
+ * the cross-section/cross-project 422s, the sort_order reorder (D1b Task
+ * 12c), the cross-tenant 404, and the sibling-OU 404 the OU-aware shape
+ * specifically requires — lives in TenantIsolationOuTest.php's own
+ * "TasksApiHandler::moveToGroup()" section, never here.
+ *
+ * NO SQLite COVERAGE FOR moveToProject() EITHER (D1b Task 12c, move_task,
+ * ported to its actual cross-project contract): OU-aware for the same
+ * belt-and-braces reason as moveToGroup() (see its own docblock in
+ * TasksApiHandler) — it re-derives and checks OU visibility on BOTH the task
+ * AND the target project via findVisible()/isProjectVisible(), the same
+ * OU-aware, PostgreSQL-only joins getOne()/readyWork() use. This class's own
+ * former move() method (within-project section/group/sort_order — the SQLite
+ * tests it used to have lived right here) was RETIRED outright in the same
+ * task, its capability now covered by moveToGroup(); see git history for
+ * both the method and its dedicated SQLite tests. Every one of
+ * moveToProject()'s outcomes — short id reassignment into the target's own
+ * sequence, field preservation, group clearing, the Backlog-fallback
+ * leniency for an omitted/foreign target_section_id, atomicity under a
+ * forced write failure, and the sibling-OU 404s — lives in
+ * TenantIsolationOuTest.php's own "TasksApiHandler::moveToProject()"
+ * section, never here.
  */
 final class TasksApiHandlerTest extends TestCase
 {
@@ -413,143 +430,6 @@ final class TasksApiHandlerTest extends TestCase
         $response = $this->handler->update(9, 999, json_encode(['text' => 'Should fail']));
 
         self::assertSame(404, $response->getStatusCode());
-    }
-
-    public function testMoveChangesSectionAndSortOrder(): void
-    {
-        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Movable');
-
-        $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 3, 'sort_order' => 5]));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame(3, $payload['data']['sectionId']);
-        self::assertSame(5, $payload['data']['sortOrder']);
-    }
-
-    /**
-     * Regression test for whole-branch review finding I1: changing
-     * section_id WITHOUT supplying group_id in the same request must clear
-     * the task's group_id — the old group has no relationship to the new
-     * section, and leaving it in place made BoardApiHandler::get() render
-     * the task under the OLD section while listForSection() for the NEW
-     * section returned it (the two read paths disagreed).
-     */
-    public function testMoveToADifferentSectionWithoutGroupIdClearsTheGroup(): void
-    {
-        $this->createGroupsTable();
-        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
-        // Group 10 lives in section 1 -- the task's OLD section.
-        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (10, 7, 1)');
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Grouped, about to move', null, 10);
-
-        $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 3]));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame(3, $payload['data']['sectionId']);
-        self::assertNull($payload['data']['groupId'], 'a group from the OLD section must not silently survive a move to a new section');
-    }
-
-    /**
-     * CARRY-OVER BUG FIX (D1b Task 6): $sectionChanging used to be set from
-     * `array_key_exists('section_id', $decoded)` alone -- SUPPLIED, not
-     * CHANGED. A reorder that echoes the task's CURRENT section_id (exactly
-     * what a drag-and-drop client sends) was silently treated as a section
-     * change, which cleared group_id via the sibling `elseif` branch and
-     * un-grouped an already-grouped task.
-     */
-    public function testMoveKeepsTheGroupWhenSectionIdIsEchoedUnchanged(): void
-    {
-        $this->createGroupsTable();
-        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (1, 7, 1)');
-        // Pre-grouped in section 1, group 1 -- built directly rather than via
-        // create() + a first move() call (create() needs Postgres for its
-        // own OU-aware section check; see this class's own docblock), since
-        // the point of THIS test is the second move() call below.
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Grouped', null, 1);
-
-        // A reorder that echoes the CURRENT section must not un-group.
-        $payload = json_decode($this->handler->move(7, $taskId, json_encode(['section_id' => 1, 'sort_order' => 5]))->getBody(), true);
-
-        self::assertSame(1, $payload['data']['groupId'], 'echoing the current section_id must not clear group_id');
-        self::assertSame(5, $payload['data']['sortOrder']);
-    }
-
-    public function testMoveRejectsASectionFromADifferentProject(): void
-    {
-        $this->pdo->exec("INSERT INTO tasker_projects (id, tenant_id) VALUES (200, 7)");
-        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (4, 7, 200)");
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Movable');
-
-        $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 4]));
-
-        self::assertSame(422, $response->getStatusCode());
-    }
-
-    /**
-     * Fixture for `tasker_groups`, minus the FK/UNIQUE clauses the SQLite
-     * double doesn't need — only the columns move()'s group-validation query
-     * selects/filters on are required.
-     */
-    private function createGroupsTable(): void
-    {
-        $this->pdo->exec('CREATE TABLE tasker_groups (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, section_id INTEGER NOT NULL)');
-    }
-
-    public function testMoveAcceptsAGroupIdFromTheSameSection(): void
-    {
-        $this->createGroupsTable();
-        // Group 10 lives in section 1, which is the task's own (unchanged) section.
-        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (10, 7, 1)');
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Groupable');
-
-        $response = $this->handler->move(7, $taskId, json_encode(['group_id' => 10]));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame(10, $payload['data']['groupId']);
-    }
-
-    /**
-     * Regression test for whole-branch review finding I1: a group_id
-     * explicitly supplied in the SAME request as a section_id change must be
-     * validated against the TARGET (new) section, not the task's old one.
-     */
-    public function testMoveAcceptsAGroupIdFromTheNewSectionInTheSameRequest(): void
-    {
-        $this->createGroupsTable();
-        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
-        // Group 30 lives in section 3 -- the NEW target section, not the task's current one (1).
-        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (30, 7, 3)');
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Moving with its new group');
-
-        $response = $this->handler->move(7, $taskId, json_encode(['section_id' => 3, 'group_id' => 30]));
-
-        self::assertSame(200, $response->getStatusCode());
-        $payload = json_decode($response->getBody(), true);
-        self::assertSame(3, $payload['data']['sectionId']);
-        self::assertSame(30, $payload['data']['groupId']);
-    }
-
-    /**
-     * Mirrors testMoveRejectsASectionFromADifferentProject(), but for
-     * group_id: a group_id belonging to a DIFFERENT section than the
-     * request's target section_id must be rejected (422), even when that
-     * section belongs to the same project.
-     */
-    public function testMoveRejectsAGroupIdFromADifferentSectionThanTheTarget(): void
-    {
-        $this->createGroupsTable();
-        $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (3, 7, 100)");
-        // Group 20 lives in section 3, but the request's target section stays 1 (unchanged).
-        $this->pdo->exec('INSERT INTO tasker_groups (id, tenant_id, section_id) VALUES (20, 7, 3)');
-        $taskId = $this->insertTaskDirect(7, 100, 1, 'Movable');
-
-        $response = $this->handler->move(7, $taskId, json_encode(['group_id' => 20]));
-
-        self::assertSame(422, $response->getStatusCode());
     }
 
     public function testDeleteRemovesTheTask(): void

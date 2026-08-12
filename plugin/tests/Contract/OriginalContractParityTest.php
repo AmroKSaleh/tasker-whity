@@ -497,11 +497,33 @@ final class OriginalContractParityTest extends TestCase
     }
 
     /**
-     * Does a test method of this name exist anywhere in the suite?
+     * Does a test method of this name exist anywhere in the suite, AND does
+     * its body contain at least one real assertion?
      *
      * This is what stops a SEMANTIC waiver being discharged by a schema edit:
      * the named behavioural test has to be real and in the tree before the
      * property may appear on our side without failing.
+     *
+     * REGRESSION FIX (review finding): the previous version only checked
+     * `str_contains($source, "function {$method}(")` — satisfied by declaring
+     * the waived property, adding an EMPTY-BODIED method with the matching
+     * `dischargedBy` name (`public function testFoo(): void {}`), and deleting
+     * the now-stale allowlist entry. That sequence made staleAllowlistEntries()
+     * pass — the method existed — while the behaviour it claimed to prove was
+     * never implemented, and the whole suite still went green. Now the
+     * method's own BODY (matched via brace-counting, not just its signature)
+     * must contain at least one call that looks like `assertSomething(` or
+     * `expectException(` — the two forms this codebase's own tests actually
+     * use (see ShortIdAllocatorTest::testWithRetryDoesNotTreatAnUnrelatedConstraintViolationAsARace()
+     * for a real expectException()-only example) — before the method counts
+     * as a genuine behavioural test.
+     *
+     * NOT AIRTIGHT, deliberately not claimed to be: nothing here can prove the
+     * assertion checks the RIGHT thing, only that some assertion exists. A
+     * method that asserts `self::assertTrue(true)` still passes this check.
+     * It closes the specific gap the review demonstrated (an empty stub) —
+     * it is not, and cannot be, a substitute for actually reading the test
+     * when discharging an entry.
      */
     private static function behaviourTestExists(string $method): bool
     {
@@ -511,12 +533,51 @@ final class OriginalContractParityTest extends TestCase
 
         foreach (self::testFiles() as $file) {
             $source = file_get_contents($file);
-            if (is_string($source) && str_contains($source, "function {$method}(")) {
+            if (!is_string($source) || !str_contains($source, "function {$method}(")) {
+                continue;
+            }
+
+            $body = self::methodBody($source, $method);
+            if ($body !== null && preg_match('/\b(assert[A-Za-z]*|expectException)\s*\(/', $body) === 1) {
                 return true;
             }
         }
 
         return false;
+    }
+
+    /**
+     * The source text between $method's opening `{` and its matching closing
+     * `}`, found by counting braces from the first `{` after the method's
+     * signature — good enough to tell an empty stub from a real test body
+     * without a full PHP parser. Braces inside string interpolation
+     * (`"{$var}"`) or embedded JSON/text literals stay balanced in pairs, so
+     * a plain counter handles this codebase's actual test files correctly;
+     * it is not immune to a stray unmatched brace inside a comment or string,
+     * which would only make this check MORE conservative (return null / no
+     * body found), never less.
+     */
+    private static function methodBody(string $source, string $method): ?string
+    {
+        if (preg_match('/function\s+' . preg_quote($method, '/') . '\s*\([^)]*\)[^{;]*\{/', $source, $m, PREG_OFFSET_CAPTURE) !== 1) {
+            return null;
+        }
+
+        $openBrace = $m[0][1] + strlen($m[0][0]) - 1;
+        $depth = 0;
+        $length = strlen($source);
+        for ($i = $openBrace; $i < $length; $i++) {
+            if ($source[$i] === '{') {
+                $depth++;
+            } elseif ($source[$i] === '}') {
+                $depth--;
+                if ($depth === 0) {
+                    return substr($source, $openBrace + 1, $i - $openBrace - 1);
+                }
+            }
+        }
+
+        return null;
     }
 
     /** @return list<string> */

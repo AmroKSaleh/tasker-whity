@@ -23,18 +23,20 @@ declare(strict_types=1);
  *               core's InputSchemaValidator only enforces `required`, so
  *               undeclared arguments pass straight through and vanish.
  *   SEMANTIC  — the same call does something DIFFERENT here. These are the
- *               dangerous ones. There are FOUR left: move_task is a silent
- *               no-op on a cross-project move, delete_environment reassigns
- *               behind a gate that 409s instead of moving anything, get_task
- *               no longer auto-starts a task, and delete_group fails SAFE
- *               (un-groups instead of the destructive delete_tasks:true the
- *               original also offers). The five most dangerous entries this
- *               file used to carry — delete_section and delete_project (both
- *               UNSAFE-direction: the identical call was a refusal on the
- *               original and irreversible data loss here) and the milestone
+ *               dangerous ones. There are THREE left: delete_environment
+ *               reassigns behind a gate that 409s instead of moving anything,
+ *               get_task no longer auto-starts a task, and delete_group fails
+ *               SAFE (un-groups instead of the destructive delete_tasks:true
+ *               the original also offers). move_task — the collision between
+ *               the original's cross-project move and D1's within-project
+ *               one — was FIXED in D1b Task 12c (a real port, not a waiver;
+ *               see TasksApiHandler::moveToProject()), on top of
+ *               delete_section and delete_project (both UNSAFE-direction:
+ *               the identical call was a refusal on the original and
+ *               irreversible data loss here) and the milestone
  *               `index` trio (WRONG-ROW: an id-first resolver silently
- *               mutated the wrong milestone) — were FIXED in D1b Task 12b,
- *               not merely allowlisted. See git history for their entries.
+ *               mutated the wrong milestone) — both FIXED in D1b Task 12b.
+ *               See git history for every closed entry.
  *
  * EVERY SEMANTIC ENTRY MUST CARRY `severity => 'semantic'` AND `dischargedBy`,
  * and the test enforces both. The reason is an escape hatch found in review:
@@ -47,14 +49,19 @@ declare(strict_types=1);
  * property FAILS unless the behavioural test named in `dischargedBy` actually
  * exists in the suite. Behaviour first, schema second.
  *
- * 18 entries waiving 60 individual divergences across the 36 shared tools, after
- * D1b Task 12b fixed four routes rather than waiving them — delete_section,
- * delete_project, the milestone `index` trio, and list_groups/create_group's
- * missing project_id — closing 4 entries outright (delete_section,
- * delete_project, list_groups, create_group) and dropping the milestone
- * trio's severity from semantic to a plain ADDITIVE remainder (milestone_id
- * itself), on top of the earlier add_milestone fix (also fixed rather than
- * waived — see its entry).
+ * 18 entries waiving 56 individual divergences across the 36 shared tools,
+ * after D1b Task 12c closed move_task's SEMANTIC entry outright (a real port
+ * — see moveTask()/moveToProject() — not a waiver) and opened one new
+ * ADDITIVE entry for move_task_to_group's own sort_order (rehoming the
+ * reordering capability move_task used to own, since the live original
+ * exposes no MCP reordering tool at all) — a net-zero change in entry COUNT
+ * that still shrank total divergences by 4. D1b Task 12b fixed four EARLIER
+ * routes rather than waiving them — delete_section, delete_project, the
+ * milestone `index` trio, and list_groups/create_group's missing project_id
+ * — closing 4 entries outright (delete_section, delete_project, list_groups,
+ * create_group) and dropping the milestone trio's severity from semantic to
+ * a plain ADDITIVE remainder (milestone_id itself), on top of the earlier
+ * add_milestone fix (also fixed rather than waived — see its entry).
  *
  * Divergence keys:
  *   missing      — property the original accepts and we do not
@@ -66,28 +73,18 @@ declare(strict_types=1);
 return [
 
     // ── SEMANTIC ─────────────────────────────────────────────────────────────
-
-    'move_task' => [
-        // SEMANTIC COLLISION, and not a shape gap at all: the two tools share a
-        // name and do different things. The ORIGINAL's move_task moves a task to
-        // a DIFFERENT PROJECT — target_project_id is required. D1's move_task
-        // relocates and reorders a task WITHIN its own project; the original's
-        // nearest equivalent to that is move_task_to_group, which we also have.
-        // So move_task({task_id, target_project_id:'ABC'}) — a perfectly valid
-        // original call — is accepted here, ignored, and answered 200: a silent
-        // no-op on a cross-project move. Not closable by adding properties:
-        // short ids are project-prefixed and OU scope travels with the project,
-        // so a real cross-project move is a port, not a parameter. UNOWNED.
-        'missing' => ['target_project_id', 'target_section_id'],
-        // ADDITIVE relative to the original's move_task_to_group, which carries
-        // group_id and section_id; sort_order is ours (explicit board ordering).
-        'extra' => ['section_id', 'group_id', 'sort_order'],
-        'severity' => 'semantic',
-        'dischargedBy' => 'testMoveTaskMovesATaskIntoADifferentProject',
-        'reason' => 'SEMANTIC: the original move_task is a cross-project move (target_project_id required); ours is '
-            . 'within-project relocation/reordering. A cross-project call silently no-ops with a 200. Needs a real '
-            . 'port, not a property — short ids are project-prefixed and OU scope travels with the project. Unowned.',
-    ],
+    //
+    // move_task's own SEMANTIC entry (the collision between the original's
+    // cross-project move and D1's within-project one) was CLOSED in D1b Task
+    // 12c, not merely discharged: moveTask()/TasksApiHandler::moveToProject()
+    // now implement the original's actual cross-project contract exactly
+    // (task_id, target_project_id required, target_section_id optional —
+    // matching original-tool-schemas.json's move_task property-for-property),
+    // so there is no divergence left to waive. See git history for the
+    // former entry, and TenantIsolationOuTest's own
+    // testMoveTaskMovesATaskIntoADifferentProject() for the behavioural
+    // proof. The reordering capability move_task used to own moved to
+    // move_task_to_group's own new ADDITIVE entry below.
 
     'delete_environment' => [
         // SEMANTIC, both properties, in opposite directions.
@@ -364,5 +361,23 @@ return [
         'extra' => ['section_id'],
         'reason' => 'ADDITIVE: ours accepts a group SLUG, which needs its parent section to disambiguate (Task 5). '
             . 'The original only takes UUIDs and so needs no parent.',
+    ],
+
+    'move_task_to_group' => [
+        // ADDITIVE (D1b Task 12c): rehomes the reordering capability the
+        // now-fixed move_task used to own. Verified directly against the
+        // live original: it exposes NO reordering tool over MCP at all —
+        // neither update_task nor move_task_to_group carries sort_order
+        // there; the original's own drag-and-drop reordering is a web-UI
+        // concern served over its own REST layer, not this MCP surface. So
+        // porting move_task to its real cross-project contract would
+        // otherwise silently DELETE a capability D2's own drag-and-drop
+        // frontend needs. Optional; omitting it reproduces the original
+        // exactly.
+        'extra' => ['sort_order'],
+        'reason' => 'ADDITIVE: the live original has NO MCP reordering tool at all (drag-and-drop is served over its '
+            . 'own REST layer, not MCP) -- sort_order is rehomed here from the now-fixed move_task (D1b Task 12c) '
+            . 'because D2\'s own drag-and-drop frontend needs a reordering call somewhere on this surface. Optional '
+            . 'and additive.',
     ],
 ];

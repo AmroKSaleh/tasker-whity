@@ -1273,48 +1273,440 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(404, $response->getStatusCode());
     }
 
-    /**
-     * D1b Task 6, task review finding #2: TaskerPlugin::moveTask() must
-     * resolve section_id/group_id destination identifiers through
-     * IdentifierResolver (UUID/id, exactly like every other identifier in
-     * this task's routes) BEFORE delegating to TasksApiHandler::move(),
-     * which itself only ever does a plain `(int)` cast on whatever it is
-     * handed. This proves the two-step composition end to end against real
-     * Postgres: resolve a section's UUID to its real id (the same call
-     * moveTask() itself makes), then feed that resolved id to move() — a
-     * genuine UUID destination round-trips correctly, not just casts to 0
-     * and 422s. moveTask() itself cannot be exercised directly (it calls
-     * resolvePdo(), which needs the live host container — see
-     * TaskerPluginTest's own note on this); this is the closest equivalent.
-     */
-    public function testMoveResolvesASectionUuidDestinationBeforeDelegatingToMove(): void
-    {
-        $projectId = $this->makeProjectDirect(7, null, 'Move by UUID project');
-        $sourceSectionId = $this->makeSectionDirect(7, $projectId);
-        // makeSectionDirect() always stamps slug='backlog' (see its own
-        // docblock), so the second section in the SAME project (move() only
-        // allows moving within one project) needs a distinct slug, inserted
-        // directly to avoid the (project_id, slug) unique violation.
-        $targetStmt = $this->pdo->prepare(
-            "INSERT INTO tasker_sections (public_id, tenant_id, project_id, name, slug, created_at)
-             VALUES (gen_random_uuid(), :tenant_id, :project_id, 'In Progress', 'in-progress', CURRENT_TIMESTAMP) RETURNING id"
-        );
-        $targetStmt->execute([':tenant_id' => 7, ':project_id' => $projectId]);
-        $targetSectionId = (int) $targetStmt->fetchColumn();
-        $targetPublicId = (string) $this->pdo
-            ->query("SELECT public_id FROM tasker_sections WHERE id = {$targetSectionId}")
-            ->fetchColumn();
-        $taskId = $this->makeTaskDirect(7, $projectId, $sourceSectionId, 'Move me by uuid');
+    // ==================== TasksApiHandler::moveToProject() (D1b Task 12c) ====================
+    //
+    // move_task was PORTED here, not merely allowlisted (see
+    // parity-allowlist.php's own closed 'move_task' SEMANTIC entry): the
+    // original's move_task moves a task to a DIFFERENT project, not the
+    // within-project relocation/reorder this plugin's own (now-retired)
+    // move()/moveTask() combo used to implement. moveToProject() is OU-aware
+    // (belt-and-braces, like moveToGroup()/getOne() — see its own docblock in
+    // TasksApiHandler), so ALL of its coverage lives here, never in
+    // TasksApiHandlerTest.php (SQLite) — see that file's own docblock.
 
-        $resolvedSectionId = IdentifierResolver::resolveSection($this->pdo, 7, null, $targetPublicId);
-        self::assertSame($targetSectionId, $resolvedSectionId, 'the UUID must resolve to the real target section id');
+    public function testMoveToProjectReassignsShortIdIntoTheTargetProjectsSequence(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Seq Source');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'SEQ' WHERE id = {$sourceProjectId}");
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Seq Target');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TAR' WHERE id = {$targetProjectId}");
+        $targetSectionId = $this->makeSectionDirect(7, $targetProjectId);
+        // The target already has two tasks -- short_id 1 and 2 -- so a
+        // moved-in task must become 3, following the TARGET's own sequence,
+        // never the source's.
+        $existingA = $this->makeTaskDirect(7, $targetProjectId, $targetSectionId, 'Existing A');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$existingA}");
+        $existingB = $this->makeTaskDirect(7, $targetProjectId, $targetSectionId, 'Existing B');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 2 WHERE id = {$existingB}");
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Moving task');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 40 WHERE id = {$taskId}");
 
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->move(7, $taskId, json_encode(['section_id' => $resolvedSectionId]));
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, null);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame($targetProjectId, $payload['data']['projectId']);
+        self::assertSame(3, $payload['data']['shortId'], 'must follow the TARGET project\'s own sequence, not the source\'s');
+        self::assertSame('TAR-3', $payload['data']['newShortId']);
+        self::assertSame('SEQ-40', $payload['data']['previousShortId']);
+    }
+
+    public function testMoveToProjectPreservesTaskContent(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Preserve Source');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Preserve Target');
+        $this->makeSectionDirect(7, $targetProjectId);
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Preserve me', 'high', true, '2026-09-01');
+        $this->pdo->exec(
+            "UPDATE tasker_tasks SET detail = 'some detail', status = 'done', completed_at = '2026-01-01 00:00:00' WHERE id = {$taskId}"
+        );
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, null);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame('Preserve me', $payload['data']['text']);
+        self::assertSame('some detail', $payload['data']['detail']);
+        self::assertSame('high', $payload['data']['priority']);
+        self::assertSame('done', $payload['data']['status']);
+        self::assertTrue($payload['data']['pinned']);
+        self::assertSame('2026-09-01', $payload['data']['dueDate']);
+        self::assertSame('2026-01-01 00:00:00', $payload['data']['completedAt']);
+    }
+
+    public function testMoveToProjectClearsGroupId(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Group Clear Source');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $groupId = $this->makeGroupDirect(7, $sourceSectionId, 'Old group');
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Group Clear Target');
+        $this->makeSectionDirect(7, $targetProjectId);
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Grouped task', null, false, null, 0, $groupId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, null);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertNull($payload['data']['groupId']);
+        self::assertTrue($payload['data']['droppedGroup']);
+    }
+
+    public function testMoveToProjectPlacesTheTaskInTheSuppliedTargetSection(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Section Source');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Section Target');
+        $this->makeSectionDirect(7, $targetProjectId); // Backlog, deliberately NOT the target below.
+        $targetSectionId = $this->makeSectionDirectNamed(7, $targetProjectId, 'In Review');
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Land me precisely');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, $targetSectionId);
 
         self::assertSame(200, $response->getStatusCode());
         $payload = json_decode($response->getBody(), true);
         self::assertSame($targetSectionId, $payload['data']['sectionId']);
+        self::assertFalse($payload['data']['landedInBacklog']);
+    }
+
+    /**
+     * The case the brief itself flags as most likely to be got wrong: a
+     * target_section_id that resolves to a REAL section, just not one
+     * belonging to the target project, must NOT be an error.
+     *
+     * DEVIATION FROM THE BRIEF: the brief (quoting the original's own tool
+     * description) says this should leave the task with "no section".
+     * tasker_tasks.section_id is `NOT NULL` (see CreateTaskerTasksTable's own
+     * docblock) — literal "no section" cannot exist in this schema. This
+     * reuses the SAME substitute create_task's own resolveCreateTaskSectionId()/
+     * backlogSectionIdFor() already established for the identical constraint:
+     * the task lands in the TARGET project's own Backlog section instead —
+     * see moveToProject()'s own docblock for the full reasoning.
+     */
+    public function testMoveToProjectLandsInTheTargetsBacklogWhenTheSuppliedSectionBelongsToADifferentProject(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Foreign Section Source');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Foreign Section Target');
+        $targetBacklogId = $this->makeSectionDirect(7, $targetProjectId);
+        $thirdProjectId = $this->makeProjectDirect(7, null, 'Unrelated Third Project');
+        $foreignSectionId = $this->makeSectionDirect(7, $thirdProjectId);
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Should land in backlog');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, $foreignSectionId);
+
+        self::assertSame(200, $response->getStatusCode(), 'a foreign target_section_id must NOT be an error');
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame($targetBacklogId, $payload['data']['sectionId']);
+        self::assertTrue($payload['data']['landedInBacklog']);
+    }
+
+    /**
+     * The Backlog-fallback's own failure edge: reachable only for a target
+     * project that never went through create_project (which always seeds a
+     * Backlog section) — e.g. an imported one. Matches createTask()'s own
+     * analogous "Project has no backlog section" 404.
+     */
+    public function testMoveToProjectReturns404WhenNoSectionIsResolvableAndTheTargetHasNoBacklog(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'No Backlog Source');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'No Backlog Target'); // No section seeded at all.
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Nowhere to land');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, null);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testMoveToProjectRejects404ForATaskOutsideTheCallersTenant(): void
+    {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Caller target project');
+        $this->makeSectionDirect(7, $targetProjectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $otherTaskId, $targetProjectId, null);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * Belt-and-braces defence (matches moveToGroup()'s own precedent): a
+     * caller scoped to OU 2 must not reach OU 3's task simply by supplying
+     * its id, even calling the handler directly.
+     */
+    public function testMoveToProjectRejects404ForASiblingOusTask(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Should not leak');
+        $targetProjectId = $this->makeProjectDirect(7, 2, 'Callers own project');
+        $this->makeSectionDirect(7, $targetProjectId);
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, 2, $siblingTaskId, $targetProjectId, null);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * The target-project half of the same belt-and-braces defence: a task
+     * the caller CAN see must not be movable into a project the caller
+     * cannot see.
+     */
+    public function testMoveToProjectRejects404ForATargetProjectInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Callers own project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Movable');
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, 2, $ownTaskId, $siblingProjectId, null);
+
+        self::assertSame(404, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT project_id FROM tasker_tasks WHERE id = {$ownTaskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($ownProjectId, (int) $row['project_id'], 'a rejected cross-OU move must not have moved anything');
+    }
+
+    /**
+     * ATOMICITY floor requirement: if the write fails, the task keeps its
+     * original project_id/short_id. Forced deterministically via
+     * `default_transaction_read_only` -- every statement (including
+     * ShortIdAllocator's own attempt) fails immediately with a NON-race
+     * SQLSTATE, so moveToProject() catches it and 500s without ever having
+     * committed anything. SELECTs remain allowed under this setting, so the
+     * verification query right after needs no special handling.
+     */
+    public function testMoveToProjectIsAtomicWhenTheUpdateFails(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Atomic Source');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'ATS' WHERE id = {$sourceProjectId}");
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Atomic Target');
+        $this->makeSectionDirect(7, $targetProjectId);
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Should not move');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 9 WHERE id = {$taskId}");
+
+        $this->pdo->exec('SET default_transaction_read_only = on');
+
+        $handler = new TasksApiHandler($this->pdo);
+        $response = $handler->moveToProject(7, null, $taskId, $targetProjectId, null);
+
+        self::assertSame(500, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT project_id, short_id FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($sourceProjectId, (int) $row['project_id'], 'a failed move must leave the task in its ORIGINAL project');
+        self::assertSame(9, (int) $row['short_id'], 'a failed move must leave the task with its ORIGINAL short_id');
+    }
+
+    // ==================== TaskerPlugin::moveTask() route (D1b Task 12c) ====================
+    //
+    // Full ROUTE-level dispatch (via registerOusContainer(), same as the
+    // D1b Task 12b delete_section/delete_project tests below) — this is
+    // parity-allowlist.php['move_task']'s own former dischargedBy proof
+    // (the entry it names is now CLOSED, not merely discharged — see that
+    // file's own comment), and the only place task_id/target_project_id/
+    // target_section_id identifier RESOLUTION (as opposed to
+    // moveToProject()'s own belt-and-braces re-check above) can be exercised
+    // at all.
+
+    /**
+     * parity-allowlist.php's former 'move_task' SEMANTIC entry named this
+     * exact method as its dischargedBy proof. Exercises the real, fully
+     * wired path: short-id-by-prefix resolution for BOTH task_id and
+     * target_project_id, the cross-project move itself, and every field the
+     * brief asks the response to report.
+     */
+    public function testMoveTaskMovesATaskIntoADifferentProject(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Move Source');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'SRC' WHERE id = {$sourceProjectId}");
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Move Target');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'TGT' WHERE id = {$targetProjectId}");
+        $this->makeSectionDirect(7, $targetProjectId); // Target's own Backlog.
+
+        $groupId = $this->makeGroupDirect(7, $sourceSectionId, 'Old group');
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Cross-project task', 'high', true, '2026-09-01', 0, $groupId);
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$taskId}");
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/move', (string) json_encode([
+            'task_id' => 'SRC-1',
+            'target_project_id' => 'TGT',
+        ]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTask($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame($targetProjectId, $payload['data']['projectId']);
+        self::assertSame(1, $payload['data']['shortId'], 'a fresh target project starts its own sequence at 1');
+        self::assertSame('TGT-1', $payload['data']['newShortId']);
+        self::assertSame('SRC-1', $payload['data']['previousShortId']);
+        self::assertSame('high', $payload['data']['priority']);
+        self::assertTrue($payload['data']['pinned']);
+        self::assertSame('2026-09-01', $payload['data']['dueDate']);
+        self::assertNull($payload['data']['groupId']);
+        self::assertTrue($payload['data']['droppedGroup']);
+    }
+
+    /**
+     * Replaces the old (pre-Task-12c) testMoveResolvesASectionUuidDestinationBeforeDelegatingToMove():
+     * proves target_section_id UUID resolution end to end through the NEW
+     * cross-project route, the same way the retired test proved it for the
+     * old within-project one.
+     */
+    public function testMoveTaskResolvesATargetSectionUuidBeforeMoving(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'UUID Move Source');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'UUID Move Target');
+        $this->makeSectionDirect(7, $targetProjectId); // Backlog, deliberately not the target below.
+        $targetSectionId = $this->makeSectionDirectNamed(7, $targetProjectId, 'In Review');
+        $targetSectionPublicId = (string) $this->pdo
+            ->query("SELECT public_id FROM tasker_sections WHERE id = {$targetSectionId}")
+            ->fetchColumn();
+
+        $taskId = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Move me by uuid section');
+        $taskPublicId = (string) $this->pdo->query("SELECT public_id FROM tasker_tasks WHERE id = {$taskId}")->fetchColumn();
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/move', (string) json_encode([
+            'task_id' => $taskPublicId,
+            'target_project_id' => (string) $targetProjectId,
+            'target_section_id' => $targetSectionPublicId,
+        ]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTask($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame($targetSectionId, $payload['data']['sectionId']);
+    }
+
+    /**
+     * A destructive/mutating route must never guess its target (the same
+     * rule deleteProject()'s own docblock states) — an absent
+     * target_project_id is a plain 400, never a fallback to anything, and
+     * the task must not move.
+     */
+    public function testMoveTaskRejects400ForAnAbsentTargetProjectIdAndDoesNotMoveTheTask(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'No Target Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Stays put');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 5 WHERE id = {$taskId}");
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/move', (string) json_encode(['task_id' => (string) $taskId]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTask($request);
+
+        self::assertSame(400, $response->getStatusCode());
+        $body = json_decode($response->getBody(), true);
+        self::assertStringContainsString('target_project_id', $body['error']);
+
+        $row = $this->pdo->query("SELECT project_id, short_id FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($projectId, (int) $row['project_id']);
+        self::assertSame(5, (int) $row['short_id']);
+    }
+
+    public function testMoveTaskRejects404ForATaskInASiblingOu(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $this->makeMembership(self::CALLER_ID, 7, 2);
+
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'SIB' WHERE id = {$siblingProjectId}");
+        $siblingSectionId = $this->makeSectionDirect(7, $siblingProjectId);
+        $siblingTaskId = $this->makeTaskDirect(7, $siblingProjectId, $siblingSectionId, 'Hidden');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$siblingTaskId}");
+
+        $targetProjectId = $this->makeProjectDirect(7, 2, 'Callers own project');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'OWN' WHERE id = {$targetProjectId}");
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/move', (string) json_encode([
+            'task_id' => 'SIB-1',
+            'target_project_id' => 'OWN',
+        ]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTask($request);
+
+        self::assertSame(404, $response->getStatusCode());
+    }
+
+    public function testMoveTaskRejects404ForATargetProjectInASiblingOu(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $this->makeMembership(self::CALLER_ID, 7, 2);
+
+        $ownProjectId = $this->makeProjectDirect(7, 2, 'Callers own project');
+        $ownSectionId = $this->makeSectionDirect(7, $ownProjectId);
+        $ownTaskId = $this->makeTaskDirect(7, $ownProjectId, $ownSectionId, 'Movable');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'OWN' WHERE id = {$ownProjectId}");
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$ownTaskId}");
+
+        $siblingProjectId = $this->makeProjectDirect(7, 3, 'Sibling OU project');
+        $this->pdo->exec("UPDATE tasker_projects SET prefix = 'SIB' WHERE id = {$siblingProjectId}");
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/move', (string) json_encode([
+            'task_id' => 'OWN-1',
+            'target_project_id' => 'SIB',
+        ]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->moveTask($request);
+
+        self::assertSame(404, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT project_id FROM tasker_tasks WHERE id = {$ownTaskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($ownProjectId, (int) $row['project_id'], 'a rejected cross-OU move must not have moved anything');
     }
 
     // ==================== ShortIdAllocator (Task 2: short_id allocation) ====================
@@ -2238,6 +2630,31 @@ final class TenantIsolationOuTest extends TestCase
         $response = $handler->moveToGroup(7, 2, $siblingTaskId, null, null);
 
         self::assertSame(404, $response->getStatusCode());
+    }
+
+    /**
+     * D1b Task 12c floor requirement: move_task_to_group still reorders via
+     * sort_order, now that the capability was rehomed here from move_task
+     * (the live original exposes no MCP reordering tool at all — see
+     * parity-allowlist.php['move_task_to_group']). null (the default) must
+     * leave sort_order untouched, matching every other optional field here.
+     */
+    public function testMoveToGroupStillReordersViaSortOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Reorder Project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'Reorder me', null, false, null, 1);
+
+        $handler = new TasksApiHandler($this->pdo);
+
+        $reorderResponse = $handler->moveToGroup(7, null, $taskId, null, null, 5);
+        self::assertSame(200, $reorderResponse->getStatusCode());
+        $reordered = json_decode($reorderResponse->getBody(), true);
+        self::assertSame(5, $reordered['data']['sortOrder']);
+
+        // Omitting sort_order (null, the default) must leave it untouched.
+        $unchanged = json_decode($handler->moveToGroup(7, null, $taskId, null, null)->getBody(), true);
+        self::assertSame(5, $unchanged['data']['sortOrder'], 'omitting sort_order must leave the previous value in place');
     }
 
     // ==================== Environment (OU) aliases (D1b Task 10) ====================

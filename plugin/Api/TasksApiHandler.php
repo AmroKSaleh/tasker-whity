@@ -13,24 +13,40 @@ use Whity\Core\Taxonomy\TagRepository;
 use Whity\Sdk\Http\Response;
 
 /**
- * Tenant-scoped CRUD, move, pin/unpin, complete/uncomplete, and entity-tag
+ * Tenant-scoped CRUD, pin/unpin, complete/uncomplete, and entity-tag
  * attachment for tasker_tasks, plus the OU-scoped readyWork()/getOne()/
- * moveToGroup() queries.
+ * moveToGroup()/moveToProject() queries.
  *
- * update()/move()/delete()/complete()/uncomplete()/pin()/unpin()/tag() are
+ * update()/delete()/complete()/uncomplete()/pin()/unpin()/tag() are
  * tenant-scoped only — a caller only ever reaches an individual task's id
  * after already holding it from an OU-scoped list (listForSection()/
  * listFiltered() or get_board), so re-checking OU scope on every
  * single-task mutation would be redundant. readyWork() is one exception: it
  * is reached directly by project id, not through a task the caller already
  * holds, so it re-derives and checks OU visibility itself, exactly like
- * get_board. getOne() (D1b Task 8) and moveToGroup() (D1b Task 9) are two
- * more: both are the caller's FIRST hop straight to a task by identifier —
- * a get and, more seriously, a MUTATION — reachable by simply guessing a
- * sequential BIGSERIAL id, so both re-derive and check OU visibility via
- * {@see self::findVisible()} rather than trusting the task id the way
- * update()/move()/etc. do. See getOne()'s own docblock for the full
- * reasoning, which moveToGroup()'s docblock refers back to.
+ * get_board. getOne() (D1b Task 8), moveToGroup() (D1b Task 9) and
+ * moveToProject() (D1b Task 12c) are three more: all are the caller's FIRST
+ * hop straight to a task by identifier — a get and, more seriously, a
+ * MUTATION — reachable by simply guessing a sequential BIGSERIAL id, so all
+ * three re-derive and check OU visibility via {@see self::findVisible()}
+ * rather than trusting the task id the way update()/delete()/etc. do. See
+ * getOne()'s own docblock for the full reasoning, which moveToGroup()'s and
+ * moveToProject()'s docblocks both refer back to. moveToProject() ALSO
+ * re-derives and checks the TARGET project's own OU visibility, via
+ * {@see self::isProjectVisible()} — the same belt-and-braces defence
+ * {@see \Tasker\Api\ProjectsApiHandler::delete()} already applies to its own
+ * OU-scoped findScoped() re-check, even though its route (like moveToProject()'s
+ * own route, {@see \Tasker\TaskerPlugin::moveTask()}) already resolved the
+ * identifier through {@see \Tasker\Access\IdentifierResolver} first.
+ *
+ * TasksApiHandler::move() (within-project section/group/sort_order changes)
+ * was RETIRED in D1b Task 12c, not merely renamed: it was move_task's own
+ * backing method under D1's (pre-parity) semantics, and its entire
+ * capability — section/group placement plus sort_order — is exactly what
+ * moveToGroup() covers once Task 12c adds sort_order to it (an ADDITIVE
+ * divergence — see parity-allowlist.php['move_task_to_group']). Nothing else
+ * ever called move(); see git history for the method itself and its
+ * dedicated tests.
  *
  * create()'s section-existence check is ALSO OU-aware (whole-branch review
  * finding C1): {sectionId} is a discovered value with its own separate
@@ -315,9 +331,14 @@ final class TasksApiHandler
 
     /**
      * PATCH /api/tasker/tasks/{id} — content-only edit. section_id/group_id/
-     * sort_order are NOT editable here; that's move()'s job (structural
-     * placement vs. content are kept as two separate, smaller operations,
-     * matching the design spec's own naming: update_task vs. move_task).
+     * sort_order are NOT editable here; that's move_task_to_group's job
+     * (structural placement WITHIN a project vs. content are kept as two
+     * separate, smaller operations). move_task itself (D1b Task 12c) no
+     * longer overlaps this at all — it moved a task within its own project
+     * until Task 12c ported it to the ORIGINAL's actual contract, a
+     * CROSS-PROJECT move (see {@see self::moveToProject()}), retiring the
+     * within-project move() this docblock used to point to. See git history
+     * for that method.
      *
      * status (D1b Task 11 round 3, completed_at fix in round 4) accepts the
      * original's own three-value enum (pending/in_progress/done), validated
@@ -428,130 +449,12 @@ final class TasksApiHandler
     }
 
     /**
-     * POST /api/tasker/tasks/{id}/move — structural placement only:
-     * section_id, group_id, sort_order. A task can move between sections and
-     * groups within the SAME project only; there is no cross-project move in
-     * this plan (moving a task's project_id would need to reconcile it
-     * against a different OU/project scope entirely, out of D1's scope).
-     *
-     * REGRESSION FIX (whole-branch review finding I1): section_id and
-     * group_id used to be validated INDEPENDENTLY of each other — group_id
-     * only had to belong to the task's own PROJECT, never to its (possibly
-     * newly-changed) section_id. Moving a task to a different section while
-     * a group_id from the OLD section was left in place made
-     * BoardApiHandler::get() render it under the OLD section (it places a
-     * task by its group's section, not the task's own section_id) while
-     * listForSection() for the NEW section returned it — the two read paths
-     * disagreed. Now: when section_id changes and group_id is NOT supplied
-     * in the SAME request, group_id is cleared to null (the task becomes
-     * ungrouped in its new section — the old group has no relationship to
-     * the new one). When group_id IS supplied, it is validated against the
-     * TARGET section (the new section_id if this same request is also
-     * changing it, otherwise the task's current section_id) — 422 if it
-     * doesn't belong there.
-     *
-     * CARRY-OVER BUG FIX (D1b Task 6): $sectionChanging used to be set from
-     * `array_key_exists('section_id', $decoded)` alone — SUPPLIED, not
-     * CHANGED, contradicting this very docblock's "when section_id changes"
-     * wording above. A plain reorder that echoes the task's CURRENT
-     * section_id (`{"task_id": ..., "section_id": <same>, "sort_order": 5}`)
-     * — exactly what a drag-and-drop client sends — was silently treated as a
-     * section change, which cleared group_id via the `elseif` branch below
-     * and un-grouped an already-grouped task. Comparing against the row's
-     * actual current value closes that.
-     */
-    public function move(int $tenantId, int $taskId, string $body): Response
-    {
-        $row = $this->findScoped($taskId, $tenantId);
-        if ($row === null) {
-            return Response::error('Task not found', 404);
-        }
-
-        $decoded = json_decode($body, true);
-        if (!is_array($decoded)) {
-            $decoded = [];
-        }
-
-        $projectId = (int) $row['project_id'];
-        $fields = [];
-        $params = [':id' => $taskId, ':tenant_id' => $tenantId];
-
-        $sectionChanging = array_key_exists('section_id', $decoded)
-            && (int) $decoded['section_id'] !== (int) $row['section_id'];
-        $groupProvided = array_key_exists('group_id', $decoded);
-        // The section a supplied group_id must belong to: the NEW section_id
-        // if this same request is also changing it, otherwise the task's
-        // current (unchanged) section_id.
-        $targetSectionId = (int) $row['section_id'];
-
-        if ($sectionChanging) {
-            $sectionId = (int) $decoded['section_id'];
-            if (!$this->sectionBelongsToProject($tenantId, $sectionId, $projectId)) {
-                return Response::error('section_id must belong to the task\'s own project', 422);
-            }
-            $fields[] = 'section_id = :section_id';
-            $params[':section_id'] = $sectionId;
-            $targetSectionId = $sectionId;
-        }
-
-        if ($groupProvided) {
-            $groupId = $decoded['group_id'] !== null ? (int) $decoded['group_id'] : null;
-            // Validated against the TARGET section directly (tasker_groups
-            // already stores section_id) — not merely the task's project —
-            // so a group_id from a different section can never be attached,
-            // even if that section belongs to the same project.
-            if ($groupId !== null && !$this->groupBelongsToSection($tenantId, $groupId, $targetSectionId)) {
-                return Response::error('group_id must belong to the target section', 422);
-            }
-            $fields[] = 'group_id = :group_id';
-            $params[':group_id'] = $groupId;
-        } elseif ($sectionChanging) {
-            // section_id changed but group_id was not supplied in the same
-            // request: the task's old group has no relationship to the new
-            // section, so it becomes ungrouped rather than silently keeping a
-            // stale, cross-section group_id.
-            $fields[] = 'group_id = :group_id';
-            $params[':group_id'] = null;
-        }
-
-        if (array_key_exists('sort_order', $decoded)) {
-            $fields[] = 'sort_order = :sort_order';
-            $params[':sort_order'] = (int) $decoded['sort_order'];
-        }
-
-        if ($fields === []) {
-            return Response::json(['data' => $this->toPublicTask($row)], 200);
-        }
-        $fields[] = 'updated_at = CURRENT_TIMESTAMP';
-
-        try {
-            $sql = 'UPDATE tasker_tasks SET ' . implode(', ', $fields) . " WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id";
-            $stmt = $this->db->prepare($sql);
-            $stmt->execute($params);
-
-            $updated = $this->findScoped($taskId, $tenantId);
-            if ($updated === null) {
-                return Response::error('Task not found', 404);
-            }
-
-            (new AuditLogger($this->db))->record('tasker_task.moved', [
-                'tenant_id' => $tenantId,
-                'target_type' => 'tasker_task',
-                'target_id' => $taskId,
-            ]);
-
-            return Response::json(['data' => $this->toPublicTask($updated)], 200);
-        } catch (\Throwable) {
-            return Response::error('Failed to move task', 500);
-        }
-    }
-
-    /**
      * Whether $sectionId exists, belongs to $tenantId, AND to $projectId —
-     * the project-membership check {@see self::move()}'s own $sectionChanging
-     * branch has always run. Extracted (D1b Task 9) so
-     * {@see self::moveToGroup()} reuses the identical, already-reviewed SQL
-     * rather than a second, subtly different copy of it.
+     * the project-membership check {@see self::moveToGroup()}'s own
+     * section-validation branch runs, and {@see self::moveToProject()} reuses
+     * for its own target_section_id/Backlog-fallback decision. Extracted
+     * (D1b Task 9) from the now-retired move() so it is one, already-reviewed
+     * copy rather than several.
      */
     private function sectionBelongsToProject(int $tenantId, int $sectionId, int $projectId): bool
     {
@@ -567,10 +470,9 @@ final class TasksApiHandler
      * Whether $groupId exists, belongs to $tenantId, AND to $sectionId
      * (tasker_groups already stores section_id directly, so this is never
      * merely a project-membership check) — the cross-section-grouping check
-     * {@see self::move()}'s own $groupProvided branch has always run.
-     * Extracted (D1b Task 9 brief resolution #4) so
-     * {@see self::moveToGroup()} reuses move()'s own already-reviewed logic
-     * rather than a second convention for the identical rule.
+     * {@see self::moveToGroup()}'s own group-validation branch runs.
+     * Extracted (D1b Task 9 brief resolution #4) from the now-retired move()
+     * so it stays one, already-reviewed convention for the identical rule.
      */
     private function groupBelongsToSection(int $tenantId, int $groupId, int $sectionId): bool
     {
@@ -584,23 +486,22 @@ final class TasksApiHandler
 
     /**
      * POST /api/tasker/tasks/group — the original's move_task_to_group:
-     * dedicated to group membership only, deliberately narrower than
-     * move()'s combined section/group/sort_order scope. section_id is
-     * accepted alongside group_id only to let a caller re-target the
-     * group's OWN section in the same call (see the cross-section
-     * validation below) — when supplied, it is written to the task exactly
-     * like move()'s own $sectionChanging branch, keeping the task's
+     * dedicated to group membership (plus, ADDITIVELY, board ordering — see
+     * $sortOrder below), deliberately narrower than the now-retired move()'s
+     * old combined section/group/sort_order scope. section_id is accepted
+     * alongside group_id only to let a caller re-target the group's OWN
+     * section in the same call (see the cross-section validation below) —
+     * when supplied, it is written to the task, keeping the task's
      * section_id and its group's actual section in agreement (the same
-     * invariant move()'s own docblock — whole-branch review finding I1 —
-     * exists to protect).
+     * invariant whole-branch review finding I1 protected on move()).
      *
      * OU-AWARE — DEVIATION FROM THE BRIEF (D1b Task 9 brief resolution #2):
      * the brief's own stated interface is
      * `moveToGroup(int $tenantId, int $taskId, ?int $groupId, ?int $sectionId): Response`,
-     * tenant-scoped only, matching move()'s own single-task-id mutations
-     * (see this class's own docblock for why those stay tenant-scoped:
-     * a caller only ever reaches an individual task id after already
-     * holding it from an OU-scoped list/get_board). This method is a
+     * tenant-scoped only, matching this class's other single-task-id
+     * mutations (see this class's own docblock for why those stay
+     * tenant-scoped: a caller only ever reaches an individual task id after
+     * already holding it from an OU-scoped list/get_board). This method is a
      * mutation reachable by guessing a sequential BIGSERIAL task id — a
      * strictly STRONGER case than {@see self::getOne()}'s own OU-aware read
      * (D1b Task 8), which was made OU-aware for the identical reason. Its
@@ -614,15 +515,28 @@ final class TasksApiHandler
      * resolution #3 — the route layer, TaskerPlugin::moveTaskToGroup(),
      * collapses the two statuses via its own resolveGroupMembership()
      * before ever calling this method). move_task_to_group exists SOLELY to
-     * set group membership, so there is no "leave unchanged" form the way
-     * move()'s own array_key_exists()-based group_id handling has — and
-     * that is a deliberate divergence, not an oversight: it is exactly what
-     * keeps this method from reproducing move()'s own known carry-over
-     * defect (see move()'s docblock) of conflating "supplied" with
-     * "changed".
+     * set group membership, so there is no "leave unchanged" form for
+     * group_id the way section_id (and now $sortOrder) have.
+     *
+     * $sortOrder (D1b Task 12c, ADDITIVE — see
+     * parity-allowlist.php['move_task_to_group']): the live original exposes
+     * NO reordering tool over MCP at all — neither update_task nor
+     * move_task_to_group carries sort_order there; the original's own
+     * drag-and-drop reordering is a web-UI concern served over its own REST
+     * layer. This plugin's now-retired move() used to be the only place
+     * sort_order lived; rehoming it here (rather than inventing a new tool)
+     * keeps the capability D2's own drag-and-drop frontend needs without
+     * adding a 50th tool. Optional and additive: null (the default) leaves
+     * sort_order untouched, exactly like $sectionId's own "absent" handling.
      */
-    public function moveToGroup(int $tenantId, ?int $callerOuId, int $taskId, ?int $groupId, ?int $sectionId): Response
-    {
+    public function moveToGroup(
+        int $tenantId,
+        ?int $callerOuId,
+        int $taskId,
+        ?int $groupId,
+        ?int $sectionId,
+        ?int $sortOrder = null
+    ): Response {
         $row = $this->findVisible($tenantId, $callerOuId, $taskId);
         if ($row === null) {
             return Response::error('Task not found', 404);
@@ -636,8 +550,7 @@ final class TasksApiHandler
 
         // The section a supplied group_id must belong to: the NEW section_id
         // when this same request is also changing it, otherwise the task's
-        // current (unchanged) section_id — identical rule to move()'s own
-        // $targetSectionId.
+        // current (unchanged) section_id.
         $targetSectionId = $sectionId ?? (int) $row['section_id'];
 
         if ($groupId !== null && !$this->groupBelongsToSection($tenantId, $groupId, $targetSectionId)) {
@@ -649,6 +562,10 @@ final class TasksApiHandler
         if ($sectionId !== null) {
             $fields[] = 'section_id = :section_id';
             $params[':section_id'] = $sectionId;
+        }
+        if ($sortOrder !== null) {
+            $fields[] = 'sort_order = :sort_order';
+            $params[':sort_order'] = $sortOrder;
         }
         $fields[] = 'updated_at = CURRENT_TIMESTAMP';
 
@@ -672,6 +589,231 @@ final class TasksApiHandler
         } catch (\Throwable) {
             return Response::error('Failed to move task to group', 500);
         }
+    }
+
+    /**
+     * POST /api/tasker/tasks/move — the original's move_task, ported (D1b
+     * Task 12c) to its ACTUAL live contract: a CROSS-PROJECT move, not the
+     * within-project relocation/reorder this route used to implement (that
+     * capability now lives on {@see self::moveToGroup()}, which gained
+     * $sortOrder for exactly this reason — see parity-allowlist.php's
+     * former 'move_task' SEMANTIC entry, now closed, and its new
+     * 'move_task_to_group' ADDITIVE one).
+     *
+     * $task_id and $targetProjectId arrive HERE already resolved AND
+     * OU-scoped by {@see \Tasker\TaskerPlugin::moveTask()} via
+     * {@see \Tasker\Access\IdentifierResolver::resolveTask()}/::resolveProject().
+     * This method re-derives and checks OU visibility on BOTH anyway — via
+     * {@see self::findVisible()} for the task and {@see self::isProjectVisible()}
+     * for the target project — the same belt-and-braces defence
+     * {@see \Tasker\Api\ProjectsApiHandler::delete()} applies to its own
+     * already-route-resolved project_id (see this class's own docblock).
+     *
+     * $resolvedSectionId is the caller's target_section_id, ALSO already
+     * resolved (tenant+OU scoped) by the route via
+     * IdentifierResolver::resolveSection() — but NOT yet confirmed to belong
+     * to $targetProjectId: resolveSection()'s id/UUID forms only check
+     * tenant/OU membership, never their $parentId argument (see
+     * IdentifierResolver::resolveStructural()'s own doc), so a section from a
+     * DIFFERENT project can arrive here as a resolved, real section id. This
+     * method is what actually confirms project membership, via
+     * {@see self::sectionBelongsToProject()}.
+     *
+     * DEVIATION FROM THE BRIEF (schema-forced, not a judgement call): the
+     * brief (quoting the original's own tool description) says an
+     * omitted/foreign target_section_id should leave the task with "no
+     * section". tasker_tasks.section_id is `NOT NULL` (see
+     * CreateTaskerTasksTable's own docblock) — literal "no section" has no
+     * representation in this schema at all. This is the SAME constraint
+     * create_task's own resolveCreateTaskSectionId()/backlogSectionIdFor()
+     * already had to work around (see createTask()'s own docblock in
+     * TaskerPlugin), and this method reuses that exact, already-established
+     * substitute: an omitted or foreign target_section_id lands the task in
+     * the TARGET PROJECT's own Backlog section instead of erroring —
+     * preserving the brief's actual intent ("not an error") while satisfying
+     * a constraint the brief's wording did not account for. Only when the
+     * target project has NO Backlog section at all (reachable only for a
+     * project that never went through create_project) does this 404 —
+     * exactly like create_task's own analogous edge case.
+     *
+     * SHORT ID REASSIGNMENT: the task's short_id is reassigned into
+     * $targetProjectId's OWN sequence via
+     * {@see \Tasker\Domain\ShortIdAllocator::withRetry()} — the SAME
+     * allocator create() uses, so a moved task's new short id follows
+     * exactly the rule a freshly created task in the target project would.
+     * The vacated short_id in the SOURCE project is never reused or
+     * backfilled — UNIQUE (project_id, short_id) is scoped PER PROJECT (see
+     * AddTaskerTaskShortIdUnique), so a gap left behind there is harmless,
+     * and the original itself never compacts a project's short id sequence
+     * either.
+     *
+     * ATOMICITY — DELIBERATELY NOT an explicit `beginTransaction()`/`commit()`
+     * pair, even though the brief asks to "wrap the allocation and the
+     * update in a transaction": doing that HERE would be actively harmful on
+     * real PostgreSQL. ShortIdAllocator::withRetry() is designed to CATCH a
+     * lost-race PDOException and retry with a freshly recomputed candidate —
+     * but Postgres aborts an ENTIRE transaction block on the first error any
+     * statement inside it raises, so a caught race-loss would poison the
+     * surrounding transaction and every subsequent statement (including the
+     * retry's own SELECT and UPDATE) would fail immediately with "current
+     * transaction is aborted" instead of actually retrying. create() avoids
+     * this the same way: it never wraps ShortIdAllocator::withRetry() in an
+     * explicit transaction either. The atomicity the brief is really asking
+     * for — never leaving a "renumbered but not moved" or "moved but not
+     * renumbered" row — is achieved instead by making project_id, section_id,
+     * group_id AND short_id all columns of ONE UPDATE statement, which PDO's
+     * ordinary (default, no explicit BEGIN) autocommit semantics already
+     * commit or roll back as a single atomic unit — exactly like create()'s
+     * own single INSERT. If every retry attempt fails, the exception
+     * propagates untouched, nothing was ever written, and the task keeps its
+     * original project_id/short_id.
+     *
+     * THE RESPONSE reports what changed, matching the original's own
+     * documented behaviour ("the response reports what was dropped"):
+     * previousShortId/newShortId as human-readable "PREFIX-N" strings (an
+     * agent that knows a task as TDE-31 needs to learn it is now WCP-14, or
+     * every subsequent call by short id fails), droppedGroup (group_id is
+     * reset unconditionally — a group belongs to a section which belongs to
+     * the source project, so nothing about it can travel), and
+     * landedInBacklog (true whenever the Backlog substitute above actually
+     * fired, i.e. the caller's own requested section was not used).
+     *
+     * Flows and cross-project I/O edges — the original's OTHER documented
+     * move_task side effects (unlinked from any flow, cross-project I/O
+     * edges dropped) — do not exist in this backend at all (D1/D1b never
+     * ported flows), so there is nothing to unlink or drop; the tool
+     * description says so rather than implying either happened.
+     */
+    public function moveToProject(
+        int $tenantId,
+        ?int $callerOuId,
+        int $taskId,
+        int $targetProjectId,
+        ?int $resolvedSectionId
+    ): Response {
+        $row = $this->findVisible($tenantId, $callerOuId, $taskId);
+        if ($row === null) {
+            return Response::error('Task not found', 404);
+        }
+        if (!$this->isProjectVisible($tenantId, $callerOuId, $targetProjectId)) {
+            return Response::error('Target project not found', 404);
+        }
+
+        $oldProjectId = (int) $row['project_id'];
+        $oldShortId   = $row['short_id'] !== null ? (int) $row['short_id'] : null;
+        $hadGroup     = $row['group_id'] !== null;
+
+        // A foreign or unresolved target section lands the task in the
+        // TARGET's own Backlog instead — never an error. See this method's
+        // own docblock for why literal "no section" cannot exist here.
+        $sectionId = $resolvedSectionId !== null
+            && $this->sectionBelongsToProject($tenantId, $resolvedSectionId, $targetProjectId)
+            ? $resolvedSectionId
+            : $this->backlogSectionIdFor($tenantId, $targetProjectId);
+
+        if ($sectionId === null) {
+            return Response::error('Target project has no backlog section', 404);
+        }
+
+        try {
+            $newShortId = ShortIdAllocator::withRetry(
+                $this->db,
+                $tenantId,
+                $targetProjectId,
+                function (int $candidate) use ($tenantId, $taskId, $targetProjectId, $sectionId): void {
+                    $idCol = $this->idColumn();
+                    $stmt = $this->db->prepare(
+                        "UPDATE tasker_tasks
+                         SET project_id = :project_id, section_id = :section_id, group_id = NULL,
+                             short_id = :short_id, updated_at = CURRENT_TIMESTAMP
+                         WHERE {$idCol} = :id AND tenant_id = :tenant_id"
+                    );
+                    $stmt->bindValue(':project_id', $targetProjectId, PDO::PARAM_INT);
+                    $stmt->bindValue(':section_id', $sectionId, PDO::PARAM_INT);
+                    $stmt->bindValue(':short_id', $candidate, PDO::PARAM_INT);
+                    $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+                    $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+                    $stmt->execute();
+                }
+            );
+        } catch (\Throwable) {
+            // Nothing committed -- see this method's own ATOMICITY note. The
+            // task keeps its original project_id/short_id.
+            return Response::error('Failed to move task', 500);
+        }
+
+        $updated = $this->findScoped($taskId, $tenantId);
+        if ($updated === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        (new AuditLogger($this->db))->record('tasker_task.moved_to_project', [
+            'tenant_id' => $tenantId,
+            'target_type' => 'tasker_task',
+            'target_id' => $taskId,
+        ]);
+
+        $prefixes = $this->projectPrefixes($tenantId, $oldProjectId, $targetProjectId);
+        $oldPrefix = $prefixes[$oldProjectId] ?? null;
+        $newPrefix = $prefixes[$targetProjectId] ?? null;
+
+        $task = $this->toPublicTask($updated);
+        $task['previousProjectId'] = $oldProjectId;
+        $task['previousShortId']   = ($oldPrefix !== null && $oldShortId !== null) ? "{$oldPrefix}-{$oldShortId}" : null;
+        $task['newShortId']        = $newPrefix !== null ? "{$newPrefix}-{$newShortId}" : null;
+        $task['droppedGroup']      = $hadGroup;
+        $task['landedInBacklog']   = $sectionId !== $resolvedSectionId;
+
+        return Response::json(['data' => $task], 200);
+    }
+
+    /**
+     * The Backlog section id for $projectId, or null when the project has
+     * none — {@see self::moveToProject()}'s own substitute for the literal
+     * "no section" tasker_tasks.section_id's NOT NULL constraint forbids.
+     * Deliberately duplicated rather than shared with
+     * {@see \Tasker\TaskerPlugin::backlogSectionIdFor()} (the near-identical
+     * helper create_task's own routing uses) — matching this class's own
+     * established precedent of replicating small, tenant-scoped-only helpers
+     * rather than reaching into a different class for them (see
+     * {@see self::dbTruthy()}'s own docblock for the same call across four
+     * other classes in this codebase).
+     */
+    private function backlogSectionIdFor(int $tenantId, int $projectId): ?int
+    {
+        $stmt = $this->db->prepare(
+            "SELECT id FROM tasker_sections WHERE project_id = :project_id AND tenant_id = :tenant_id AND slug = 'backlog' LIMIT 1"
+        );
+        $stmt->execute([':project_id' => $projectId, ':tenant_id' => $tenantId]);
+        $id = $stmt->fetchColumn();
+
+        return $id === false ? null : (int) $id;
+    }
+
+    /**
+     * The `prefix` of $projectIdA and $projectIdB, keyed by id — used by
+     * {@see self::moveToProject()} to render its previousShortId/newShortId
+     * response fields as human-readable "PREFIX-N" strings. Both ids arrive
+     * already resolved (never caller-supplied text), so binding both through
+     * one static two-armed OR template is safe the same way
+     * {@see self::findVisible()}'s own two-tenant-id bind is.
+     *
+     * @return array<int, ?string>
+     */
+    private function projectPrefixes(int $tenantId, int $projectIdA, int $projectIdB): array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT id, prefix FROM tasker_projects WHERE tenant_id = :tenant_id AND (id = :a OR id = :b)'
+        );
+        $stmt->execute([':tenant_id' => $tenantId, ':a' => $projectIdA, ':b' => $projectIdB]);
+
+        $result = [];
+        /** @var array<string, mixed> $row */
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $result[(int) $row['id']] = $row['prefix'] !== null ? (string) $row['prefix'] : null;
+        }
+
+        return $result;
     }
 
     /**
@@ -954,7 +1096,7 @@ final class TasksApiHandler
      * OU-AWARE — DEVIATION FROM THE BRIEF (D1b Task 8 brief resolution #2):
      * the brief's own stated interface is `getOne(int $tenantId, int $taskId):
      * Response`, tenant-scoped only, matching every other single-task method
-     * in this class (update/move/delete/complete/uncomplete/pin/unpin/tag).
+     * in this class (update/delete/complete/uncomplete/pin/unpin/tag).
      * Those all stay tenant-scoped only because a caller only ever reaches
      * one of THEIR task ids through an OU-scoped list/get_board first — by
      * the time a caller holds a task id, OU visibility has already been
