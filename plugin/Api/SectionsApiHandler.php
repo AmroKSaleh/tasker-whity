@@ -222,64 +222,123 @@ final class SectionsApiHandler
             return Response::error('Section not found', 404);
         }
 
-        $countStmt = $this->db->prepare(
-            'SELECT COUNT(*) FROM tasker_sections WHERE project_id = :project_id AND tenant_id = :tenant_id'
-        );
-        $countStmt->execute([':project_id' => $row['project_id'], ':tenant_id' => $tenantId]);
-        if ((int) $countStmt->fetchColumn() <= 1) {
-            return Response::error('Cannot delete a project\'s last remaining section', 409);
-        }
+        $projectId = (int) $row['project_id'];
 
         try {
-            if ($deleteTasks) {
-                $stmt = $this->db->prepare("DELETE FROM tasker_sections WHERE {$this->idColumn()} = :id AND tenant_id = :tenant_id");
-                $stmt->execute([':id' => $sectionId, ':tenant_id' => $tenantId]);
+            // WHOLE-BRANCH REVIEW I8: the "last remaining section" guard used to
+            // be a SELECT COUNT(*) here, followed by a separate DELETE — plain
+            // check-then-act, so two concurrent delete_section calls on a
+            // two-section project both counted 2, both proceeded, and the
+            // project ended with ZERO sections. That is the invariant
+            // CreateTaskerTasksTable's own docblock cites as the reason
+            // tasker_tasks.section_id is NOT NULL, so violating it strands every
+            // task in the project.
+            //
+            // Two changes, and BOTH are needed:
+            //
+            //  1. The sibling check is folded into each DELETE's own WHERE via a
+            //     correlated EXISTS (see self::siblingExistsClause()), matching
+            //     what a previous task already did for the task/group emptiness
+            //     check. This removes the round trip between decision and write,
+            //     and it is what produces the refusal.
+            //
+            //  2. A row lock on the PARENT PROJECT, taken inside a transaction,
+            //     serialises concurrent section deletes within one project.
+            //
+            // NOTE ON THE REVIEW BRIEF, which said folding into the WHERE was
+            // enough ("same technique closes it"): it is not, on its own. Under
+            // PostgreSQL's default READ COMMITTED, two transactions deleting
+            // DIFFERENT rows never conflict at row level, so each one's
+            // correlated subquery still sees the other's not-yet-committed
+            // sibling and both EXISTS checks return true. Folding narrows the
+            // window from "two statements" to "one statement" but does not close
+            // it. The same caveat applies to the pre-existing NOT-EXISTS
+            // emptiness guard, which was also described as atomic. Locking the
+            // parent project is what actually closes it: the second caller
+            // blocks until the first commits, then re-evaluates EXISTS against
+            // the committed state and is correctly refused.
+            //
+            // FOR UPDATE is PostgreSQL-only, which costs nothing here: this
+            // method is already Postgres-only via findVisible()'s
+            // OuScopeResolver::whereFragment() (`= ANY(:scope)` fails at
+            // PDO::prepare() under SQLite), so it has never been reachable from
+            // the SQLite tier.
+            $this->db->beginTransaction();
 
-                return Response::json(null, 204);
-            }
+            $lock = $this->db->prepare(
+                'SELECT id FROM tasker_projects WHERE id = :project_id AND tenant_id = :tenant_id FOR UPDATE'
+            );
+            $lock->execute([':project_id' => $projectId, ':tenant_id' => $tenantId]);
 
-            // ATOMIC GUARD (see this class's own docblock, "REVIEW FIX
-            // (post-merge)"): the emptiness check lives in THIS statement's
-            // own WHERE clause via correlated NOT EXISTS subqueries, not a
-            // separate SELECT COUNT(*) beforehand — a task/group created
-            // after such a count but before a separate DELETE would be
-            // silently destroyed by the FK cascade with no refusal, which is
-            // exactly the bug this whole guard exists to close. Every
-            // placeholder is bound under its OWN distinct name even though
-            // several share the same value ($sectionId three times,
-            // $tenantId three times) — pdo_pgsql rejects reusing one named
-            // placeholder twice under a native prepare (the same reason
-            // {@see \Tasker\Access\IdentifierResolver}'s taskByColumn()/
-            // resolveStructural() bind `:tenant_id`/`:tenant_id_p` separately
-            // rather than repeating one name).
             $idCol = $this->idColumn();
+
+            // ATOMIC GUARD, both arms. The emptiness half (the two correlated
+            // NOT EXISTS subqueries) is the pre-existing guard a previous task
+            // added, and applies only when the caller did NOT ask to cascade:
+            // a task or group created after a separate SELECT COUNT(*) but
+            // before the DELETE would otherwise be silently destroyed by the FK
+            // cascade with no refusal. The sibling half (EXISTS, added by I8)
+            // applies to BOTH arms — delete_tasks: true still must not empty a
+            // project of sections.
+            //
+            // Every placeholder is bound under its OWN distinct name even
+            // though several share a value ($sectionId four times, $tenantId
+            // four times) — pdo_pgsql rejects reusing one named placeholder
+            // twice under a native prepare (the same reason
+            // {@see \Tasker\Access\IdentifierResolver}'s taskByColumn()/
+            // resolveStructural() bind `:tenant_id`/`:tenant_id_p` separately).
+            $emptinessClause = $deleteTasks
+                ? ''
+                : 'AND NOT EXISTS (SELECT 1 FROM tasker_tasks WHERE section_id = :id_t AND tenant_id = :tenant_id_t)
+                   AND NOT EXISTS (SELECT 1 FROM tasker_groups WHERE section_id = :id_g AND tenant_id = :tenant_id_g)';
+
             $stmt = $this->db->prepare(
                 "DELETE FROM tasker_sections
                  WHERE {$idCol} = :id AND tenant_id = :tenant_id
-                   AND NOT EXISTS (SELECT 1 FROM tasker_tasks WHERE section_id = :id_t AND tenant_id = :tenant_id_t)
-                   AND NOT EXISTS (SELECT 1 FROM tasker_groups WHERE section_id = :id_g AND tenant_id = :tenant_id_g)"
+                   AND EXISTS (
+                       SELECT 1 FROM tasker_sections
+                       WHERE project_id = :project_id_s AND tenant_id = :tenant_id_s AND {$idCol} <> :id_self
+                   )
+                   {$emptinessClause}"
             );
-            $stmt->execute([
+
+            $params = [
                 ':id' => $sectionId,
                 ':tenant_id' => $tenantId,
-                ':id_t' => $sectionId,
-                ':tenant_id_t' => $tenantId,
-                ':id_g' => $sectionId,
-                ':tenant_id_g' => $tenantId,
-            ]);
+                ':project_id_s' => $projectId,
+                ':tenant_id_s' => $tenantId,
+                ':id_self' => $sectionId,
+            ];
+            if (!$deleteTasks) {
+                $params[':id_t'] = $sectionId;
+                $params[':tenant_id_t'] = $tenantId;
+                $params[':id_g'] = $sectionId;
+                $params[':tenant_id_g'] = $tenantId;
+            }
+            $stmt->execute($params);
 
             if ($stmt->rowCount() > 0) {
+                $this->db->commit();
+
                 return Response::json(null, 204);
             }
 
-            // Zero rows affected: either the section is non-empty (the
-            // guard refused, the expected/common case) or it vanished
-            // between findScoped() above and this statement (a concurrent
-            // delete — rare, but distinguished here rather than reporting a
-            // misleading "has tasks" refusal for a section that is simply
-            // gone).
+            // Zero rows affected, and we still hold the project lock, so the
+            // counts below are a consistent read of why. Three possible causes,
+            // distinguished rather than collapsed into one misleading message:
+            // the section was the project's LAST (409), it is non-empty and the
+            // caller did not cascade (409), or it vanished between
+            // findVisible() and here (404 — a concurrent delete).
+            $siblingCount = $this->siblingCount($projectId, $tenantId, $sectionId);
             $taskCount = $this->countIn('tasker_tasks', $sectionId, $tenantId);
             $groupCount = $this->countIn('tasker_groups', $sectionId, $tenantId);
+
+            $this->db->rollBack();
+
+            if ($siblingCount === 0) {
+                return Response::error('Cannot delete a project\'s last remaining section', 409);
+            }
+
             if ($taskCount === 0 && $groupCount === 0) {
                 return Response::error('Section not found', 404);
             }
@@ -295,8 +354,34 @@ final class SectionsApiHandler
                 409
             );
         } catch (\Throwable) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+
             return Response::error('Failed to delete section', 500);
         }
+    }
+
+    /**
+     * How many OTHER sections $projectId has, tenant-scoped — used only to
+     * explain a zero-row DELETE (see {@see self::delete()}), never as the guard
+     * itself: the guard is the correlated EXISTS inside the DELETE's own WHERE,
+     * under the project row lock.
+     */
+    private function siblingCount(int $projectId, int $tenantId, int $excludeSectionId): int
+    {
+        $idCol = $this->idColumn();
+        $stmt = $this->db->prepare(
+            "SELECT COUNT(*) FROM tasker_sections
+             WHERE project_id = :project_id AND tenant_id = :tenant_id AND {$idCol} <> :exclude_id"
+        );
+        $stmt->execute([
+            ':project_id' => $projectId,
+            ':tenant_id' => $tenantId,
+            ':exclude_id' => $excludeSectionId,
+        ]);
+
+        return (int) $stmt->fetchColumn();
     }
 
     /**

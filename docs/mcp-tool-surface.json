@@ -581,11 +581,11 @@
                                                                              "string",
                                                                              "null"
                                                                          ],
-                                                                "description":  "Group UUID, id, or slug to set. Pass null explicitly to UN-GROUP the task. OMITTING this key entirely leaves its group membership UNCHANGED -- this is what makes a sort_order-only reorder call safe: it never touches group_id at all."
+                                                                "description":  "Group UUID, id, or slug to set. Pass null explicitly to UN-GROUP the task. OMITTING this key entirely leaves its group membership UNCHANGED -- this is what makes a sort_order-only reorder call safe: it never touches group_id at all. The ONE exception: if section_id moves the task to a different section, an omitted group_id CLEARS the group, because a group belongs to one section and the task no longer sits in it."
                                                             },
                                                "section_id":  {
                                                                   "type":  "string",
-                                                                  "description":  "Optional. Also moves the task into this section, and is the section group_id is validated against. Defaults to the task\u0027s current section."
+                                                                  "description":  "Optional. Also moves the task into this section, and is the section group_id is validated against. Defaults to the task\u0027s current section. Moving to a DIFFERENT section clears the task\u0027s group unless you supply a group_id in the same call that belongs to the new section."
                                                               },
                                                "sort_order":  {
                                                                   "type":  "integer",

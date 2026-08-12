@@ -438,6 +438,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The project, its sections, and their tasks'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed'],
                         404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
                     ],
                 ],
@@ -496,6 +497,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The section list'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed'],
                         404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
                     ],
                 ],
@@ -654,6 +656,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The group list'],
+                        400 => ['description' => 'section_id or project_id looks like a short id but is malformed'],
                         404 => ['description' => 'Section not found or outside the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -785,6 +788,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The task list'],
+                        400 => ['description' => 'project_id, section_id, or group_id looks like a short id but is malformed, or status is not one of pending/in_progress/done/all'],
                         404 => ['description' => 'A supplied filter did not resolve in scope'],
                     ],
                 ],
@@ -919,11 +923,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                                 'type' => ['string', 'null'],
                                 'description' => 'Group UUID, id, or slug to set. Pass null explicitly to UN-GROUP the task. OMITTING '
                                     . 'this key entirely leaves its group membership UNCHANGED -- this is what makes a sort_order-only '
-                                    . 'reorder call safe: it never touches group_id at all.',
+                                    . 'reorder call safe: it never touches group_id at all. The ONE exception: if section_id moves the '
+                                    . 'task to a different section, an omitted group_id CLEARS the group, because a group belongs to one '
+                                    . 'section and the task no longer sits in it.',
                             ],
                             'section_id' => [
                                 'type' => 'string',
-                                'description' => 'Optional. Also moves the task into this section, and is the section group_id is validated against. Defaults to the task\'s current section.',
+                                'description' => 'Optional. Also moves the task into this section, and is the section group_id is validated against. '
+                                    . 'Defaults to the task\'s current section. Moving to a DIFFERENT section clears the task\'s group unless you '
+                                    . 'supply a group_id in the same call that belongs to the new section.',
                             ],
                             'sort_order' => [
                                 'type' => 'integer',
@@ -1106,6 +1114,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The ranked task list'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed'],
                         404 => ['description' => 'Project not found or outside the caller\'s OU scope'],
                     ],
                 ],
@@ -1125,6 +1134,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The composed board'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed'],
                         404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
                     ],
                 ],
@@ -1144,6 +1154,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The task and its milestones'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -1237,6 +1248,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The milestone list'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant'],
                     ],
                 ],
@@ -1397,6 +1409,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The discussion (empty shape if none yet)'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],

@@ -592,11 +592,40 @@ final class TasksApiHandler
             return Response::error('group_id must belong to the target section', 422);
         }
 
+        // WHOLE-BRANCH REVIEW I1: a SECTION CHANGE with no group_id supplied
+        // used to leave the task's existing group_id in place — a group
+        // belonging to the OLD section. That state is unrepresentable by
+        // design: tasker_groups.section_id is single-valued, so a group belongs
+        // to exactly one section and a task in section B cannot legitimately
+        // sit in a group owned by section A. The guard above only ran when
+        // $groupProvided, so `{task_id, section_id}` walked straight past it,
+        // and {@see \Tasker\Api\BoardApiHandler} carries a dangling-group
+        // fallback documented as "should not happen going forward" for exactly
+        // this shape.
+        //
+        // The group is CLEARED rather than re-validated. Re-validating would be
+        // equivalent to refusing outright — a group in the old section can never
+        // satisfy a check against the new one — so it would make
+        // `{task_id, section_id}` fail for EVERY grouped task, breaking a
+        // legitimate and common call. Clearing matches {@see self::moveToProject()},
+        // which nulls group_id explicitly for the identical invariant, and is
+        // the correct consequence rather than a surprise: group membership is
+        // section-scoped, so leaving the section ends it.
+        //
+        // Keyed off an actual CHANGE of section, not merely off section_id being
+        // present: re-stating the task's current section is not a move, and must
+        // not un-group it. An absent group_id on a non-move still means "leave
+        // completely untouched", which is what keeps a sort_order-only reorder
+        // safe (see this method's docblock).
+        $sectionChanged = $sectionId !== null && $sectionId !== (int) $row['section_id'];
+
         $fields = [];
         $params = [':id' => $taskId, ':tenant_id' => $tenantId];
         if ($groupProvided) {
             $fields[] = 'group_id = :group_id';
             $params[':group_id'] = $groupId;
+        } elseif ($sectionChanged) {
+            $fields[] = 'group_id = NULL';
         }
         if ($sectionId !== null) {
             $fields[] = 'section_id = :section_id';

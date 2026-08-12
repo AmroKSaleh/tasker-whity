@@ -90,6 +90,32 @@ final class TenantIsolationOuTest extends TestCase
         }
         $this->pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
 
+        // WHOLE-BRANCH REVIEW I6: tasker_user_prefs used to be the one fixture
+        // table this suite never reset -- CREATE TABLE IF NOT EXISTS down at
+        // (new CreateTaskerUserPrefsTable())->up() is a no-op once the table
+        // exists from a prior run, so a default_project_id a PREVIOUS test (or
+        // a previous run of this whole suite) wrote survived untouched. That
+        // is dangerous specifically BECAUSE tasker_projects is dropped and
+        // recreated on every setUp() (see the next line): its BIGSERIAL
+        // restarts at 1 each time, so a stale default_project_id does not
+        // just point at a deleted row -- it silently re-resolves to whatever
+        // UNRELATED project this run's OWN fixtures happen to create with that
+        // same low integer id, which is a correctness bug hiding as a passing
+        // test (the "default project" tests would pass, but against the wrong
+        // project, for the wrong reason).
+        //
+        // Dropping it here, alongside its two FK-adjacent siblings, fixes a
+        // second, independent problem for free: tasker_user_prefs.default_project_id
+        // carries `REFERENCES tasker_projects(id)`, and DROP TABLE ... CASCADE
+        // on tasker_projects (next line) already tears down THAT constraint on
+        // every run after the first -- CREATE TABLE IF NOT EXISTS cannot add a
+        // constraint back to a table that already exists, so from run 2 onward
+        // this fixture's schema was laxer than production (no FK at all).
+        // Dropping tasker_user_prefs here means CreateTaskerUserPrefsTable's
+        // own up() always CREATEs it fresh, against the tasker_projects table
+        // this same setUp() is about to (re)create, so the FK is real again on
+        // every run, not just the first.
+        $this->pdo->exec('DROP TABLE IF EXISTS tasker_user_prefs CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_sections CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_projects CASCADE');
         // REGRESSION FIX (whole-branch review finding C2): this suite used to
@@ -305,6 +331,40 @@ final class TenantIsolationOuTest extends TestCase
             ':name' => "Tasker OU Test Tenant {$tenantId}",
             ':slug' => "tasker-ou-test-tenant-{$tenantId}",
         ]);
+    }
+
+    /**
+     * A SECOND, independent PDO connection to the same test database — needed
+     * by the I8 concurrency proof, where two genuinely concurrent transactions
+     * are the whole point and nested statements on one handle would prove
+     * nothing.
+     *
+     * Rebuilt from the same env vars / candidate DSNs setUp() used, so it
+     * follows CI's Postgres service and a local host equally. setUp() has
+     * already skipped the test if none of them is reachable, so this only ever
+     * runs where a connection is known to work.
+     */
+    private function secondConnection(): PDO
+    {
+        $dsn = getenv('TASKER_TEST_PG_DSN');
+        $user = getenv('TASKER_TEST_PG_USER') ?: 'tasker';
+        $pass = getenv('TASKER_TEST_PG_PASS') ?: 'tasker_dev';
+        $candidates = $dsn !== false
+            ? [$dsn]
+            : ['pgsql:host=host.docker.internal;port=5433;dbname=tasker_test', 'pgsql:host=localhost;port=5433;dbname=tasker_test'];
+
+        foreach ($candidates as $candidate) {
+            try {
+                $connection = new PDO($candidate, $user, $pass);
+                $connection->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+
+                return $connection;
+            } catch (\PDOException) {
+                continue;
+            }
+        }
+
+        self::fail('setUp() connected but a second connection could not be opened: ' . implode(', ', $candidates));
     }
 
     private function makeOu(int $id, int $tenantId, ?int $parentId): void
@@ -1723,6 +1783,14 @@ final class TenantIsolationOuTest extends TestCase
     // getReadyWork() pre-resolving the project too — so removing it here
     // alone broke that established belt-and-braces precedent. Restored.
 
+    /**
+     * WHOLE-BRANCH REVIEW consistency fix: this test's name has claimed since
+     * it was written that it "stamps tenant", but it never read tenant_id --
+     * only the JSON response's status/text/priority fields, none of which say
+     * anything about which tenant the row landed under. Its Groups sibling
+     * (testGroupsCreateStampsTheCallersTenantAndTheGivenSection above) reads
+     * tenant_id back from the DATABASE row, which is the shape copied here.
+     */
     public function testTasksCreateStampsTenantAndDefaultsStatusToPending(): void
     {
         $projectId = $this->makeProjectDirect(7, null, 'Task project');
@@ -1736,6 +1804,12 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame('pending', $payload['data']['status']);
         self::assertSame('Ship it', $payload['data']['text']);
         self::assertNull($payload['data']['priority']);
+
+        $row = $this->pdo->query(
+            "SELECT tenant_id, section_id FROM tasker_tasks WHERE id = {$payload['data']['id']}"
+        )->fetch(PDO::FETCH_ASSOC);
+        self::assertSame(7, (int) $row['tenant_id'], 'the created task must actually be stamped with the CALLER\'s tenant');
+        self::assertSame($sectionId, (int) $row['section_id']);
     }
 
     public function testTasksCreateRejects404ForASectionOutsideTheCallersTenant(): void
@@ -5249,6 +5323,294 @@ final class TenantIsolationOuTest extends TestCase
         $confirmedResponse = $plugin->deleteProject($confirmedRequest);
         self::assertSame(204, $confirmedResponse->getStatusCode());
         self::assertSame(0, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_projects WHERE id = {$projectId}")->fetchColumn());
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW I8: the last-remaining-section guard was still
+     * check-then-act — a SELECT COUNT(*) followed by a separate DELETE — so two
+     * concurrent delete_section calls on a two-section project both counted 2,
+     * both proceeded, and the project ended with ZERO sections. That is the
+     * invariant CreateTaskerTasksTable's own docblock cites as the reason
+     * tasker_tasks.section_id is NOT NULL.
+     *
+     * This is the REAL concurrency proof, with two independent connections: one
+     * deletes a section and holds the transaction open; the other tries to
+     * delete the only other section. The second must not succeed, and the
+     * project must never be left sectionless.
+     */
+    public function testTwoConcurrentSectionDeletesCannotEmptyAProject(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'I8 concurrency project');
+        $first = $this->makeSectionDirectNamed(7, $projectId, 'First section');
+        $second = $this->makeSectionDirectNamed(7, $projectId, 'Second section');
+
+        // A genuinely separate connection, so the two deletes are real
+        // concurrent transactions rather than nested statements on one handle.
+        $other = $this->secondConnection();
+        // Fail fast rather than hanging the suite: the property under test is
+        // that the second caller CANNOT proceed while the first is in flight, so
+        // being made to wait IS the pass condition. In production the wait is
+        // sub-millisecond; here we only need to observe that it happens.
+        $other->exec("SET lock_timeout = '750ms'");
+
+        // Caller A, mid-delete: exactly the sequence SectionsApiHandler::delete()
+        // performs — open a transaction, take the project row lock, delete its
+        // section — with the commit deferred so A is genuinely still in flight.
+        //
+        // Both halves matter. Taking the lock is what makes this a faithful
+        // simulation of a concurrent delete_section; the transaction staying
+        // open is what makes A's deletion invisible to B. Verified empirically
+        // that WITHOUT the project lock in delete(), B returns 204 here and the
+        // project ends with zero sections — i.e. folding the sibling check into
+        // the DELETE's own WHERE, on its own, does NOT close this race, because
+        // under READ COMMITTED B's correlated EXISTS still sees A's
+        // uncommitted-but-present sibling row.
+        $this->pdo->beginTransaction();
+        $this->pdo->exec("SELECT id FROM tasker_projects WHERE id = {$projectId} AND tenant_id = 7 FOR UPDATE");
+        $this->pdo->exec("DELETE FROM tasker_sections WHERE id = {$first}");
+
+        $blocked = (new SectionsApiHandler($other))->delete(7, null, $second);
+
+        self::assertNotSame(
+            204,
+            $blocked->getStatusCode(),
+            'the second concurrent delete must NOT succeed — with the old check-then-act guard it counted 2 siblings '
+                . 'and deleted the project\'s last section'
+        );
+        self::assertSame(
+            1,
+            (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE id = {$second}")->fetchColumn(),
+            'the blocked caller must not have deleted anything'
+        );
+
+        $this->pdo->commit();
+
+        // Now that A has committed, B retrying sees the real state and is
+        // refused for the RIGHT reason — this is the last section, not a lock
+        // problem. Serialised, then correctly refused.
+        $retry = (new SectionsApiHandler($other))->delete(7, null, $second);
+        self::assertSame(409, $retry->getStatusCode());
+        self::assertStringContainsString('last remaining section', json_decode($retry->getBody(), true)['error']);
+
+        $remaining = (int) $this->pdo->query(
+            "SELECT COUNT(*) FROM tasker_sections WHERE project_id = {$projectId}"
+        )->fetchColumn();
+        self::assertSame(
+            1,
+            $remaining,
+            'a project must never be left with zero sections — tasker_tasks.section_id is NOT NULL precisely because '
+                . 'this cannot happen'
+        );
+    }
+
+    /**
+     * I8: the sibling guard must apply to the CASCADE arm too. delete_tasks:true
+     * used to skip straight to a bare DELETE after the same detached count, so
+     * it could empty a project of sections just as easily.
+     */
+    public function testDeleteTasksTrueStillRefusesAProjectsLastSection(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'I8 cascade project');
+        $onlySection = $this->makeSectionDirect(7, $projectId);
+        $this->makeTaskDirect(7, $projectId, $onlySection, 'Task in the only section');
+
+        $handler = new SectionsApiHandler($this->pdo);
+        $response = $handler->delete(7, null, $onlySection, true);
+
+        self::assertSame(409, $response->getStatusCode());
+        self::assertStringContainsString('last remaining section', json_decode($response->getBody(), true)['error']);
+        self::assertSame(
+            1,
+            (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE id = {$onlySection}")->fetchColumn(),
+            'the refused cascade must not have deleted the section'
+        );
+        self::assertSame(
+            1,
+            (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE section_id = {$onlySection}")->fetchColumn(),
+            'nor its tasks, via the FK cascade'
+        );
+    }
+
+    /**
+     * I8 must not have changed the three distinguishable outcomes a zero-row
+     * DELETE can have. Each is reported for what it is, rather than collapsed
+     * into one misleading refusal.
+     */
+    public function testDeleteSectionStillDistinguishesLastSectionFromNonEmptyFromMissing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'I8 outcomes project');
+        $keep = $this->makeSectionDirectNamed(7, $projectId, 'Keeper');
+        $nonEmpty = $this->makeSectionDirectNamed(7, $projectId, 'Has a task');
+        $this->makeTaskDirect(7, $projectId, $nonEmpty, 'Blocking task');
+
+        $handler = new SectionsApiHandler($this->pdo);
+
+        // Non-empty, not cascading -> 409 naming the counts.
+        $nonEmptyResponse = $handler->delete(7, null, $nonEmpty);
+        self::assertSame(409, $nonEmptyResponse->getStatusCode());
+        self::assertStringContainsString('1 task(s)', json_decode($nonEmptyResponse->getBody(), true)['error']);
+
+        // Already gone -> 404, not a puzzling "has tasks" refusal.
+        $vanished = $this->makeSectionDirectNamed(7, $projectId, 'Vanishing');
+        $this->pdo->exec("DELETE FROM tasker_sections WHERE id = {$vanished}");
+        self::assertSame(404, $handler->delete(7, null, $vanished)->getStatusCode());
+
+        // Last remaining -> 409 naming that, once its siblings are gone.
+        $this->pdo->exec("DELETE FROM tasker_tasks WHERE section_id = {$nonEmpty}");
+        self::assertSame(204, $handler->delete(7, null, $nonEmpty)->getStatusCode());
+        $lastResponse = $handler->delete(7, null, $keep);
+        self::assertSame(409, $lastResponse->getStatusCode());
+        self::assertStringContainsString('last remaining section', json_decode($lastResponse->getBody(), true)['error']);
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW I1: move_task_to_group could leave a task's group in a
+     * DIFFERENT section from the task.
+     *
+     * groupBelongsToSection() only fired when $groupProvided, so
+     * `{task_id, section_id}` — group_id ABSENT, meaning "leave unchanged" —
+     * moved the task to a new section while keeping a group_id belonging to the
+     * OLD one. That state is invalid by construction: tasker_groups.section_id
+     * is a single value, so a group can only ever belong to one section.
+     * moveToProject() nulls group_id explicitly for exactly this reason, and
+     * BoardApiHandler carries a dangling-group fallback documented as "should
+     * not happen going forward".
+     *
+     * RESOLUTION: the group is CLEARED, not re-validated. Re-validating would
+     * be equivalent to refusing outright — a group in the old section can never
+     * satisfy a check against the new one — so it would make
+     * `{task_id, section_id}` fail for every grouped task, breaking a
+     * legitimate and common call. Clearing also matches moveToProject()'s
+     * established behaviour for the identical invariant, and is the semantically
+     * correct consequence of a section move rather than a surprise: group
+     * membership is section-scoped, so leaving the section ends it.
+     */
+    public function testMovingATaskToAnotherSectionClearsAGroupItDidNotAskAbout(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'I1 project');
+        $oldSectionId = $this->makeSectionDirectNamed(7, $projectId, 'Old section');
+        $newSectionId = $this->makeSectionDirectNamed(7, $projectId, 'New section');
+        $oldGroupId = $this->makeGroupDirect(7, $oldSectionId, 'Group in the old section');
+
+        $taskId = $this->makeTaskDirect(7, $projectId, $oldSectionId, 'I1 task');
+        $this->pdo->exec("UPDATE tasker_tasks SET group_id = {$oldGroupId} WHERE id = {$taskId}");
+
+        $handler = new TasksApiHandler($this->pdo);
+
+        // group_id ABSENT ($groupProvided false) while the section CHANGES.
+        $response = $handler->moveToGroup(7, null, $taskId, null, false, $newSectionId);
+
+        self::assertSame(200, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT section_id, group_id FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($newSectionId, (int) $row['section_id'], 'the section move must have happened');
+        self::assertNull(
+            $row['group_id'],
+            'a task must never keep a group_id belonging to a section it no longer sits in — tasker_groups.section_id '
+                . 'is single-valued, so that state is unrepresentable and BoardApiHandler has to paper over it'
+        );
+
+        $payload = json_decode($response->getBody(), true);
+        self::assertNull($payload['data']['groupId'], 'the response must report the cleared group, not the stale one');
+    }
+
+    /**
+     * The counterpart: when the section does NOT change, an absent group_id
+     * still means "leave it completely untouched". That distinction is what
+     * makes a sort_order-only reorder call safe, and I1's fix must not
+     * collapse it — clearing is a consequence of the SECTION MOVE, not of
+     * group_id being absent.
+     */
+    public function testAnAbsentGroupIdStillLeavesTheGroupUntouchedWhenTheSectionIsUnchanged(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'I1 reorder project');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId = $this->makeGroupDirect(7, $sectionId, 'Kept group');
+
+        $taskId = $this->makeTaskDirect(7, $projectId, $sectionId, 'I1 reorder task');
+        $this->pdo->exec("UPDATE tasker_tasks SET group_id = {$groupId} WHERE id = {$taskId}");
+
+        $handler = new TasksApiHandler($this->pdo);
+
+        // A pure reorder: no section_id, no group_id.
+        $response = $handler->moveToGroup(7, null, $taskId, null, false, null, 42);
+        self::assertSame(200, $response->getStatusCode());
+
+        $row = $this->pdo->query("SELECT group_id, sort_order FROM tasker_tasks WHERE id = {$taskId}")->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($groupId, (int) $row['group_id'], 'a reorder must not un-group the task it reorders');
+        self::assertSame(42, (int) $row['sort_order']);
+
+        // Re-stating the SAME section is not a move, so the group survives that
+        // too — the guard must key off an actual change, not merely off
+        // section_id being present.
+        $sameSection = $handler->moveToGroup(7, null, $taskId, null, false, $sectionId);
+        self::assertSame(200, $sameSection->getStatusCode());
+        self::assertSame(
+            $groupId,
+            (int) $this->pdo->query("SELECT group_id FROM tasker_tasks WHERE id = {$taskId}")->fetchColumn(),
+            'passing the task\'s CURRENT section_id is not a section change and must not clear the group'
+        );
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW I6: tasker_user_prefs used to be the one fixture
+     * table setUp() never reset — see the DROP TABLE ... CASCADE added
+     * alongside tasker_sections/tasker_projects at the top of setUp() for the
+     * full mechanism. This proves the fix rather than just asserting the DROP
+     * line exists: it simulates exactly the cross-run leak the finding
+     * describes by writing a default_project_id, forcing setUp() to run a
+     * SECOND time (standing in for "the next test/run picks up where this one
+     * left off" — real PHPUnit runs never call setUp() twice per test, but the
+     * fixture-reset behaviour under test is identical either way), and
+     * checking the row from "run 1" did not survive into "run 2".
+     *
+     * The danger this closes is not a mere dangling reference: tasker_projects
+     * is dropped and recreated on every setUp() (BIGSERIAL restarts at 1 each
+     * time — see that DROP's own comment), so a leaked default_project_id
+     * does not fail loudly on its next lookup. It silently re-resolves to
+     * whichever UNRELATED project the new run's own fixtures happen to create
+     * with that same low integer id — a wrong answer with no error at all.
+     */
+    public function testUserPrefsFixtureDoesNotLeakAStaleDefaultProjectAcrossSetupRuns(): void
+    {
+        $profileId = 424242; // scoped to this test; never touched elsewhere in this file.
+
+        $runOneProjectId = $this->makeProjectDirect(7, null, 'I6 run-one project');
+        $setResponse = (new \Tasker\Api\SessionApiHandler($this->pdo))->setDefaultProject(7, $profileId, $runOneProjectId);
+        self::assertSame(200, $setResponse->getStatusCode());
+        self::assertSame(
+            $runOneProjectId,
+            \Tasker\Api\SessionApiHandler::defaultProjectId($this->pdo, 7, $profileId),
+            'sanity: the default was actually written before simulating the next run'
+        );
+
+        // Simulate the NEXT run's fixture rebuild. tasker_projects gets
+        // dropped and recreated here (its BIGSERIAL restarts at 1), and — this
+        // is the fix under test — tasker_user_prefs must be dropped and
+        // recreated too, not silently carried over via CREATE TABLE IF NOT
+        // EXISTS.
+        $this->setUp();
+
+        self::assertNull(
+            \Tasker\Api\SessionApiHandler::defaultProjectId($this->pdo, 7, $profileId),
+            'a fresh setUp() must not carry over a previous run\'s default_project_id -- before the I6 fix this '
+                . 'row survived untouched, and would silently re-resolve to whatever unrelated project this run\'s '
+                . 'own fixtures happen to create at the same (now-recycled) integer id'
+        );
+
+        // Second half of I6: the FK from tasker_user_prefs.default_project_id
+        // to tasker_projects(id) must be freshly real again too, not just
+        // absent. DROP TABLE tasker_projects CASCADE tears down that
+        // constraint every run; only re-dropping tasker_user_prefs itself
+        // lets CreateTaskerUserPrefsTable's CREATE TABLE (IF NOT EXISTS, but
+        // now genuinely absent) rebuild it. A raw insert naming a project id
+        // that does not exist in this run's tasker_projects must be rejected
+        // by Postgres itself, not merely by application-level validation.
+        $this->expectException(\PDOException::class);
+        $this->pdo->exec(
+            "INSERT INTO tasker_user_prefs (public_id, tenant_id, profile_id, default_project_id)
+             VALUES (gen_random_uuid(), 7, {$profileId}, 999999999)"
+        );
     }
 
     /**
