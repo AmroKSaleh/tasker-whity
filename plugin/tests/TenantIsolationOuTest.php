@@ -5176,6 +5176,188 @@ final class TenantIsolationOuTest extends TestCase
     }
 
     /**
+     * WHOLE-BRANCH REVIEW B3: update_project_context with `replace: true` is a
+     * DESTRUCTIVE route (ProjectsApiHandler::updateContext() makes it a
+     * wholesale `context = :context::jsonb`), yet its `required` is
+     * ['context'] only and project_id fell back to defaultProjectIdFor(). So
+     * `update_project_context({context: {...}, replace: true})` over MCP
+     * unrecoverably overwrote whatever project happened to be the caller's
+     * default — violating this class's own documented rule (see getRoutes()'s
+     * DESTRUCTIVE ROUTE SWEEP note): "a destructive route must never resolve
+     * its OWN target identifier from a caller default". Task 12b's sweep
+     * enumerated by HTTP VERB ("every other DELETE route"), so a destructive
+     * PATCH escaped it.
+     *
+     * MERGE — the default, and non-destructive — deliberately KEEPS its
+     * default-project fallback: the original app always merges and always
+     * requires project_id, so `replace` is our own invention and the original
+     * has no destructive form of this tool at all.
+     */
+    public function testUpdateProjectContextReplaceRefusesToGuessTheCallersDefaultProject(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'B3 foundation project');
+        $this->pdo->exec("UPDATE tasker_projects SET context = '{\"goal\": \"the original Foundation\"}' WHERE id = {$projectId}");
+        (new \Tasker\Api\SessionApiHandler($this->pdo))->setDefaultProject(7, self::CALLER_ID, $projectId);
+
+        $plugin = new TaskerPlugin();
+
+        // replace:true with NO project_id must refuse, and must not have
+        // touched the default project's Foundation.
+        $replaceRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/project/context',
+            (string) json_encode(['context' => ['goal' => 'wiped'], 'replace' => true])
+        );
+        $replaceRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $replaceResponse = $plugin->updateProjectContext($replaceRequest);
+
+        self::assertSame(400, $replaceResponse->getStatusCode());
+        self::assertStringContainsString('project_id', json_decode($replaceResponse->getBody(), true)['error']);
+
+        $context = json_decode(
+            (string) $this->pdo->query("SELECT context FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            true
+        );
+        self::assertSame(['goal' => 'the original Foundation'], $context, 'a refused destructive replace must not have wiped the default project\'s Foundation');
+
+        // MERGE with no project_id still resolves the default — the
+        // non-destructive path keeps the convenience the original has.
+        $mergeRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/project/context',
+            (string) json_encode(['context' => ['why' => 'merged in']])
+        );
+        $mergeRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $mergeResponse = $plugin->updateProjectContext($mergeRequest);
+
+        self::assertSame(200, $mergeResponse->getStatusCode(), 'merge is not destructive and keeps its default-project fallback');
+        $merged = json_decode(
+            (string) $this->pdo->query("SELECT context FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            true
+        );
+        // ksort both sides: PostgreSQL's jsonb does not preserve key insertion
+        // order (it stores keys sorted by length then bytewise), so `||` returns
+        // {"why":..., "goal":...} here. Only the key/value pairs are the
+        // contract; their order is the engine's business.
+        ksort($merged);
+        self::assertSame(['goal' => 'the original Foundation', 'why' => 'merged in'], $merged);
+
+        // replace:true WITH an explicit project_id is still allowed — the rule
+        // is "name your target", not "replace is forbidden".
+        $namedRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/project/context',
+            (string) json_encode(['project_id' => $projectId, 'context' => ['goal' => 'deliberately replaced'], 'replace' => true])
+        );
+        $namedRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        $namedResponse = $plugin->updateProjectContext($namedRequest);
+
+        self::assertSame(200, $namedResponse->getStatusCode());
+        $replaced = json_decode(
+            (string) $this->pdo->query("SELECT context FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            true
+        );
+        self::assertSame(['goal' => 'deliberately replaced'], $replaced, 'a NAMED replace must still replace wholesale');
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW I4: update_project's schema declares
+     * required => ['project_id'] while its reader fell back to
+     * defaultProjectIdFor(). Over MCP core enforces `required`, but a direct
+     * HTTP `PATCH /api/tasker/projects {"name":"X"}` renamed the caller's
+     * default project. The reader now matches the declaration.
+     */
+    public function testUpdateProjectRequiresProjectIdAsItsSchemaDeclares(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'I4 default project');
+        (new \Tasker\Api\SessionApiHandler($this->pdo))->setDefaultProject(7, self::CALLER_ID, $projectId);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('PATCH', '/api/tasker/projects', (string) json_encode(['name' => 'Renamed by accident']));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+        $response = $plugin->updateProject($request);
+
+        self::assertSame(400, $response->getStatusCode());
+        self::assertStringContainsString('project_id', json_decode($response->getBody(), true)['error']);
+        self::assertSame(
+            'I4 default project',
+            (string) $this->pdo->query("SELECT name FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            'an omitted project_id must not have renamed the caller\'s default project'
+        );
+    }
+
+    /**
+     * WHOLE-BRANCH REVIEW I5: identifierFromRequest() accepted only
+     * string|int from the body and otherwise fell through to the query string
+     * → null → classify 'empty' → the default-project fallback. So
+     * `{"project_id": 42.0}` or `{"project_id": true}` silently RETARGETED the
+     * call at the caller's default project. Blocked over MCP by core's
+     * InputSchemaValidator, live over direct HTTP.
+     *
+     * Exercised through update_project_context's MERGE path on purpose: it is
+     * the one project_id route that legitimately keeps its default-project
+     * fallback after B3/I4, so it is the only place where a wrong-typed value
+     * falling through to "empty" is still observable as a real retarget.
+     */
+    public function testAWrongTypedIdentifierIsRejectedRatherThanRetargetedAtTheDefaultProject(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'I5 default project');
+        $this->pdo->exec("UPDATE tasker_projects SET context = '{\"goal\": \"untouched\"}' WHERE id = {$projectId}");
+        (new \Tasker\Api\SessionApiHandler($this->pdo))->setDefaultProject(7, self::CALLER_ID, $projectId);
+
+        $plugin = new TaskerPlugin();
+
+        // RAW JSON bodies, not json_encode()d PHP values: json_encode(42.0)
+        // emits `42` (the fraction is dropped without
+        // JSON_PRESERVE_ZERO_FRACTION), which decodes back as an INT and would
+        // silently test the wrong thing. These are the literal wire forms.
+        $wrongTypedBodies = [
+            'float' => '{"project_id": 42.0, "context": {"goal": "retargeted"}}',
+            'bool' => '{"project_id": true, "context": {"goal": "retargeted"}}',
+            'object' => '{"project_id": {"nested": "object"}, "context": {"goal": "retargeted"}}',
+            'list' => '{"project_id": ["a", "list"], "context": {"goal": "retargeted"}}',
+        ];
+        foreach ($wrongTypedBodies as $type => $body) {
+            $request = $this->hostRequest('PATCH', '/api/tasker/project/context', $body);
+            $request->user = (object) ['profile_id' => self::CALLER_ID];
+            $response = $plugin->updateProjectContext($request);
+
+            self::assertSame(
+                400,
+                $response->getStatusCode(),
+                "a project_id of type {$type} must be a 400, not a silent fall-through to the default project"
+            );
+        }
+
+        $context = json_decode(
+            (string) $this->pdo->query("SELECT context FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            true
+        );
+        self::assertSame(['goal' => 'untouched'], $context, 'no wrong-typed project_id may reach the caller\'s default project');
+
+        // An explicit null is NOT a wrong type — it is JSON's way of saying
+        // "not supplied", and must keep meaning "use my default", the same as
+        // omitting the key. Rejecting it would break every caller that fills
+        // optional fields with null.
+        $nullRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/project/context',
+            (string) json_encode(['project_id' => null, 'context' => ['why' => 'explicit null means omitted']])
+        );
+        $nullRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(200, $plugin->updateProjectContext($nullRequest)->getStatusCode());
+    }
+
+    /**
      * D1b Task 12b floor requirement: list_groups/create_group resolve a
      * section SLUG when project_id is supplied — the exact path
      * IdentifierResolver::resolveSection() refuses when its parent is null

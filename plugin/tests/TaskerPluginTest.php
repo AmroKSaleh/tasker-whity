@@ -1531,4 +1531,205 @@ final class TaskerPluginTest extends TestCase
 
         self::assertSame(['status' => 'need_confirmation', 'projectId' => null], $result);
     }
+
+    /**
+     * Methods that read an identifier key but legitimately carry no
+     * wrongTypedIdentifierError() guard of their own.
+     *
+     * identifierFromRequest()/bodyValueIsWrongTypedIdentifier()/
+     * wrongTypedIdentifierError() ARE the mechanism. The three resolve* helpers
+     * return an ?int or a status array rather than a Response, so they have no
+     * channel to answer 400 on; their ROUTE callers carry the guard instead,
+     * which is exactly what the assertion below verifies (each caller must name
+     * the keys its helpers read, not only the ones it reads inline).
+     *
+     * @var list<string>
+     */
+    private const WRONG_TYPE_GUARD_EXEMPT = [
+        'identifierFromRequest',
+        'wrongTypedIdentifierError',
+        'bodyValueIsWrongTypedIdentifier',
+        'resolveOptionalParentId',
+        'resolveCreateTaskSectionId',
+        'resolveMilestoneTarget',
+    ];
+
+    /**
+     * WHOLE-BRANCH REVIEW I5, enforcement.
+     *
+     * The fix itself is small — a body value present but of a non-identifier
+     * type (float, bool, array, object) is a 400 instead of falling through to
+     * the query string, then to 'empty', then to the caller's DEFAULT PROJECT.
+     * Keeping it applied to EVERY route is the hard part, and it is precisely
+     * where this slice has failed repeatedly: Task 12b's destructive sweep
+     * enumerated by HTTP verb and missed a destructive PATCH; another task added
+     * an undeclared-400 to twelve mutation routes and stopped before the reads.
+     *
+     * So this asserts the invariant structurally rather than sampling routes: for
+     * every method in TaskerPlugin that reads an identifier key — inline via
+     * identifierFromRequest(), or indirectly through resolveOptionalParentId()/
+     * resolveCreateTaskSectionId()/resolveMilestoneTarget() — the set of keys
+     * guarded by wrongTypedIdentifierError() must COVER the set of keys read. A
+     * new route that reads an identifier and forgets the guard fails here, as
+     * does an existing route that starts reading a second identifier.
+     *
+     * A source-scanning test, in the house style already established by the
+     * SDK conformance kit's TenantPredicateScanner (see TenantIsolationTest):
+     * the property is about every call site existing, which no per-route
+     * behavioural test can establish.
+     */
+    public function testEveryRouteGuardsEveryIdentifierItReadsAgainstAWrongType(): void
+    {
+        $source = (string) file_get_contents(dirname(__DIR__) . '/TaskerPlugin.php');
+        $methods = self::splitIntoMethods($source);
+
+        self::assertNotEmpty($methods, 'the method splitter must actually find methods, or this test proves nothing');
+        self::assertArrayHasKey('updateProjectContext', $methods, 'sanity: a known identifier-reading route must be found');
+
+        $unguarded = [];
+        foreach ($methods as $name => $body) {
+            if (in_array($name, self::WRONG_TYPE_GUARD_EXEMPT, true)) {
+                continue;
+            }
+
+            $read = self::identifierKeysRead($body);
+            if ($read === []) {
+                continue;
+            }
+
+            $guarded = self::identifierKeysGuarded($body);
+            foreach ($read as $key) {
+                if (!in_array($key, $guarded, true)) {
+                    $unguarded[] = "{$name}() reads '{$key}' but never guards it";
+                }
+            }
+        }
+
+        self::assertSame(
+            [],
+            $unguarded,
+            "Every route reading an identifier must call wrongTypedIdentifierError() for it, or a wrong-typed "
+                . "value silently becomes 'empty' and retargets the call at the caller's default project:\n"
+                . implode("\n", $unguarded)
+        );
+
+        // The scan must be finding real work, not vacuously passing because the
+        // extraction regexes stopped matching.
+        $totalRead = 0;
+        foreach ($methods as $name => $body) {
+            if (!in_array($name, self::WRONG_TYPE_GUARD_EXEMPT, true)) {
+                $totalRead += count(self::identifierKeysRead($body));
+            }
+        }
+        self::assertGreaterThanOrEqual(
+            25,
+            $totalRead,
+            'the extraction found suspiciously few identifier reads — the regexes have probably drifted from the source'
+        );
+    }
+
+    /**
+     * Method name => method body, for every method declared at class-body
+     * indentation in TaskerPlugin.php.
+     *
+     * @return array<string, string>
+     */
+    private static function splitIntoMethods(string $source): array
+    {
+        $pattern = '/^    (?:public|private|protected)(?: static)? function (\w+)\(/m';
+        if (preg_match_all($pattern, $source, $matches, PREG_OFFSET_CAPTURE) === false) {
+            return [];
+        }
+
+        $methods = [];
+        $count = count($matches[0]);
+        for ($i = 0; $i < $count; $i++) {
+            $name = $matches[1][$i][0];
+            $start = $matches[0][$i][1];
+            $end = $i + 1 < $count ? $matches[0][$i + 1][1] : strlen($source);
+            $methods[$name] = self::stripComments(substr($source, $start, $end - $start));
+        }
+
+        return $methods;
+    }
+
+    /**
+     * Remove docblocks and line comments, so only EXECUTABLE references count.
+     *
+     * Not cosmetic — without it this scan produces false positives that would
+     * make the guard assertion unsatisfiable. Two sources: this class documents
+     * its helpers heavily, so a method whose comment merely says
+     * "{@see self::resolveCreateTaskSectionId()}" would read as calling it; and
+     * because the splitter anchors on the `function` line, each chunk carries the
+     * NEXT method's docblock at its tail, which attributed
+     * resolveMilestoneTarget() to getTask(), listMilestones() and
+     * defaultProjectIdFor() purely by adjacency.
+     */
+    private static function stripComments(string $body): string
+    {
+        $body = (string) preg_replace('#/\*.*?\*/#s', '', $body);
+
+        return (string) preg_replace('#^\s*//.*$#m', '', $body);
+    }
+
+    /**
+     * Identifier keys $body reads — inline, plus the keys its resolve* helpers
+     * read on its behalf.
+     *
+     * resolveMoveDestinationId() is deliberately absent: it has ALWAYS rejected
+     * a non-string/non-int value itself (`!is_string($raw) && !is_int($raw)` →
+     * 'malformed' → the route 400s), so its keys need no separate guard. That it
+     * got this right while identifierFromRequest() did not is the inconsistency
+     * I5 closes.
+     *
+     * @return list<string>
+     */
+    private static function identifierKeysRead(string $body): array
+    {
+        $keys = [];
+
+        preg_match_all("/identifierFromRequest\(\\\$request, '([a-z_]+)'\)/", $body, $direct);
+        foreach ($direct[1] as $key) {
+            $keys[] = $key;
+        }
+
+        // resolveOptionalParentId($request, $pdo, $tenantId, $ou[...], 'key', ...)
+        preg_match_all("/resolveOptionalParentId\(\s*\\\$request,[^']*'([a-z_]+)'/s", $body, $parents);
+        foreach ($parents[1] as $key) {
+            $keys[] = $key;
+        }
+
+        if (str_contains($body, 'resolveCreateTaskSectionId(') && !str_contains($body, 'private function resolveCreateTaskSectionId(')) {
+            $keys[] = 'section_id';
+        }
+
+        if (str_contains($body, 'resolveMilestoneTarget(') && !str_contains($body, 'private function resolveMilestoneTarget(')) {
+            $keys[] = 'task_id';
+            $keys[] = 'milestone_id';
+            $keys[] = 'index';
+        }
+
+        return array_values(array_unique($keys));
+    }
+
+    /**
+     * Identifier keys $body passes to wrongTypedIdentifierError(), which is
+     * variadic — every quoted argument of every call counts.
+     *
+     * @return list<string>
+     */
+    private static function identifierKeysGuarded(string $body): array
+    {
+        preg_match_all("/wrongTypedIdentifierError\(\\\$request, ([^)]*)\)/", $body, $calls);
+
+        $keys = [];
+        foreach ($calls[1] as $argumentList) {
+            preg_match_all("/'([a-z_]+)'/", $argumentList, $quoted);
+            foreach ($quoted[1] as $key) {
+                $keys[] = $key;
+            }
+        }
+
+        return array_values(array_unique($keys));
+    }
 }

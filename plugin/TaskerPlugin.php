@@ -452,7 +452,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         'type' => 'object',
                         'required' => ['context'],
                         'properties' => [
-                            'project_id' => ['type' => 'string', 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.'],
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project — but REQUIRED when replace is true, since a destructive replace is never applied to a project you did not name.'],
                             'context' => [
                                 'type' => 'object',
                                 'description' => 'The keys to write — goal, why, scope, definition_of_done and related Foundation keys. Merged into the existing context by default (a shallow merge: a nested object you supply replaces the corresponding nested object wholesale, it does not deep-merge inner keys). Pass replace: true to discard the existing context entirely instead.',
@@ -465,7 +465,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The project, with its updated context'],
-                        400 => ['description' => 'project_id looks like a short id but is malformed, or context is missing'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed, is of a non-identifier type, or was omitted while replace was true; or context is missing'],
                         404 => ['description' => 'Project not found, outside OU scope, or no default project set'],
                         422 => ['description' => 'context is not a JSON object'],
                     ],
@@ -1717,6 +1717,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Tenant context is required', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400 naming the type problem, rather
+        // than being indistinguishable from an omitted one — see
+        // wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'environment_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $environmentId = $this->identifierFromRequest($request, 'environment_id');
         if ($environmentId === null) {
             return Response::error('environment_id is required', 400);
@@ -1755,6 +1763,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $tenantId = $this->requireTenantId();
         if ($tenantId === null) {
             return Response::error('Tenant context is required', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400 naming the type problem, rather
+        // than being indistinguishable from an omitted one — see
+        // wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'environment_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $environmentId = $this->identifierFromRequest($request, 'environment_id');
@@ -1953,18 +1969,32 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Request body must be a JSON object', 400);
         }
 
-        $raw = $this->identifierFromRequest($request, 'project_id');
-        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
-            return Response::error('project_id looks like a short id but is malformed', 400);
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
-        $projectId = IdentifierResolver::resolveProject(
-            $pdo,
-            $tenantId,
-            $ou['ouId'],
-            $raw,
-            $this->defaultProjectIdFor($request, $tenantId)
-        );
+        $raw = $this->identifierFromRequest($request, 'project_id');
+        $form = IdentifierResolver::classify($raw);
+        if ($form === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+        // WHOLE-BRANCH REVIEW I4: this route's schema declares
+        // required => ['project_id'] (see getRoutes()), but the reader used to
+        // pass defaultProjectIdFor() to resolveProject() as its 5th argument.
+        // Over MCP core enforces `required` so the mismatch was invisible; over
+        // direct HTTP a bare `PATCH /api/tasker/projects {"name":"X"}` RENAMED
+        // the caller's default project. The reader now matches the declaration
+        // — and the schema is the honest one here, because update_project can
+        // change a project's name, prefix and Environment, none of which anyone
+        // should apply to a project they did not name.
+        if ($form === 'empty') {
+            return Response::error('project_id is required', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject($pdo, $tenantId, $ou['ouId'], $raw);
 
         if ($projectId === null) {
             return Response::error('Project not found', 404);
@@ -2042,6 +2072,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'confirmed must be true to permanently delete a project and everything under it',
                 400
             );
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $raw = $this->identifierFromRequest($request, 'project_id');
@@ -2159,9 +2196,47 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         /** @var array<string, mixed> $context */
         $context = $decoded['context'];
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $merge = $this->mergeFromReplace($decoded);
+
         $raw = $this->identifierFromRequest($request, 'project_id');
-        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+        $form = IdentifierResolver::classify($raw);
+        if ($form === 'malformed_short_id') {
             return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        // WHOLE-BRANCH REVIEW B3: replace:true makes this a DESTRUCTIVE route —
+        // ProjectsApiHandler::updateContext() turns it into a wholesale
+        // `context = :context::jsonb`, discarding a project's entire accumulated
+        // Foundation unrecoverably. This route's `required` is ['context'] only,
+        // so over MCP `update_project_context({context: {...}, replace: true})`
+        // wiped whatever project happened to be the caller's default.
+        //
+        // That violates this class's own documented rule (see getRoutes()'s
+        // DESTRUCTIVE ROUTE SWEEP note): a destructive route must never resolve
+        // its OWN target identifier from a caller default, because confirming a
+        // request only means something if the caller also named what they
+        // confirmed. Task 12b's sweep enumerated by HTTP VERB — "every other
+        // DELETE route" — so a destructive PATCH escaped it entirely.
+        //
+        // Mirrors deleteProject()'s own empty-project_id refusal exactly.
+        //
+        // MERGE keeps its default-project fallback: it is not destructive, and
+        // the original app always merges and always requires project_id, so
+        // `replace` is our own invention — the original has no destructive form
+        // of this tool for the fallback to be dangerous on.
+        if (!$merge && $form === 'empty') {
+            return Response::error(
+                'project_id is required when replace is true (a destructive replace is never applied to your '
+                    . 'default project — name the project explicitly)',
+                400
+            );
         }
 
         $projectId = IdentifierResolver::resolveProject(
@@ -2174,8 +2249,6 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         if ($projectId === null) {
             return Response::error('Project not found', 404);
         }
-
-        $merge = $this->mergeFromReplace($decoded);
 
         return (new ProjectsApiHandler($pdo))->updateContext($tenantId, $ou['ouId'], $projectId, $context, $merge);
     }
@@ -2244,6 +2317,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $raw = $this->identifierFromRequest($request, 'project_id');
         if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
             return Response::error('project_id looks like a short id but is malformed', 400);
@@ -2293,6 +2373,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $decoded = json_decode($request->getBody(), true);
         if (!is_array($decoded)) {
             return Response::error('Request body must be a JSON object', 400);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). project_id is
+        // read too, as this route's slug-disambiguating PARENT via
+        // resolveOptionalParentId(), which has no Response channel of its own.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'section_id', 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawSectionId = $this->identifierFromRequest($request, 'section_id');
@@ -2351,6 +2440,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). project_id is
+        // read too, as this route's slug-disambiguating PARENT via
+        // resolveOptionalParentId(), which has no Response channel of its own.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'section_id', 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawSectionId = $this->identifierFromRequest($request, 'section_id');
@@ -2422,6 +2520,18 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). project_id is
+        // read via resolveOptionalParentId(), which has no Response channel of
+        // its own. A no-op in practice on this GET (core sends no body, and a
+        // query parameter is always a string), but present so the guard is
+        // uniform across every route that reads an identifier — the kind of
+        // "sweep stopped early" gap this review keeps finding.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $parent = $this->resolveOptionalParentId(
             $request,
             $pdo,
@@ -2484,6 +2594,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('project_id looks like a short id but is malformed', 400);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). project_id is
+        // read too, as this route's slug-disambiguating PARENT via
+        // resolveOptionalParentId(), which has no Response channel of its own.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'section_id', 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $raw = $this->identifierFromRequest($request, 'section_id');
         if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
             return Response::error('section_id looks like a short id but is malformed', 400);
@@ -2528,6 +2647,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $decoded = json_decode($request->getBody(), true);
         if (!is_array($decoded)) {
             return Response::error('Request body must be a JSON object', 400);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). section_id is
+        // read too, as this route's slug-disambiguating PARENT via
+        // resolveOptionalParentId(), which has no Response channel of its own.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'group_id', 'section_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawGroupId = $this->identifierFromRequest($request, 'group_id');
@@ -2576,6 +2704,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). section_id is
+        // read too, as this route's slug-disambiguating PARENT via
+        // resolveOptionalParentId(), which has no Response channel of its own.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'group_id', 'section_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawGroupId = $this->identifierFromRequest($request, 'group_id');
@@ -2712,6 +2849,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). section_id is
+        // read too, via resolveCreateTaskSectionId(), which has no Response
+        // channel of its own.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'project_id', 'section_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $rawProject = $this->identifierFromRequest($request, 'project_id');
         if (IdentifierResolver::classify($rawProject) === 'malformed_short_id') {
             return Response::error('project_id looks like a short id but is malformed', 400);
@@ -2773,6 +2919,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Request body must be a JSON object', 400);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
         if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
             return Response::error('task_id looks like a short id but is malformed', 400);
@@ -2827,6 +2980,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'target_project_id', 'target_section_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
@@ -2915,6 +3075,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $decoded = json_decode($request->getBody(), true);
         if (!is_array($decoded)) {
             return Response::error('Request body must be a JSON object', 400);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
@@ -3009,6 +3176,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
         if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
             return Response::error('task_id looks like a short id but is malformed', 400);
@@ -3038,6 +3212,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
@@ -3071,6 +3252,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
         if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
             return Response::error('task_id looks like a short id but is malformed', 400);
@@ -3100,6 +3288,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
@@ -3133,6 +3328,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
         if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
             return Response::error('task_id looks like a short id but is malformed', 400);
@@ -3162,6 +3364,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
@@ -3567,6 +3776,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        // resolveMilestoneTarget() reads all three of these and returns a status
+        // array, not a Response, so the guard lives here.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'milestone_id', 'index');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $target = $this->resolveMilestoneTarget(
             $request,
             $pdo,
@@ -3606,6 +3824,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        // resolveMilestoneTarget() reads all three of these and returns a status
+        // array, not a Response, so the guard lives here.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'milestone_id', 'index');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
         $error = $this->milestoneTargetError($target);
         if ($error !== null) {
@@ -3636,6 +3863,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             return Response::error('Caller membership could not be resolved', 403);
         }
 
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        // resolveMilestoneTarget() reads all three of these and returns a status
+        // array, not a Response, so the guard lives here.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'milestone_id', 'index');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
         $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
         $error = $this->milestoneTargetError($target);
         if ($error !== null) {
@@ -3661,6 +3897,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        // resolveMilestoneTarget() reads all three of these and returns a status
+        // array, not a Response, so the guard lives here.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'milestone_id', 'index');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
@@ -3693,6 +3938,15 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$ou['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        // resolveMilestoneTarget() reads all three of these and returns a status
+        // array, not a Response, so the guard lives here.
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'milestone_id', 'index');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $target = $this->resolveMilestoneTarget($request, $pdo, $tenantId, $ou['ouId'], [IdentifierResolver::class, 'resolveTask']);
@@ -3751,6 +4005,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         $callerOu = $this->resolveCallerOu($pdo, $request, $tenantId);
         if (!$callerOu['resolved']) {
             return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
         }
 
         $rawTaskId = $this->identifierFromRequest($request, 'task_id');
@@ -3867,15 +4128,107 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
      * (WC-167 review: "path-only parsing made every documented filter dead
      * in production") — this handler would otherwise have repeated exactly
      * the mistake that review was about.
+     *
+     * THIRD REGRESSION FIX (whole-branch review I5) — a body value that is
+     * PRESENT but of a type no identifier can ever have (float, bool, array,
+     * object) no longer FALLS THROUGH to the query string.
+     *
+     * It used to. And for a body-carrying PATCH/POST the query string is empty,
+     * so the fall-through produced null → {@see IdentifierResolver::classify()}
+     * 'empty' → the caller's DEFAULT PROJECT. `{"project_id": 42.0}` and
+     * `{"project_id": true}` therefore did not fail: they silently RETARGETED
+     * the call at whatever project happened to be the caller's default, and
+     * update_project_context merged into it. Blocked over MCP by core's
+     * InputSchemaValidator, wide open over direct HTTP.
+     *
+     * Returning null here is FAIL-CLOSED, not the old behaviour: a wrong-typed
+     * body value can no longer be silently replaced by a query parameter of the
+     * same name. The 400 itself comes from
+     * {@see self::wrongTypedIdentifierError()}, which every route reading an
+     * identifier calls alongside its existing malformed-short-id guard.
+     *
+     * WHY NOT A `false` SENTINEL (considered and rejected): returning a value
+     * outside `string|int|null` would make PHPStan flag every unhandled call
+     * site, which is attractive — the failure mode this review keeps finding is
+     * a sweep that stopped early. But it does not work here: PHPStan resolves
+     * `Whity\Sdk\Http\Request` loosely enough that it does not propagate this
+     * method's return type into the callers' variables at all (verified
+     * empirically — a literal `classify(false)` IS reported, the same value
+     * arriving via a variable is NOT). So the sentinel would buy no
+     * enforcement while making any missed site a strict_types TypeError, i.e. a
+     * 500 — strictly worse than the bug being fixed. Completeness is instead
+     * enforced by {@see \Tasker\Tests\TaskerPluginTest} walking every route.
+     *
+     * AN EXPLICIT JSON null IS NOT A WRONG TYPE. `{"project_id": null}` still
+     * falls through and still means "use my default", identical to omitting the
+     * key: null is how JSON says "not supplied", and every caller that fills
+     * optional fields with null would otherwise break.
      */
     private function identifierFromRequest(Request $request, string $key): string|int|null
     {
+        if (self::bodyValueIsWrongTypedIdentifier($request, $key)) {
+            return null;
+        }
+
         $decoded = json_decode($request->getBody(), true);
         if (is_array($decoded) && array_key_exists($key, $decoded) && (is_string($decoded[$key]) || is_int($decoded[$key]))) {
             return $decoded[$key];
         }
 
         return $this->queryParam($request, $key);
+    }
+
+    /**
+     * The 400 for a body value that is present but of a type that can never be
+     * an identifier — or null when every $key is absent, explicitly null, or a
+     * genuine string/int (whole-branch review I5).
+     *
+     * VARIADIC so a route states ALL the identifier keys it reads in one guard,
+     * including those it reads indirectly through
+     * {@see self::resolveOptionalParentId()}/{@see self::resolveCreateTaskSectionId()}
+     * (those helpers return ?int / an array and so have no Response channel of
+     * their own; the route that owns the request carries the guard instead).
+     * {@see self::resolveMoveDestinationId()} needs no entry here — it has
+     * ALWAYS rejected a non-string/non-int value itself, as its
+     * `!is_string($raw) && !is_int($raw)` arm shows. That it got this right
+     * while identifierFromRequest() did not is precisely the inconsistency this
+     * fix closes.
+     *
+     * Pure: it re-reads the request body rather than carrying state, so it can
+     * be called at any point in a route method, and calling it twice is free of
+     * consequence.
+     *
+     * Completeness across routes is enforced mechanically — see
+     * {@see \Tasker\Tests\TaskerPluginTest::testEveryRouteGuardsEveryIdentifierItReadsAgainstAWrongType()}.
+     */
+    private function wrongTypedIdentifierError(Request $request, string ...$keys): ?Response
+    {
+        foreach ($keys as $key) {
+            if (self::bodyValueIsWrongTypedIdentifier($request, $key)) {
+                return Response::error($key . ' must be a string or integer identifier', 400);
+            }
+        }
+
+        return null;
+    }
+
+    /**
+     * Whether the request body carries $key with a non-null value that is
+     * neither a string nor an int. The single predicate behind both
+     * {@see self::identifierFromRequest()}'s fail-closed null and
+     * {@see self::wrongTypedIdentifierError()}'s 400, so the two can never
+     * disagree about what "wrong-typed" means.
+     */
+    private static function bodyValueIsWrongTypedIdentifier(Request $request, string $key): bool
+    {
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded) || !array_key_exists($key, $decoded)) {
+            return false;
+        }
+
+        $value = $decoded[$key];
+
+        return $value !== null && !is_string($value) && !is_int($value);
     }
 
     /**
