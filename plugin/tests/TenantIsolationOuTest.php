@@ -1169,6 +1169,17 @@ final class TenantIsolationOuTest extends TestCase
         self::assertStringContainsString('delete_tasks', $body['error']);
         self::assertSame(2, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE section_id = {$extraId}")->fetchColumn());
         self::assertSame(1, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_groups WHERE section_id = {$extraId}")->fetchColumn());
+        // D1b Task 13 review round 1: the SQLite original also asserted the
+        // SECTION ITSELF survives a refused delete, not just its tasks/
+        // groups -- dropped during relocation, restored here (the property
+        // holds transitively under the real FK cascade this tier can prove,
+        // but "same property or stronger" is the bar this task set for
+        // itself, and the literal assertion is one line).
+        self::assertSame(
+            2,
+            (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_sections WHERE project_id = {$projectId}")->fetchColumn(),
+            'the section itself must also survive a refused delete'
+        );
     }
 
     /**
@@ -2489,10 +2500,20 @@ final class TenantIsolationOuTest extends TestCase
         self::assertNotNull($payload['data']['completedAt']);
     }
 
+    /**
+     * D1b Task 13 review round 1: the ported SQLite original only proved "a
+     * missing row 404s" (a bare nonexistent id), not "another tenant's row
+     * 404s" -- a weaker case than its update()/delete() siblings, which use
+     * a real other-tenant fixture. Upgraded to match.
+     */
     public function testTasksCompleteRejectsATaskOutsideTheCallersTenant(): void
     {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->complete(9, null, 999999);
+        $response = $handler->complete(7, null, $otherTaskId);
 
         self::assertSame(404, $response->getStatusCode());
     }
@@ -2639,10 +2660,20 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(1, $count);
     }
 
+    /**
+     * D1b Task 13 review round 1: the ported SQLite original only proved "a
+     * missing row 404s" (a bare nonexistent id), not "another tenant's row
+     * 404s" -- a weaker case than its update()/delete() siblings, which use
+     * a real other-tenant fixture. Upgraded to match.
+     */
     public function testTasksTagRejectsATaskOutsideTheCallersTenant(): void
     {
+        $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');
+        $otherSectionId = $this->makeSectionDirect(9, $otherProjectId);
+        $otherTaskId = $this->makeTaskDirect(9, $otherProjectId, $otherSectionId, 'Should not leak');
+
         $handler = new TasksApiHandler($this->pdo);
-        $response = $handler->tag(9, null, 999999, json_encode(['tag_id' => 603]));
+        $response = $handler->tag(7, null, $otherTaskId, json_encode(['tag_id' => 603]));
 
         self::assertSame(404, $response->getStatusCode());
     }

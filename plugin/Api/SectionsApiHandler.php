@@ -385,6 +385,22 @@ final class SectionsApiHandler
      * has. Confines update()/delete() to a real PostgreSQL connection — see
      * TenantIsolationOuTest.
      *
+     * CHECK-THEN-ACT, NOT ATOMIC WITH THE WRITE: update()/delete() key their
+     * own UPDATE/DELETE by `{$this->idColumn()} = :id AND tenant_id =
+     * :tenant_id` alone — the OU predicate lives entirely in THIS check, run
+     * once, before the write. That is a genuine TOCTOU window: if the
+     * section's project's ou_id changed in the instant between this SELECT
+     * and the later UPDATE/DELETE, the write would proceed on a visibility
+     * decision that is no longer current. No boundary is reachable today —
+     * the 404 always runs first and the caller never controls the timing of
+     * an ou_id reassignment landing in that window — and this is the exact
+     * same check-then-act shape create()'s own section/project existence
+     * check and {@see \Tasker\Api\TasksApiHandler::moveToProject()} already
+     * have (see moveToProject()'s own docblock). Not restructured here —
+     * folding the OU predicate into the write itself (as
+     * {@see self::delete()}'s own atomic NOT-EXISTS guard does for the
+     * task/group emptiness check) is a bigger change than this task carries.
+     *
      * @return array<string, mixed>|null
      */
     private function findVisible(int $tenantId, ?int $callerOuId, int $sectionId): ?array

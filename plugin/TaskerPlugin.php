@@ -570,6 +570,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The renamed section'],
+                        400 => ['description' => 'section_id or project_id looks like a short id but is malformed'],
                         404 => ['description' => 'Section not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -605,6 +606,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
+                        400 => ['description' => 'section_id or project_id looks like a short id but is malformed'],
                         404 => ['description' => 'Section not found in the caller\'s tenant or OU scope'],
                         409 => ['description' => 'Cannot delete a project\'s last remaining section, or the section '
                             . 'still has tasks/groups and delete_tasks was not true'],
@@ -729,6 +731,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The renamed group'],
+                        400 => ['description' => 'group_id or section_id looks like a short id but is malformed'],
                         404 => ['description' => 'Group not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -753,6 +756,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
+                        400 => ['description' => 'group_id or section_id looks like a short id but is malformed'],
                         404 => ['description' => 'Group not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -953,6 +957,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -976,6 +981,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The completed task'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -999,6 +1005,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The reopened task'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -1022,6 +1029,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The pinned task'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -1045,6 +1053,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The unpinned task'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -1068,9 +1077,11 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         ],
                     ],
                     'responses' => [
+                        200 => ['description' => 'Tag already attached (idempotent)'],
                         201 => ['description' => 'Tag attached'],
                         400 => ['description' => 'tag_id missing or not a positive integer'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
+                        422 => ['description' => 'tag_id does not exist or does not belong to the caller\'s tenant'],
                     ],
                 ],
             ],
@@ -1254,7 +1265,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     'responses' => [
                         201 => ['description' => 'The created milestone'],
                         400 => ['description' => 'text (and its summary alias) missing, empty, or too long'],
-                        404 => ['description' => 'Task not found in the caller\'s tenant'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -1279,6 +1290,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The completed milestone'],
+                        400 => ['description' => 'task_id or milestone_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task or milestone not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -1304,6 +1316,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The reopened milestone'],
+                        400 => ['description' => 'task_id or milestone_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task or milestone not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -1358,6 +1371,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         204 => ['description' => 'Deleted'],
+                        400 => ['description' => 'task_id or milestone_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task or milestone not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
@@ -1444,7 +1458,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                     'responses' => [
                         200 => ['description' => 'The updated preferences'],
-                        404 => ['description' => 'Project not found in the caller\'s tenant'],
+                        404 => ['description' => 'Project not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],

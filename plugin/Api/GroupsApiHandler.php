@@ -278,6 +278,14 @@ final class GroupsApiHandler
      * Confines update()/delete() to a real PostgreSQL connection — see
      * TenantIsolationOuTest.
      *
+     * CHECK-THEN-ACT, NOT ATOMIC WITH THE WRITE: see
+     * {@see \Tasker\Api\SectionsApiHandler::findVisible()}'s own docblock
+     * for the full reasoning, identical here — update()/delete() key their
+     * write by id+tenant_id alone, with the OU predicate living entirely in
+     * this preceding check, so a TOCTOU window exists in theory if the
+     * group's project's ou_id changes between this SELECT and the write.
+     * No boundary is reachable today; not restructured here.
+     *
      * @return array<string, mixed>|null
      */
     private function findVisible(int $tenantId, ?int $callerOuId, int $groupId): ?array

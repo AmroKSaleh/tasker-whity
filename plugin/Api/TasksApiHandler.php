@@ -1326,6 +1326,20 @@ final class TasksApiHandler
      * child table's side); that gap is a known, separately-tracked
      * carry-over item, not a pattern to repeat in new code.
      *
+     * ALSO used by the D1b Task 13 fix for update()/delete()/complete()/
+     * uncomplete()/setPinned()/tag() (getOne() itself is a pure read, with
+     * no write to worry about). For those six, and also for
+     * moveToGroup()/moveToProject() before them, this is a CHECK-THEN-ACT,
+     * NOT ATOMIC WITH THE WRITE: the UPDATE/DELETE that follows keys itself
+     * by id+tenant_id alone — the OU predicate lives entirely in THIS
+     * SELECT, run once, before the write. A TOCTOU window exists in theory
+     * if the task's project's ou_id changes in the instant between this
+     * check and the later write; no boundary is reachable today (the 404
+     * always runs first), and this is the same check-then-act shape
+     * create()'s own section-existence check already has. Not restructured
+     * here — see {@see \Tasker\Api\SectionsApiHandler::findVisible()}'s own
+     * docblock, which states this identically for its own class.
+     *
      * @return array<string, mixed>|null
      */
     private function findVisible(int $tenantId, ?int $callerOuId, int $taskId): ?array
