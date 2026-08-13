@@ -14,22 +14,29 @@
     THREE SOURCES, IN DESCENDING ORDER OF TRUST — read this before trusting the
     output:
 
-    1. The LIVE original MCP server. Authoritative. Five tool definitions were
-       captured from it by hand on 2026-08-11 and are applied below as
-       $LiveOracleCorrections / $LiveOnlyToolNames. Task 11 established the rule
-       the hard way: the original app's own in-app docs page
-       (app/src/docs/contentMcpV2.js) CONTRADICTS its live server, so nothing in
-       the design repo is trusted by default.
+    1. The LIVE original MCP server. Authoritative. Was ahead of the design
+       repo as of 2026-08-11, when eleven properties across three tools were
+       captured from it by hand and applied as $LiveOracleCorrections, plus
+       twelve tool names it exposed that the design repo did not yet define
+       at all ($LiveOnlyToolNames). Task 11 established the rule the hard
+       way: the original app's own in-app docs page
+       (app/src/docs/contentMcpV2.js) CONTRADICTS its live server, so nothing
+       in the design repo is trusted by default.
 
-    2. The design repo's edge function, c:\Projects\tasker\V2\supabase\functions
-       \mcp\index.ts. The real deployed source — but a SNAPSHOT of it. Verified
-       stale as of this writing (design-repo HEAD 2f1826ea, 2026-07-18):
-         - It carries 131 tools. The live server carries 143.
-         - update_task is missing `tags` and `current_state`.
-         - create_task is missing `tags`.
-       Every tool it DOES carry is still live, and no tool it carries has been
-       removed — the drift observed is purely additive. That is what makes it
-       usable as a floor, once corrected by (1).
+       RESOLVED 2026-08-13: the design repo merged up to current upstream
+       (Xardoxis/tasker) and now matches the live server's tool count exactly
+       (143). Every one of the eleven corrections tripped the generator's own
+       staleness throw — proof index.ts now declares them for real — and both
+       tables below are empty as a result. See original-tool-schemas.json's
+       `_meta` for the current provenance statement.
+
+    2. The design repo's edge function, now at
+       c:\Projects\tasker\supabase\functions\mcp\index.ts — PATH MOVED
+       2026-08-13, see the code below for why. The real deployed source. As
+       of sourceCommit this is a faithful, wholesale image of the live
+       server's tool surface (verified by name-count, not by re-diffing every
+       property of every tool — see `_meta.correctionCoverage` in the output
+       for the exact boundary of what "verified" means here).
 
     3. app/src/docs/contentMcpV2.js — NOT USED. Known wrong (see Task 11).
 
@@ -39,8 +46,10 @@
     description; a regex parser would be the least trustworthy link in a chain
     whose entire purpose is trustworthiness. Node evaluates the same literal the
     Deno runtime does. Only the declarations TOOLS actually references are
-    pulled in with it (RULE_SCHEMA, CONTRACT_SCHEMA, and the two string-list
-    constants), so nothing in the file executes.
+    pulled in with it (RULE_SCHEMA, CONTRACT_SCHEMA, the two string-list
+    constants, and — since the 2026-08-13 re-sync, when TOOLS started
+    interpolating them into a couple of `limit` descriptions —
+    DEFAULT_PAGE_SIZE and MAX_PAGE_SIZE), so nothing in the file executes.
 
 .PARAMETER DesignRepo
     Root of the design repo holding the original edge function.
@@ -62,7 +71,12 @@ if (-not $Out) {
     $Out = Join-Path $repoRoot 'plugin\tests\Contract\original-tool-schemas.json'
 }
 
-$indexTs = Join-Path $DesignRepo 'V2\supabase\functions\mcp\index.ts'
+# PATH MOVED 2026-08-13: upstream (Xardoxis/tasker) retired v1 and flattened
+# V2/ to the repo root, so the old V2\supabase\... path is gone. The design
+# repo has since been merged up to that upstream state. If a future upstream
+# reorg moves it again, `git log --follow` below will not help (it only
+# tracks the CURRENT path's history) - re-locate the file by name first.
+$indexTs = Join-Path $DesignRepo 'supabase\functions\mcp\index.ts'
 if (-not (Test-Path $indexTs)) {
     throw "Original MCP edge function not found at $indexTs - pass -DesignRepo <path>"
 }
@@ -77,8 +91,8 @@ $sourceCommit = 'unknown'
 $sourceDate   = 'unknown'
 try {
     Push-Location $DesignRepo
-    $sourceCommit = (git log -1 --format='%H' -- 'V2/supabase/functions/mcp/index.ts') 2>$null
-    $sourceDate   = (git log -1 --format='%cI' -- 'V2/supabase/functions/mcp/index.ts') 2>$null
+    $sourceCommit = (git log -1 --format='%H' -- 'supabase/functions/mcp/index.ts') 2>$null
+    $sourceDate   = (git log -1 --format='%cI' -- 'supabase/functions/mcp/index.ts') 2>$null
 } catch {
     # A design repo without git history is not a reason to fail the extraction.
 } finally {
@@ -103,35 +117,19 @@ if (-not $sourceDate)   { $sourceDate   = 'unknown' }
 # against the live server during Task 12's review; 35 matched and list_tasks did
 # not. The 95 unported tools have NOT been compared and may be short too. That is
 # tolerable only because nothing measures against them yet.
+#
+# 2026-08-13 RE-SYNC: every one of the 11 corrections that used to live here
+# (create_task.tags, update_task.tags, update_task.current_state, and 8
+# NAME-ONLY list_tasks properties) is now REDUNDANT — the generator's own
+# staleness throw fired for each in turn as it was re-run against the
+# current index.ts, confirming the live server and git are back in
+# agreement. That is the success condition this table exists to detect, not
+# a failure: see original-tool-schemas.json's _meta for what each one
+# resolved to. The table is intentionally empty; do not repopulate it
+# without a fresh, hand-verified live-server capture (see the THREE SOURCES
+# note above this variable's own history for why that bar is high).
 $liveOracleCorrections = @'
-[
-  { "tool": "create_task", "property": "tags",
-    "schema": { "type": "array", "items": { "type": "string" } },
-    "note": "Live server declares tags on create_task; index.ts (2026-07-18) has no tags anywhere." },
-  { "tool": "update_task", "property": "tags",
-    "schema": { "type": "array", "items": { "type": "string" } },
-    "note": "Live server declares tags on update_task; index.ts has no tags anywhere." },
-  { "tool": "update_task", "property": "current_state",
-    "schema": { "type": "string" },
-    "note": "Live server declares current_state on update_task; the string does not occur in index.ts at all." },
-
-  { "tool": "list_tasks", "property": "flow_id", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks (Task 12 review, all-36-tool comparison). Name captured, shape not." },
-  { "tool": "list_tasks", "property": "gate_status", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it." },
-  { "tool": "list_tasks", "property": "blocking", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks. Name captured, shape not." },
-  { "tool": "list_tasks", "property": "phase_id", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks - part of the phases feature that post-dates index.ts entirely (see liveOnlyToolNames)." },
-  { "tool": "list_tasks", "property": "cursor", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks. Name captured, shape not." },
-  { "tool": "list_tasks", "property": "limit", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks. Name captured, shape not." },
-  { "tool": "list_tasks", "property": "sort", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it." },
-  { "tool": "list_tasks", "property": "updated_since", "schema": { "description": "NAME ONLY - shape not captured." },
-    "note": "Live-only on list_tasks. Name captured, shape not." }
-]
+[]
 '@
 
 # Tools the LIVE server exposes that index.ts does not define at all. Their
@@ -140,12 +138,16 @@ $liveOracleCorrections = @'
 # property-by-property. If a later slice ports one of these, that test fails and
 # forces someone to capture the real schema before the port can be called done —
 # which is the correct outcome, not an inconvenience.
+#
+# 2026-08-13 RE-SYNC: all 12 names formerly here (add_task_link, create_phase,
+# delete_phase, get_flow_exceptions, get_project_delta, get_task_history,
+# list_phases, post_project_update, resolve_reference, set_active_phase,
+# set_task_phase, update_phase) are now DEFINED in index.ts for real — the
+# extractor's own "listed as live-only but index.ts defines it" guard caught
+# all 12 and forced this list empty. They now flow through as ordinary
+# extracted tools with real schemas instead of names-only.
 $liveOnlyToolNames = @'
-[
-  "add_task_link", "create_phase", "delete_phase", "get_flow_exceptions",
-  "get_project_delta", "get_task_history", "list_phases", "post_project_update",
-  "resolve_reference", "set_active_phase", "set_task_phase", "update_phase"
-]
+[]
 '@
 
 $extractor = @'
@@ -185,9 +187,27 @@ function extractDecl(text, name, open, close) {
   return text.slice(start, i);
 }
 
+/**
+ * Slice out a single-line `const NAME = <literal>` declaration verbatim (no
+ * bracket matching needed - the value ends at the line break). Added when the
+ * 2026-08-13 re-sync found TOOLS now interpolates DEFAULT_PAGE_SIZE /
+ * MAX_PAGE_SIZE into a couple of `limit` property descriptions; those two are
+ * plain numeric consts, not nested literals, so extractDecl's bracket-matcher
+ * does not apply and would be overkill for a bare number.
+ */
+function extractScalarConst(text, name) {
+  const marker = `const ${name} = `;
+  const start = text.indexOf(marker);
+  if (start < 0) throw new Error(`declaration not found: ${name}`);
+  const lineEnd = text.indexOf('\n', start);
+  return text.slice(start, lineEnd < 0 ? text.length : lineEnd);
+}
+
 const ctx = {};
 vm.createContext(ctx);
 vm.runInContext([
+  extractScalarConst(src, 'DEFAULT_PAGE_SIZE'),
+  extractScalarConst(src, 'MAX_PAGE_SIZE'),
   extractDecl(src, 'RULE_SCHEMA', '{', '}'),
   extractDecl(src, 'CONTRACT_SCHEMA', '{', '}'),
   extractDecl(src, 'KB_CATEGORIES', '[', ']'),
@@ -229,7 +249,7 @@ const doc = {
   _meta: {
     generatedBy: 'host/scripts/extract-original-schemas.ps1',
     doNotEditByHand: 'Re-run the generator instead; the live-oracle corrections live in it.',
-    source: 'c:/Projects/tasker/V2/supabase/functions/mcp/index.ts (design repo, the original app\u2019s deployed MCP edge function)',
+    source: 'c:/Projects/tasker/supabase/functions/mcp/index.ts (design repo, the original app\u2019s deployed MCP edge function; path moved here 2026-08-13 when upstream retired v1 and flattened V2/ to the repo root)',
     sourceCommit,
     sourceCommitDate: sourceDate,
     extractedAt: new Date().toISOString(),
@@ -237,18 +257,21 @@ const doc = {
     liveOnlyToolCount: liveOnly.length,
     originalSurfaceSize: Object.keys(sorted).length + liveOnly.length,
     sourceIsStale:
-      'index.ts is a SNAPSHOT and is behind the live server. Verified 2026-08-11: 131 tools here vs 143 live; ' +
-      'the 12 extra live names are in liveOnlyToolNames; update_task/create_task were missing tags and ' +
-      'current_state, and list_tasks was missing 8 properties - all applied from the live oracle (see ' +
-      'liveOracleCorrections). The drift observed was purely additive - no tool or property present here has been ' +
-      'removed upstream - so this file is a FLOOR on the original\u2019s surface, not an exact image of it.',
+      'RESOLVED 2026-08-13. index.ts was a stale snapshot (131 tools vs 143 live) until the design repo was merged ' +
+      'up to current upstream (Xardoxis/tasker, 46 commits); it now declares all 143 tool names the live server ' +
+      'reported, so liveOnlyToolNames is empty and every liveOracleCorrections entry (update_task.tags, ' +
+      'update_task.current_state, create_task.tags, and 8 list_tasks NAME-ONLY properties) tripped the generator\u2019s ' +
+      'own staleness throw in turn and was removed - index.ts now declares all of them directly. This file is an ' +
+      'exact image of index.ts at sourceCommit, not a hand-corrected floor.',
     correctionCoverage:
-      'THE FLOOR IS ONLY AS COMPLETE AS THE HAND CAPTURE. liveOracleCorrections can only fix tools somebody read ' +
-      'off the live server; the generator throws when a correction becomes redundant but CANNOT detect one that ' +
-      'was never written, so an uncaptured tool stays silently short. Compared against the live server so far: all ' +
-      '36 tools shared with this plugin (35 matched; list_tasks did not). NOT compared: the 95 unported tools here ' +
-      'and the 12 in liveOnlyToolNames, whose schemas were never captured at all. Treat a tool outside the shared ' +
-      '36 as unverified until someone compares it.',
+      'PROVENANCE, POST RE-SYNC: this snapshot is extracted WHOLESALE from index.ts at sourceCommit, not hand-patched ' +
+      '- liveOracleCorrections is empty because nothing here needed a manual fix. Cross-checked against the live ' +
+      'server on tool COUNT only: 143 unique names in TOOLS here matches the 143 the live server reported during the ' +
+      'last slice, with none appearing on one side and not the other. That is coarser than the old per-tool hand ' +
+      'capture (which compared the 36 shared tools\u2019 full argument shapes against the live server one property at a ' +
+      'time): a name-count match proves no tool was added or dropped between git and the deployed surface, but not ' +
+      'that every property of every one of the 107 unported tools is byte-identical to what the live server would ' +
+      'return for it. Treat an unported tool\u2019s exact shape as unverified until someone compares it directly.',
     liveOracleCorrections: corrections,
   },
   tools: sorted,

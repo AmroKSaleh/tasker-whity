@@ -2,111 +2,16 @@
   "_meta": {
     "generatedBy": "host/scripts/extract-original-schemas.ps1",
     "doNotEditByHand": "Re-run the generator instead; the live-oracle corrections live in it.",
-    "source": "c:/Projects/tasker/V2/supabase/functions/mcp/index.ts (design repo, the original app’s deployed MCP edge function)",
-    "sourceCommit": "2f1826ea073fa62bee47000dae55bbd26c88c90b",
-    "sourceCommitDate": "2026-07-18T20:42:51+03:00",
-    "extractedAt": "2026-08-11T18:35:14.569Z",
-    "toolsFromSource": 131,
-    "liveOnlyToolCount": 12,
+    "source": "c:/Projects/tasker/supabase/functions/mcp/index.ts (design repo, the original app’s deployed MCP edge function; path moved here 2026-08-13 when upstream retired v1 and flattened V2/ to the repo root)",
+    "sourceCommit": "91cf3ecb6276cae96cf16d4d53bbe5987bcbf425",
+    "sourceCommitDate": "2026-08-12T06:35:17+03:00",
+    "extractedAt": "2026-08-13T07:30:22.579Z",
+    "toolsFromSource": 143,
+    "liveOnlyToolCount": 0,
     "originalSurfaceSize": 143,
-    "sourceIsStale": "index.ts is a SNAPSHOT and is behind the live server. Verified 2026-08-11: 131 tools here vs 143 live; the 12 extra live names are in liveOnlyToolNames; update_task/create_task were missing tags and current_state, and list_tasks was missing 8 properties - all applied from the live oracle (see liveOracleCorrections). The drift observed was purely additive - no tool or property present here has been removed upstream - so this file is a FLOOR on the original’s surface, not an exact image of it.",
-    "correctionCoverage": "THE FLOOR IS ONLY AS COMPLETE AS THE HAND CAPTURE. liveOracleCorrections can only fix tools somebody read off the live server; the generator throws when a correction becomes redundant but CANNOT detect one that was never written, so an uncaptured tool stays silently short. Compared against the live server so far: all 36 tools shared with this plugin (35 matched; list_tasks did not). NOT compared: the 95 unported tools here and the 12 in liveOnlyToolNames, whose schemas were never captured at all. Treat a tool outside the shared 36 as unverified until someone compares it.",
-    "liveOracleCorrections": [
-      {
-        "tool": "create_task",
-        "property": "tags",
-        "schema": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "note": "Live server declares tags on create_task; index.ts (2026-07-18) has no tags anywhere."
-      },
-      {
-        "tool": "update_task",
-        "property": "tags",
-        "schema": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
-        },
-        "note": "Live server declares tags on update_task; index.ts has no tags anywhere."
-      },
-      {
-        "tool": "update_task",
-        "property": "current_state",
-        "schema": {
-          "type": "string"
-        },
-        "note": "Live server declares current_state on update_task; the string does not occur in index.ts at all."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "flow_id",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks (Task 12 review, all-36-tool comparison). Name captured, shape not."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "gate_status",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "blocking",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks. Name captured, shape not."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "phase_id",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks - part of the phases feature that post-dates index.ts entirely (see liveOnlyToolNames)."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "cursor",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks. Name captured, shape not."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "limit",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks. Name captured, shape not."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "sort",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks. Name captured, shape not - likely carries an enum, so the enum check cannot run for it."
-      },
-      {
-        "tool": "list_tasks",
-        "property": "updated_since",
-        "schema": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "note": "Live-only on list_tasks. Name captured, shape not."
-      }
-    ]
+    "sourceIsStale": "RESOLVED 2026-08-13. index.ts was a stale snapshot (131 tools vs 143 live) until the design repo was merged up to current upstream (Xardoxis/tasker, 46 commits); it now declares all 143 tool names the live server reported, so liveOnlyToolNames is empty and every liveOracleCorrections entry (update_task.tags, update_task.current_state, create_task.tags, and 8 list_tasks NAME-ONLY properties) tripped the generator’s own staleness throw in turn and was removed - index.ts now declares all of them directly. This file is an exact image of index.ts at sourceCommit, not a hand-corrected floor.",
+    "correctionCoverage": "PROVENANCE, POST RE-SYNC: this snapshot is extracted WHOLESALE from index.ts at sourceCommit, not hand-patched - liveOracleCorrections is empty because nothing here needed a manual fix. Cross-checked against the live server on tool COUNT only: 143 unique names in TOOLS here matches the 143 the live server reported during the last slice, with none appearing on one side and not the other. That is coarser than the old per-tool hand capture (which compared the 36 shared tools’ full argument shapes against the live server one property at a time): a name-count match proves no tool was added or dropped between git and the deployed surface, but not that every property of every one of the 107 unported tools is byte-identical to what the live server would return for it. Treat an unported tool’s exact shape as unverified until someone compares it directly.",
+    "liveOracleCorrections": []
   },
   "tools": {
     "__init_tasker_session": {
@@ -134,6 +39,27 @@
       "required": [
         "task_id",
         "text"
+      ]
+    },
+    "add_task_link": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID"
+        },
+        "url": {
+          "type": "string",
+          "description": "The URL to attach"
+        },
+        "title": {
+          "type": "string",
+          "description": "Optional human-readable title for the link"
+        }
+      },
+      "required": [
+        "task_id",
+        "url"
       ]
     },
     "advance_guide": {
@@ -194,7 +120,7 @@
         },
         "actor": {
           "type": "string",
-          "description": "Optional: the agent/client acting (e.g. \"Claude Code\"). The full provenance layer is completed in TDE-375."
+          "description": "Optional: the agent/client acting (e.g. \"Claude Code\")."
         }
       },
       "required": [
@@ -369,6 +295,13 @@
         "universal": {
           "type": "boolean",
           "description": "If true, seeded entries apply even inside flows with their own IS. Default false."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags used to scope this instruction set to tasks with matching tags. Omit or empty array means it applies to all tasks."
         }
       },
       "required": [
@@ -410,6 +343,13 @@
         "content": {
           "type": "string",
           "description": "The instruction content (markdown supported)"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags used to scope this instruction set to tasks with matching tags. Omit or empty array means it applies to all tasks in the flow."
         }
       },
       "required": [
@@ -486,6 +426,13 @@
         "universal": {
           "type": "boolean",
           "description": "If true, this rule always applies, even inside a flow with its own IS. Default false."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tags used to scope this instruction set to tasks with matching tags. Omit or empty array means it applies to all tasks."
         }
       },
       "required": [
@@ -538,6 +485,31 @@
         "project_id",
         "title",
         "content"
+      ]
+    },
+    "create_phase": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "name": {
+          "type": "string",
+          "description": "Phase name (e.g. \"Phase 1 — Core app\")"
+        },
+        "exit_condition": {
+          "type": "string",
+          "description": "What must be TRUE for this phase to be over (e.g. \"the app is live and the MCP is documented\"). Strongly recommended."
+        },
+        "due_date": {
+          "type": "string",
+          "description": "OPTIONAL ISO date YYYY-MM-DD. Leave unset unless there is a real deadline."
+        }
+      },
+      "required": [
+        "project_id",
+        "name"
       ]
     },
     "create_project": {
@@ -633,7 +605,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Ordered milestone texts added in one call (no separate add_milestone needed). On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind=\"prerequisite\" checklist items that soft-gate resolve_seed / build_new_flow. On a normal task they are plain milestones."
+          "description": "Ordered milestone texts, added in one call. On a SEED these are PREREQUISITES — work to settle BEFORE resolving, stored as kind=\"prerequisite\" items that soft-gate resolve_seed / build_new_flow. On a normal task, plain milestones."
         },
         "executor": {
           "type": "string",
@@ -646,21 +618,22 @@
         },
         "human_guidance": {
           "type": "string",
-          "description": "For user/external steps only: the human-facing step instructions shown in guide mode. Distinct from detail (which is AI-facing context). Write as a clear action directive: what the person must do, where, and how to verify it worked."
+          "description": "user/external steps only: human-facing instructions shown in guide mode. Distinct from detail (AI-facing). Write as an action directive — what the person must do, where, and how to verify it worked."
         },
         "relay_context": {
           "type": "string",
-          "description": "RELAY MODE (TDE-324): set this only when the user wants to relay/hand off this task to someone else. A CURATED rationale layer that lets the assignee act without coming back to ask — NOT a transcript dump. Distill from your discussion: who it is going to (free text, e.g. \"to: Sara (backend)\"), the key decision(s) and WHY, approaches considered and rejected and why-not, intent / how to treat it, open questions, and watch-outs. Setting this marks the task as a relay. Leave unset for normal tasks."
+          "description": "RELAY MODE: set only when handing this task to someone else. Curated, not a transcript dump: who it is for, key decisions and WHY, rejected approaches, intent, open questions, watch-outs. Setting it marks the task as a relay."
         },
         "allow_duplicate": {
           "type": "boolean",
-          "description": "TDE-379 duplicate defense: creation is REFUSED if a near-identical open task already exists (the response lists the matches). Pass true to override and create anyway when it is genuinely distinct. Leave unset normally — if you see the guard, prefer working the existing task or merge_task_as_duplicate."
+          "description": "Creation is REFUSED if a near-identical open task exists (matches listed in the response). Pass true only when genuinely distinct — otherwise work the existing task or merge_task_as_duplicate."
         },
         "tags": {
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "description": "Tags used to filter which Instruction Sets are loaded into this task's context."
         }
       },
       "required": [
@@ -799,6 +772,23 @@
         "index"
       ]
     },
+    "delete_phase": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "phase_id": {
+          "type": "string",
+          "description": "Phase UUID, slug, or exact name"
+        }
+      },
+      "required": [
+        "project_id",
+        "phase_id"
+      ]
+    },
     "delete_project": {
       "type": "object",
       "properties": {
@@ -912,7 +902,15 @@
         },
         "content": {
           "type": "string",
-          "description": "Text content of the file. For target_type \"doc\": pass HTML or Markdown. For \"sheet\": pass CSV."
+          "description": "Text content of the file. For target_type \"doc\": pass HTML or Markdown. For \"sheet\": pass CSV. If encoding is \"base64\", this must be the base64-encoded binary string."
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "text",
+            "base64"
+          ],
+          "description": "Encoding of the content string. Defaults to text. Use \"base64\" for binary files like .zip or images."
         },
         "task_id": {
           "type": "string",
@@ -929,7 +927,7 @@
         },
         "mime_type": {
           "type": "string",
-          "description": "Source content MIME. For \"file\": the file's own type (default text/plain; use text/markdown for .md). For \"doc\": text/html (default) or text/markdown. For \"sheet\": text/csv (default). This is the format Drive converts FROM, not the Google-apps type."
+          "description": "Source content MIME — the format Drive converts FROM, not the Google-apps type. \"file\": default text/plain (text/markdown for .md). \"doc\": text/html (default) or text/markdown. \"sheet\": text/csv (default)."
         }
       },
       "required": [
@@ -1077,6 +1075,14 @@
         "task_id": {
           "type": "string",
           "description": "Any task in the flow (UUID or short ID). The tool finds all other tasks in the same flow automatically."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max tasks to return. Default 50, capped at 200."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque pagination cursor from a previous call's result. Omit for the first page."
         }
       },
       "required": [
@@ -1094,6 +1100,24 @@
       "required": [
         "task_id"
       ]
+    },
+    "get_flow_exceptions": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Any task in the flow (UUID or short ID)."
+        },
+        "flow_id": {
+          "type": "string",
+          "description": "Alternatively, the flow UUID or name."
+        },
+        "include_history": {
+          "type": "boolean",
+          "description": "Also include EARLIER failed attempts, not just the current state of each gate. Default false. Useful to see what a step failed on before it eventually passed."
+        }
+      },
+      "required": []
     },
     "get_flow_is": {
       "type": "object",
@@ -1220,6 +1244,18 @@
         "project_id"
       ]
     },
+    "get_project_delta": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix, slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
+      ]
+    },
     "get_project_foundation": {
       "type": "object",
       "properties": {
@@ -1267,7 +1303,7 @@
         },
         "refresh_context": {
           "type": "boolean",
-          "description": "Force the full project context (Foundation, Instruction Set, KB index) back inline. It is normally sent only on the first task you open in a project each session and omitted (as a short pointer) thereafter to save tokens. Pass true to re-ground after your context was compacted/cleared."
+          "description": "Force the full project context (Foundation, Instruction Set, KB index) back inline. Normally sent only on the first task opened in a project each session, then omitted as a short pointer. Use after your context was compacted or cleared."
         }
       },
       "required": [
@@ -1312,6 +1348,44 @@
         "target_task_id": {
           "type": "string",
           "description": "Optional: which consumer edge's critique to show. Required only if the producer feeds more than one task."
+        }
+      },
+      "required": [
+        "task_id"
+      ]
+    },
+    "get_task_history": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "contract_set",
+            "contract_cleared",
+            "contract_confirmed",
+            "review_bar_frozen",
+            "review_bar_cleared",
+            "review_submitted",
+            "validation_submitted",
+            "fields_changed"
+          ],
+          "description": "Optional: show only this kind of event."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max events (default 50, max 200), newest first."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque pagination cursor from a previous call's result. Omit for the first page."
+        },
+        "verbose": {
+          "type": "boolean",
+          "description": "Include the full before/after JSON per event. Default false (summaries + key flags only) to keep the response cheap."
         }
       },
       "required": [
@@ -1590,6 +1664,14 @@
         "project_id": {
           "type": "string",
           "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max flows to return. Default 50, capped at 200."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque pagination cursor from a previous call's result. Omit for the first page."
         }
       },
       "required": [
@@ -1661,6 +1743,14 @@
             "all"
           ],
           "description": "Filter by who created the entry. Defaults to \"all\"."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max entries to return. Default 50, capped at 200."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque pagination cursor from a previous call's result. Omit for the first page."
         }
       },
       "required": [
@@ -1677,6 +1767,18 @@
       },
       "required": [
         "task_id"
+      ]
+    },
+    "list_phases": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        }
+      },
+      "required": [
+        "project_id"
       ]
     },
     "list_projects": {
@@ -1728,31 +1830,48 @@
         },
         "include_flow_steps": {
           "type": "boolean",
-          "description": "EXPLICIT USER OVERRIDE ONLY. Flow steps are excluded by default (they are steps, not tasks — TDE-320). Set true ONLY when the user has explicitly asked to see flow steps in this list as if they were normal tasks. Do not set it on your own."
-        },
-        "flow_id": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "gate_status": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "blocking": {
-          "description": "NAME ONLY - shape not captured."
+          "description": "EXPLICIT USER OVERRIDE ONLY — set true only when the user has explicitly asked to see flow steps here as if they were normal tasks. Never set on your own initiative."
         },
         "phase_id": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "cursor": {
-          "description": "NAME ONLY - shape not captured."
-        },
-        "limit": {
-          "description": "NAME ONLY - shape not captured."
+          "type": "string",
+          "description": "show only tasks in this phase (UUID, slug, or exact name). Pass \"unphased\" to list only tasks belonging to NO phase. Requires project_id."
         },
         "sort": {
-          "description": "NAME ONLY - shape not captured."
+          "type": "string",
+          "enum": [
+            "sorting_order",
+            "recently_updated"
+          ],
+          "description": "Ordering. Default \"sorting_order\" (the board order). \"recently_updated\" sorts by last edit, newest first — use it to see what changed most recently."
         },
         "updated_since": {
-          "description": "NAME ONLY - shape not captured."
+          "type": "string",
+          "description": "Only tasks edited on/after this time. Accepts a relative duration (\"7d\", \"2w\", \"1mo\", or ISO 8601 \"P2W\") or an absolute ISO date."
+        },
+        "limit": {
+          "type": "number",
+          "description": "Max tasks to return. Default 50, capped at 200."
+        },
+        "cursor": {
+          "type": "string",
+          "description": "Opaque pagination cursor from a previous call's result. Omit for the first page."
+        },
+        "blocking": {
+          "type": "boolean",
+          "description": "Only tasks whose output is an input source for at least one NOT-done task, anywhere in the project — i.e. producers something is still waiting on. A relationship filter, not a scalar one: computed across all of the project's I/O edges, so it disables cursor pagination for this call (the set is filtered before paging would apply)."
+        },
+        "flow_id": {
+          "type": "string",
+          "description": "Filter by flow membership. Pass a flow UUID or short ID."
+        },
+        "gate_status": {
+          "type": "string",
+          "enum": [
+            "valid",
+            "invalid",
+            "unverified"
+          ],
+          "description": "Filter by contract/gate state. A relationship filter, computed in JS, so it disables cursor pagination for this call."
         }
       },
       "required": []
@@ -1862,19 +1981,49 @@
           "type": "string",
           "description": "Optional custom short ID (e.g. \"BKT-F3\"). Must be unique across all your flows. Auto-generated if omitted."
         },
+        "step_list_open": {
+          "type": "boolean",
+          "description": "True when the flow's full step list is not yet known (research, investigation — it discovers steps as it goes). Progress then says more steps are expected and never falsely reports complete. Default false. Changeable later via update_flow_context."
+        },
         "bypass": {
           "type": "boolean",
-          "description": "TDE-287: finalize the flow even if the contract gate fails. Use ONLY on explicit human command — the flow is permanently recorded as gate-bypassed."
+          "description": "DEPRECATED — ignored, kept so older callers do not error. Contracts no longer block finalization."
         },
         "bypass_reason": {
           "type": "string",
-          "description": "Why the gate was bypassed (recorded on the flow). Provide when bypass:true."
+          "description": "DEPRECATED — ignored, kept for backward compatibility."
         }
       },
       "required": [
         "project_id",
         "name",
         "task_ids"
+      ]
+    },
+    "post_project_update": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix, slug, or UUID"
+        },
+        "health": {
+          "type": "string",
+          "enum": [
+            "on_track",
+            "at_risk",
+            "off_track"
+          ]
+        },
+        "body": {
+          "type": "string",
+          "description": "MUST OPEN with a NARRATIVE account of the work, written the way a person describes their working day out loud — prose, not a report. Take as long as it needs; do not compress it into a summary. Organise it by THREAD (a discovery and what it changed), NEVER by date: the causal line is what makes it worth reading and it rarely respects midnight, and the per-day facts are computed separately and rendered beneath — do not duplicate them. Cover, in this order: (1) WHERE THINGS STAND NOW versus where they stood when the session began — the reader's real question is \"are we further along\", not \"how much got done\"; (2) WHAT WAS DISCOVERED during the work, especially anything nobody knew at the start, since discovery is usually the most valuable output and the one no task list records; (3) WHAT WAS DONE ABOUT IT, including anything that went wrong and how it was handled — an account that hides a mistake is worthless as a record, and to a manager it reads as STRONGER, not weaker, because it shows the author catches their own errors; (4) WHAT HAPPENS NEXT AND WHY, with the reasoning, not just the next item — the why is the part nothing else records. BANISH SCOREBOARD NUMBERS from this opener: tasks completed, tasks added, counts of anything. They answer \"how much\" when the reader is asking \"where are we\". A number that IS a finding (\"roughly a third of the integration's running cost was being wasted\") is not a scoreboard number and should stay. Task IDs belong BELOW the opener, not in it. AFTER the narrative, the rest of the body is RECEIPTS — IDs, evidence, exact causes — for a reader who wants to verify or pick something up. Do not re-tell the story there; the opener already told it. TWO READERS, one document: the author months later, checking the work is still aimed at the project's stated goal rather than drifting; and whoever the author reports to. Write so it serves both — that is why it must be candid AND legible without project context."
+        }
+      },
+      "required": [
+        "project_id",
+        "health",
+        "body"
       ]
     },
     "pull_google_task": {
@@ -1924,7 +2073,7 @@
         },
         "watch": {
           "type": "boolean",
-          "description": "If true, ALSO mint a scoped device token and return a watch_script (watch.mjs) for immediate two-way sync: `node watch.mjs` flushes edits within ~1s of a save and polls the hub every ~15s. Use when a human will hand-edit files or wants the web board to update live. Off by default (avoids accruing standing tokens on ordinary pulls)."
+          "description": "If true, also mint a scoped device token and return a watch_script (watch.mjs): `node watch.mjs` flushes edits within ~1s of a save and polls the hub every ~15s. Use when a human will hand-edit files or wants the web board to update live. Off by default."
         }
       },
       "required": [
@@ -2035,6 +2184,18 @@
         "name"
       ]
     },
+    "resolve_reference": {
+      "type": "object",
+      "properties": {
+        "ref": {
+          "type": "string",
+          "description": "A short ID (task, flow, or project prefix/slug) or a UUID."
+        }
+      },
+      "required": [
+        "ref"
+      ]
+    },
     "resolve_seed": {
       "type": "object",
       "properties": {
@@ -2044,7 +2205,7 @@
         },
         "proceed_anyway": {
           "type": "boolean",
-          "description": "Override the soft prerequisite gate. Default false. When false, resolving a seed that still has unchecked kind=\"prerequisite\" checklist items is refused with the list of unmet prerequisites — confirm with the user, then retry with true."
+          "description": "Override the soft prerequisite gate. Default false — resolving with unchecked kind=\"prerequisite\" items is refused with the list of what's unmet; confirm with the user, then retry true."
         },
         "task_spec": {
           "type": "object",
@@ -2191,6 +2352,22 @@
       "required": [
         "project_id",
         "section_id"
+      ]
+    },
+    "set_active_phase": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "phase_id": {
+          "type": "string",
+          "description": "Phase UUID, slug, or exact name. Omit or pass null to clear."
+        }
+      },
+      "required": [
+        "project_id"
       ]
     },
     "set_local_mode": {
@@ -2358,6 +2535,22 @@
       "required": [
         "task_id",
         "contract"
+      ]
+    },
+    "set_task_phase": {
+      "type": "object",
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "description": "Task UUID or short ID (e.g. TDE-31)"
+        },
+        "phase_id": {
+          "type": "string",
+          "description": "Phase UUID, slug, or exact name within the task's project. Omit or pass null to unphase."
+        }
+      },
+      "required": [
+        "task_id"
       ]
     },
     "stop_flow": {
@@ -2535,7 +2728,7 @@
         },
         "narrative": {
           "type": "object",
-          "description": "GUIDED REVIEW (TDE-382): a human-facing narrative of the verdict, structured so the human gate is ~30s of judgment, not error-hunting. Provide on any fail/escalation. Verdict logic is unchanged — this is presentation.",
+          "description": "GUIDED REVIEW: a human-facing narrative of the verdict, structured so the human gate is ~30s of judgment, not error-hunting. Provide on any fail/escalation. Verdict logic is unchanged — this is presentation.",
           "properties": {
             "core": {
               "type": "string",
@@ -2581,7 +2774,7 @@
         },
         "validator": {
           "type": "string",
-          "description": "Who ran this validation. Required when judgment rules are present. Use \"independent-subagent\" (fresh Claude session with the artifact), \"human\" (human reviewed), or \"self\" (you graded your own work — discloses conflict). Omitting when judgment rules exist flags the ledger as unverified."
+          "description": "Who ran this validation. Required when judgment rules are present: \"independent-subagent\" (fresh session with the artifact), \"human\", or \"self\" (you graded your own work — discloses the conflict). Omitting it with judgment rules present flags the ledger unverified."
         },
         "results": {
           "type": "array",
@@ -2689,6 +2882,10 @@
         },
         "show_project_context": {
           "type": "boolean"
+        },
+        "timezone": {
+          "type": "string",
+          "description": "The zone timestamps are shown in — an IANA name (\"Asia/Amman\") or a fixed UTC offset (\"+03:00\"). Unset means times render as UTC. Set it when the user states their timezone."
         }
       },
       "required": []
@@ -2708,6 +2905,12 @@
         },
         "universal": {
           "type": "boolean"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       },
       "required": [
@@ -2732,6 +2935,10 @@
         "short_id": {
           "type": "string",
           "description": "Optional: set or change the flow short ID (e.g. \"BKT-F2\"). Must be unique across all your flows."
+        },
+        "step_list_open": {
+          "type": "boolean",
+          "description": "True = the full step list is not yet known (research/investigation discovering its next step as it goes). Progress then says \"more expected\" and won't falsely report complete. Set false once the extent is known — changeable either way mid-run."
         }
       },
       "required": [
@@ -2752,6 +2959,13 @@
         "content": {
           "type": "string",
           "description": "New content (optional)"
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "New tags (optional)."
         }
       },
       "required": [
@@ -2796,6 +3010,13 @@
         "universal": {
           "type": "boolean",
           "description": "Set true so this rule applies even inside flows with their own IS; false to scope it to non-flow / fallback only."
+        },
+        "tags": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "New tags (optional)."
         }
       },
       "required": [
@@ -2838,6 +3059,39 @@
         "entry_id"
       ]
     },
+    "update_phase": {
+      "type": "object",
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "description": "Project prefix (e.g. TDE), slug, or UUID"
+        },
+        "phase_id": {
+          "type": "string",
+          "description": "Phase UUID, slug, or exact name"
+        },
+        "name": {
+          "type": "string",
+          "description": "New name"
+        },
+        "exit_condition": {
+          "type": "string",
+          "description": "New exit condition. Pass an empty string to clear."
+        },
+        "due_date": {
+          "type": "string",
+          "description": "New ISO date YYYY-MM-DD. Pass an empty string to clear the deadline."
+        },
+        "sort_order": {
+          "type": "number",
+          "description": "New position (lower comes first)"
+        }
+      },
+      "required": [
+        "project_id",
+        "phase_id"
+      ]
+    },
     "update_project": {
       "type": "object",
       "properties": {
@@ -2851,7 +3105,7 @@
         },
         "prefix": {
           "type": "string",
-          "description": "New prefix, 2–5 uppercase letters e.g. \"BPW\" (optional)"
+          "description": "New prefix, 2–6 uppercase letters or digits e.g. \"BPW\" (optional)"
         }
       },
       "required": [
@@ -2890,7 +3144,7 @@
         },
         "append": {
           "type": "boolean",
-          "description": "If true, the provided detail is appended to the existing detail (separated by a blank line) instead of replacing it. Default false. Lets you add notes/context without resending the whole field."
+          "description": "If true, appends the provided detail to the existing detail (blank-line separated) instead of replacing it. Default false."
         },
         "priority": {
           "type": "string",
@@ -2922,7 +3176,7 @@
         },
         "pinned": {
           "type": "boolean",
-          "description": "Pin or unpin the task"
+          "description": "Mark the task CRITICAL (must-not-slip), or clear the mark. Any number of tasks can be critical; they are listed first by get_my_attention and counted at session start."
         },
         "executor": {
           "type": "string",
@@ -2939,32 +3193,34 @@
         },
         "relay_context": {
           "type": "string",
-          "description": "RELAY MODE (TDE-324): set/replace the curated relay rationale layer on an EXISTING task (e.g. when the user decides to hand off a task already created). Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump. Setting it marks the task as a relay."
+          "description": "Set/replace the relay rationale layer on an EXISTING task. Same contract as create_task.relay_context — a distilled hand-off note (recipient, decision + why, rejected approaches, intent, open questions, watch-outs), NOT a transcript dump."
         },
         "delegated_to": {
           "type": "string",
-          "description": "TDE-375: who the task is delegated to (free text — an agent or teammate). You (the owner) REMAIN responsible and still own the quality gate; delegation is NOT reassignment. Pass an empty string to clear."
+          "description": "Who the task is delegated to (free text — agent or teammate). The owner REMAINS responsible and still owns the quality gate; delegation is NOT reassignment. Empty string clears."
         },
         "agent_ready": {
           "type": "boolean",
-          "description": "Mark this task \"ready for the agent\" — it enters the autonomous work queue (get_ready_work). Usually set by the human in the web app (\"Hand to agent\"); set false to pull it back."
+          "description": "Mark \"ready for the agent\" — enters the autonomous work queue (get_ready_work). Usually set by the human (\"Hand to agent\"); false pulls it back."
         },
         "agent_proposal": {
           "type": "string",
-          "description": "Prepare→confirm→execute: record the agent's PREPARED proposal for this task (a concise summary of what it will do). Setting it makes the task appear in the web Agent Queue \"Awaiting confirmation\" tab. Clear it (empty string) once the human confirms and you execute, or if declined."
+          "description": "Prepare→confirm→execute: the agent's PREPARED proposal (a concise summary of what it will do). Setting it puts the task in the web Agent Queue \"Awaiting confirmation\" tab. Clear it (empty string) once confirmed-and-executed, or if declined."
         },
         "agent_proposal_confirmed": {
           "type": "boolean",
-          "description": "Usually set by the HUMAN in the web app (the \"Confirm\" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. The agent normally only clears the proposal after executing (which resets this to false)."
+          "description": "Usually set by the human (the \"Confirm\" button on the proposal). true = the human approved the (possibly edited) agent_proposal — execute it. Normally reset to false only by clearing the proposal after executing."
         },
         "tags": {
           "type": "array",
           "items": {
             "type": "string"
-          }
+          },
+          "description": "Tags used to filter which Instruction Sets are loaded into this task's context."
         },
         "current_state": {
-          "type": "string"
+          "type": "string",
+          "description": "ONE line on where this task actually stands right now — what is done, what is deliberately deferred and why, what is genuinely left. This is what the cheap get_project board overview renders instead of trusting the title, so write it for a reader who has NOT opened the task. Concrete over vague: \"Step 1 mitigation shipped + regression verified 27 Jul; step 3 deferred by owner; step 2 belongs to another team\" — not \"in progress\". Update it whenever the standing changes; empty string clears it (which restores the automatic stale-title warning)."
         }
       },
       "required": [
@@ -2988,18 +3244,5 @@
       ]
     }
   },
-  "liveOnlyToolNames": [
-    "add_task_link",
-    "create_phase",
-    "delete_phase",
-    "get_flow_exceptions",
-    "get_project_delta",
-    "get_task_history",
-    "list_phases",
-    "post_project_update",
-    "resolve_reference",
-    "set_active_phase",
-    "set_task_phase",
-    "update_phase"
-  ]
+  "liveOnlyToolNames": []
 }
