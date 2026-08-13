@@ -173,4 +173,35 @@ final class ShortIdAllocatorTest extends TestCase
                 . 'isRaceLoss() wrongly treated it as a race and burned retries before giving up'
         );
     }
+
+    public function testNextAllocatesPerTableSoFlowsAndTasksDoNotShareASequence(): void
+    {
+        $this->pdo->exec('CREATE TABLE tasker_flows (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, project_id INTEGER NOT NULL, short_id INTEGER)');
+        $this->pdo->exec('INSERT INTO tasker_tasks (id, tenant_id, project_id, short_id) VALUES (1, 7, 3, 40)');
+        $this->pdo->exec('INSERT INTO tasker_flows (id, tenant_id, project_id, short_id) VALUES (1, 7, 3, 2)');
+
+        self::assertSame(41, ShortIdAllocator::next($this->pdo, 7, 3));
+        self::assertSame(3, ShortIdAllocator::next($this->pdo, 7, 3, 'tasker_flows'));
+    }
+
+    public function testIsRaceLossMatchesTheFlowTablesOwnSqliteMessage(): void
+    {
+        $this->pdo->exec('CREATE TABLE tasker_flows (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, project_id INTEGER NOT NULL, short_id INTEGER)');
+        $this->pdo->exec('CREATE UNIQUE INDEX idx_tasker_flows_project_short_id ON tasker_flows (project_id, short_id)');
+        $this->pdo->exec('INSERT INTO tasker_flows (id, tenant_id, project_id, short_id) VALUES (1, 7, 3, 1)');
+
+        try {
+            $this->pdo->exec('INSERT INTO tasker_flows (id, tenant_id, project_id, short_id) VALUES (2, 7, 3, 1)');
+            self::fail('expected a unique violation');
+        } catch (\PDOException $e) {
+            self::assertTrue(
+                ShortIdAllocator::isRaceLoss($e, 'tasker_flows'),
+                'the flow table must get REAL race detection, not a check that silently never matches'
+            );
+            self::assertFalse(
+                ShortIdAllocator::isRaceLoss($e, 'tasker_tasks'),
+                'a flow violation must not read as a task violation'
+            );
+        }
+    }
 }
