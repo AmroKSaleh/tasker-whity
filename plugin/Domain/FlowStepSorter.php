@@ -83,42 +83,70 @@ final class FlowStepSorter
 
     /**
      * Every task with no assigned position is in, or downstream of, a cycle.
-     * Walk from the lowest such id following unassigned successors until a node
-     * repeats — that repeat closes the loop, and the slice from its first
-     * appearance is the path to name in the 422.
+     * Depth-first walk each stuck node in ascending id order, restricted to
+     * stuck successors, and return the first GENUINE cycle found — the slice
+     * of the current path from the revisited node onward.
      *
-     * @param list<int>              $taskIds
-     * @param array<int, int>        $positions
-     * @param array<int, list<int>>  $out
+     * Restricted to stuck nodes because a node Kahn already positioned cannot
+     * be part of a cycle, and trying every start because the lowest-id stuck
+     * node may be an innocent sink downstream of the real cycle rather than
+     * in it.
+     *
+     * @param list<int>             $taskIds
+     * @param array<int, int>       $positions
+     * @param array<int, list<int>> $out
      * @return list<int>
      */
     private static function cyclePath(array $taskIds, array $positions, array $out): array
     {
-        $stuck = array_values(array_filter($taskIds, static fn(int $id): bool => !isset($positions[$id])));
-        sort($stuck);
-
-        $path = [];
-        $seen = [];
-        $at   = $stuck[0];
-
-        while (!isset($seen[$at])) {
-            $seen[$at] = count($path);
-            $path[]    = $at;
-
-            $nextUnassigned = null;
-            foreach ($out[$at] ?? [] as $candidate) {
-                if (!isset($positions[$candidate])) {
-                    $nextUnassigned = $candidate;
-                    break;
-                }
+        $stuck = [];
+        foreach ($taskIds as $id) {
+            if (!isset($positions[$id])) {
+                $stuck[$id] = true;
             }
-
-            if ($nextUnassigned === null) {
-                return $path;
-            }
-            $at = $nextUnassigned;
         }
 
-        return array_slice($path, $seen[$at]);
+        $starts = array_keys($stuck);
+        sort($starts);
+
+        foreach ($starts as $start) {
+            $found = self::walkForCycle($start, $stuck, $out, [], []);
+            if ($found !== []) {
+                return $found;
+            }
+        }
+
+        return [];
+    }
+
+    /**
+     * @param array<int, true>      $stuck
+     * @param array<int, list<int>> $out
+     * @param array<int, int>       $onPath  node => its index in $path
+     * @param list<int>             $path
+     * @return list<int>
+     */
+    private static function walkForCycle(int $at, array $stuck, array $out, array $onPath, array $path): array
+    {
+        if (isset($onPath[$at])) {
+            // A real back-edge: everything from the revisited node onward IS the cycle.
+            return array_slice($path, $onPath[$at]);
+        }
+
+        $onPath[$at] = count($path);
+        $path[]      = $at;
+
+        foreach ($out[$at] ?? [] as $next) {
+            if (!isset($stuck[$next])) {
+                continue;   // already positioned, so it cannot be in a cycle
+            }
+
+            $found = self::walkForCycle($next, $stuck, $out, $onPath, $path);
+            if ($found !== []) {
+                return $found;
+            }
+        }
+
+        return [];
     }
 }
