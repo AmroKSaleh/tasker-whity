@@ -673,7 +673,7 @@ git commit -m "feat: resolve flows by the F-prefixed short id, OU-scoped"
 - Consumes: `FlowStepSorter::sort()` (Task 3), `ShortIdAllocator::withRetry(..., 'tasker_flows')` (Task 1), `IdentifierResolver::resolveFlow()` (Task 4).
 - Produces:
   ```php
-  public function name(int $tenantId, ?int $callerOuId, int $projectId, string $name, array $taskIds, ?string $context, bool $stepListOpen, ?int $createdBy): Response
+  public function name(int $tenantId, ?int $callerOuId, int $projectId, string $name, array $taskIds, ?array $context, bool $stepListOpen, ?int $createdBy): Response
   public function list(int $tenantId, ?int $callerOuId, ?int $projectId): Response
   public function delete(int $tenantId, ?int $callerOuId, int $flowId): Response
   private function flowVisible(int $tenantId, ?int $callerOuId, int $flowId): ?array
