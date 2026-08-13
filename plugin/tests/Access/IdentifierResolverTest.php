@@ -92,6 +92,20 @@ final class IdentifierResolverTest extends TestCase
         self::assertSame('slug', IdentifierResolver::classify('backlog'));
     }
 
+    /**
+     * D5a Task 4: flows are addressed by an F-prefixed short id (TDE-F1),
+     * distinct from a task's short id (TDE-31). classify() is pure, so this
+     * form's cases live here on the SQLite tier; resolveFlow()'s OU-scoped
+     * behaviour is covered on the Postgres tier in TenantIsolationOuTest.
+     */
+    public function testClassifyRecognisesTheFlowShortIdForm(): void
+    {
+        self::assertSame('flow_short_id', IdentifierResolver::classify('TDE-F1'));
+        self::assertSame('flow_short_id', IdentifierResolver::classify('tde-f12'));
+        self::assertSame('short_id', IdentifierResolver::classify('TDE-1'), 'a task short id must not become a flow one');
+        self::assertSame('malformed_short_id', IdentifierResolver::classify('TDE-F'), 'F with no number is malformed, not a slug');
+    }
+
     public function testRejectsAMalformedShortIdRatherThanTreatingItAsASlug(): void
     {
         // TDE-abc looks like a short id and is not one. Silently falling

@@ -15,12 +15,19 @@ use PDO;
  * this slice, and this class is where it happens.
  *
  * PRECEDENCE is fixed and evaluated in order; the first match wins:
- *   1. integer          ^\d+$                -> id
- *   2. uuid             RFC 4122 shape       -> public_id
- *   3. short id         ^[A-Z]{2,5}-\d+$     -> project prefix + task short_id
- *   4. prefix           ^[A-Z]{2,5}$         -> project prefix
- *   5. slug             anything else        -> slug
- *   6. empty            null/''              -> caller's default project
+ *   1. integer          ^\d+$                     -> id
+ *   2. uuid             RFC 4122 shape            -> public_id
+ *   3. flow short id    ^[A-Za-z]{2,5}-F\d+$ (ci) -> project prefix + flow short_id
+ *   4. short id         ^[A-Z]{2,5}-\d+$          -> project prefix + task short_id
+ *   5. prefix           ^[A-Z]{2,5}$              -> project prefix
+ *   6. slug             anything else             -> slug
+ *   7. empty            null/''                   -> caller's default project
+ *
+ * Form 3 (flow short id, D5a Task 4) MUST be tested before form 4 (task short
+ * id): TDE-F1 is not all-digits after the dash, so it would never match form
+ * 4 directly, but without its own check it would be swallowed by the generic
+ * "looks like a short id but isn't" malformed catch-all below form 4, rather
+ * than being recognised as a flow.
  *
  * Ambiguity is ACCEPTED, not prevented: a project whose slug is "TDE" while
  * another's prefix is "TDE" resolves to the prefix match, silently. This is a
@@ -44,12 +51,18 @@ final class IdentifierResolver
     private const SHORT_ID_PATTERN = '/^[A-Z]{2,5}-\d+$/';
     private const PREFIX_PATTERN   = '/^[A-Z]{2,5}$/';
 
+    // Flows: PREFIX-F<n>, e.g. TDE-F1 or tde-f12 — case-insensitive, unlike
+    // SHORT_ID_PATTERN above, so both classify() and resolveFlow() accept
+    // either case for the letters (the "F" literal included).
+    private const FLOW_SHORT_ID_PATTERN  = '/^[A-Za-z]{2,5}-F\d+$/i';
+    private const MALFORMED_FLOW_PATTERN = '/^[A-Za-z]{2,5}-F$/i';
+
     /**
      * Which form is this? Pure — no database, no scoping. Callers use it to
      * decide which lookup to run, and to distinguish a malformed short id
      * (400) from a genuine miss (404).
      *
-     * @return 'empty'|'integer'|'uuid'|'short_id'|'prefix'|'slug'|'malformed_short_id'
+     * @return 'empty'|'integer'|'uuid'|'flow_short_id'|'short_id'|'prefix'|'slug'|'malformed_short_id'
      */
     public static function classify(string|int|null $raw): string
     {
@@ -68,6 +81,21 @@ final class IdentifierResolver
 
         if (preg_match(self::UUID_PATTERN, $value) === 1) {
             return 'uuid';
+        }
+
+        // A flow: PREFIX-F<n>, e.g. TDE-F1. MUST be tested before the task
+        // short-id pattern (and its malformed catch-all) below, which would
+        // otherwise swallow "TDE-F1" as a malformed task short id instead of
+        // recognising it as its own form.
+        if (preg_match(self::FLOW_SHORT_ID_PATTERN, $value) === 1) {
+            return 'flow_short_id';
+        }
+
+        // PREFIX-F with no digits is a malformed flow id, NOT a slug. Without
+        // this, "TDE-F" resolves as a slug lookup that silently finds nothing
+        // instead of telling the caller their identifier is wrong.
+        if (preg_match(self::MALFORMED_FLOW_PATTERN, $value) === 1) {
+            return 'malformed_short_id';
         }
 
         if (preg_match(self::SHORT_ID_PATTERN, $value) === 1) {
@@ -246,6 +274,129 @@ final class IdentifierResolver
              LIMIT 1"
         );
         $stmt->bindValue(':value', $value);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $id = $stmt->fetchColumn();
+
+        return $id === false ? null : (int) $id;
+    }
+
+    /**
+     * Resolve a flow identifier. Mirrors resolveTask()'s structure exactly:
+     * a flow short id (TDE-F1) resolves through its project's prefix, so it
+     * is unambiguous across projects, and every form is OU-scoped by joining
+     * through to the owning project — flows carry no ou_id of their own.
+     */
+    public static function resolveFlow(
+        PDO $db,
+        int $tenantId,
+        ?int $callerOuId,
+        string|int|null $raw
+    ): ?int {
+        $form  = self::classify($raw);
+        $value = trim((string) ($raw ?? ''));
+
+        if ($form === 'empty' || $form === 'malformed_short_id') {
+            return null;
+        }
+
+        if ($form === 'flow_short_id') {
+            // Split on the first "-" (not the literal "-F", which would miss
+            // a lowercase match like "tde-f12"): the remainder always starts
+            // with the "F"/"f" marker, so stripping its first character
+            // leaves the digits. Mirrors resolveTask()'s own
+            // explode('-', $value, 2) for the task short-id form.
+            [$prefix, $withMarker] = explode('-', $value, 2);
+
+            return self::flowByPrefixAndShortId(
+                $db,
+                $tenantId,
+                $callerOuId,
+                strtoupper($prefix),
+                (int) substr($withMarker, 1)
+            );
+        }
+
+        // Flows have no slug and no bare prefix, so anything else is an id or UUID.
+        if ($form === 'prefix' || $form === 'slug') {
+            return null;
+        }
+
+        $column = $form === 'uuid' ? 'public_id' : 'id';
+
+        return self::flowByColumn($db, $tenantId, $callerOuId, $column, $value);
+    }
+
+    /**
+     * Flow lookup by id/public_id, OU-scoped by joining through to the
+     * owning project — the same shape as taskByColumn(), one static template
+     * shared by both the 'integer' and 'uuid' forms via $column, which is
+     * never caller-supplied.
+     */
+    private static function flowByColumn(
+        PDO $db,
+        int $tenantId,
+        ?int $callerOuId,
+        string $column,
+        string $value
+    ): ?int {
+        $scope    = OuScopeResolver::scopeParams($db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $db->prepare(
+            "SELECT f.id FROM tasker_flows f
+             JOIN tasker_projects p ON p.id = f.project_id
+             WHERE f.{$column} = :value
+               AND f.tenant_id = :tenant_id
+               AND p.tenant_id = :tenant_id_p
+               AND {$ouClause}
+             LIMIT 1"
+        );
+        $stmt->bindValue(':value', $value);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $id = $stmt->fetchColumn();
+
+        return $id === false ? null : (int) $id;
+    }
+
+    /**
+     * Flow lookup by its F-prefixed short id (TDE-F1): one static template
+     * joining straight to tasker_projects on prefix, rather than resolving
+     * the project first and querying tasker_flows separately — $prefix and
+     * $shortId are both derived internally in resolveFlow(), never
+     * caller-supplied text reaching SQL.
+     */
+    private static function flowByPrefixAndShortId(
+        PDO $db,
+        int $tenantId,
+        ?int $callerOuId,
+        string $prefix,
+        int $shortId
+    ): ?int {
+        $scope    = OuScopeResolver::scopeParams($db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $db->prepare(
+            "SELECT f.id FROM tasker_flows f
+             JOIN tasker_projects p ON p.id = f.project_id
+             WHERE UPPER(p.prefix) = :prefix
+               AND f.short_id = :short_id
+               AND f.tenant_id = :tenant_id
+               AND p.tenant_id = :tenant_id_p
+               AND {$ouClause}
+             LIMIT 1"
+        );
+        $stmt->bindValue(':prefix', $prefix, PDO::PARAM_STR);
+        $stmt->bindValue(':short_id', $shortId, PDO::PARAM_INT);
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
         $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
         $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);

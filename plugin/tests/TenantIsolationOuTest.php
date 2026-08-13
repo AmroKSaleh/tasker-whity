@@ -421,13 +421,30 @@ final class TenantIsolationOuTest extends TestCase
         $stmt->execute();
     }
 
-    private function makeProjectDirect(int $tenantId, ?int $ouId, string $name): int
+    /**
+     * D5a Task 4 added the trailing, nullable, defaulted $prefix param (the
+     * brief's own resolveFlow() test calls this with a project prefix
+     * supplied inline) -- every existing 3-arg call site keeps working
+     * unchanged, matching this file's own established convention for
+     * extending a make*Direct() helper (see $groupId on makeTaskDirect()
+     * above). Before this, every other test set a project's prefix via a
+     * separate raw `UPDATE tasker_projects SET prefix = ...` after the
+     * insert; that pattern still works and is unchanged for callers that
+     * don't need the prefix at creation time.
+     */
+    private function makeProjectDirect(int $tenantId, ?int $ouId, string $name, ?string $prefix = null): int
     {
         $stmt = $this->pdo->prepare(
-            "INSERT INTO tasker_projects (public_id, tenant_id, ou_id, name, slug, created_by, created_at)
-             VALUES (gen_random_uuid(), :tenant_id, :ou_id, :name, :slug, 1, CURRENT_TIMESTAMP) RETURNING id"
+            "INSERT INTO tasker_projects (public_id, tenant_id, ou_id, name, slug, prefix, created_by, created_at)
+             VALUES (gen_random_uuid(), :tenant_id, :ou_id, :name, :slug, :prefix, 1, CURRENT_TIMESTAMP) RETURNING id"
         );
-        $stmt->execute([':tenant_id' => $tenantId, ':ou_id' => $ouId, ':name' => $name, ':slug' => strtolower($name)]);
+        $stmt->execute([
+            ':tenant_id' => $tenantId,
+            ':ou_id' => $ouId,
+            ':name' => $name,
+            ':slug' => strtolower($name),
+            ':prefix' => $prefix,
+        ]);
 
         return (int) $stmt->fetchColumn();
     }
@@ -595,6 +612,36 @@ final class TenantIsolationOuTest extends TestCase
             'INSERT INTO tags (id, tenant_id, group_id, name) VALUES (:id, :tenant_id, 1, :name)'
         );
         $stmt->execute([':id' => $id, ':tenant_id' => $tenantId, ':name' => 'tag-' . $id]);
+    }
+
+    /**
+     * D5a Task 4: a fixture flow row for IdentifierResolver::resolveFlow()'s
+     * OU-scoped tests. Flows carry no ou_id of their own -- only their
+     * project does -- so this helper takes a $projectId, matching every
+     * other structural helper here (makeSectionDirect(), makeGroupDirect())
+     * rather than an $ouId directly. public_id is generated the same way
+     * every other direct-insert helper in this file generates it --
+     * gen_random_uuid() in the INSERT itself, a real PostgreSQL connection
+     * feature this Postgres-only tier fixture already relies on throughout
+     * (makeProjectDirect(), makeSectionDirect(), makeTaskDirect(), etc.) --
+     * not PHP-side generation, which is this file's SQLite-tier sibling's
+     * own convention (IdentifierResolverTest::uuid()) for a database that has
+     * no such function.
+     */
+    private function makeFlowDirect(int $tenantId, int $projectId, string $name, int $shortId): int
+    {
+        $stmt = $this->pdo->prepare(
+            "INSERT INTO tasker_flows (public_id, tenant_id, project_id, name, short_id, created_by, created_at, updated_at)
+             VALUES (gen_random_uuid(), :tenant_id, :project_id, :name, :short_id, 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) RETURNING id"
+        );
+        $stmt->execute([
+            ':tenant_id' => $tenantId,
+            ':project_id' => $projectId,
+            ':name' => $name,
+            ':short_id' => $shortId,
+        ]);
+
+        return (int) $stmt->fetchColumn();
     }
 
     public function testUserInParentOuSeesProjectInChildOu(): void
@@ -3124,6 +3171,28 @@ final class TenantIsolationOuTest extends TestCase
 
         $left = (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn();
         self::assertSame(0, $left, 'deleting a producer must cascade its edges away');
+    }
+
+    // ==================== IdentifierResolver::resolveFlow() (D5a Task 4) ====================
+
+    /**
+     * Flows carry no ou_id of their own -- they inherit it through their
+     * project, exactly as sections/groups/tasks do -- so this proves the
+     * OU boundary travels correctly across the project join. Pairs the
+     * sibling-OU 404 with a same-OU positive control: a 404-only test could
+     * pass because the fixture was never visible at all.
+     */
+    public function testResolveFlowRefusesASiblingOusFlowButFindsItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $mine    = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 2, 'Mine', 'MIN'), 'Mine flow', 1);
+        $sibling = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 3, 'Theirs', 'THR'), 'Their flow', 1);
+
+        self::assertSame($mine, IdentifierResolver::resolveFlow($this->pdo, 7, 2, 'MIN-F1'));
+        self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, 2, 'THR-F1'));
     }
 
     // ==================== MilestonesApiHandler::create() (whole-branch review finding C1) ====================
