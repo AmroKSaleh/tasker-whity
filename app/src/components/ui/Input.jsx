@@ -1,4 +1,4 @@
-import { useState, useId } from 'react'
+import { useId } from 'react'
 
 export default function Input({
   label,
@@ -6,63 +6,38 @@ export default function Input({
   onChange,
   type = 'text',
   error,
-  helperText,
   className = '',
-  inputRef,
   ...props
 }) {
-  const [focused, setFocused] = useState(false)
   const id = useId()
-  const hasValue = value !== undefined ? value !== '' : false
-  const floated = focused || hasValue
 
   return (
-    <div className={`relative ${className}`}>
-      <div
+    <div className={`flex flex-col gap-1 ${className}`}>
+      {label && (
+        <label htmlFor={id} className="text-[11px] font-semibold text-mute uppercase tracking-wider">
+          {label}
+        </label>
+      )}
+      <input
+        id={id}
+        type={type}
+        value={value}
+        onChange={onChange}
         className={`
-          relative flex items-end
-          bg-surface-container-high rounded-t-sm
-          border-b-2 transition-colors duration-200
-          ${focused ? 'border-primary' : error ? 'border-error' : 'border-on-surface-variant'}
+          w-full bg-surf-2 rounded-md px-3 py-2.5
+          text-[13px] text-ink font-medium
+          border outline-none
+          transition-colors duration-150
+          placeholder:text-mute-2
+          ${error
+            ? 'border-red-400 focus:border-red-500'
+            : 'border-line focus:border-ink'
+          }
         `}
-      >
-        {label && (
-          <label
-            htmlFor={id}
-            className={`
-              absolute left-4 pointer-events-none select-none
-              transition-all duration-200 origin-top-left
-              ${floated
-                ? 'top-2 text-label-medium text-primary scale-75 -translate-x-[6px]'
-                : 'top-1/2 -translate-y-1/2 text-body-large text-on-surface-variant'
-              }
-              ${error ? '!text-error' : ''}
-            `}
-          >
-            {label}
-          </label>
-        )}
-        <input
-          id={id}
-          ref={inputRef}
-          type={type}
-          value={value}
-          onChange={onChange}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          className={`
-            w-full bg-transparent outline-none
-            px-4 pb-2 text-body-large text-on-surface
-            ${label ? 'pt-6' : 'pt-2'}
-            placeholder:text-on-surface-variant
-          `}
-          {...props}
-        />
-      </div>
-      {(error || helperText) && (
-        <p className={`mt-1 px-4 text-body-small ${error ? 'text-error' : 'text-on-surface-variant'}`}>
-          {error || helperText}
-        </p>
+        {...props}
+      />
+      {error && (
+        <p className="text-[11px] text-red-500">{error}</p>
       )}
     </div>
   )

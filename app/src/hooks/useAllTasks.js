@@ -1,44 +1,74 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { supabase } from '../lib/supabase'
 import { useTaskStore } from '../store/useTaskStore'
 
+const TASK_FIELDS = 'id, project_id, section_id, text, status, priority, due_date, sort_order, pinned, skip_count, completed_at, created_at, focus_date, short_id, task_statuses(status_id, status:project_statuses(id, name, color, base_status))'
+const PROJECT_FIELDS = 'id, name, slug, prefix, context, environment_id'
+
+function readLocal(key) {
+  try { return JSON.parse(localStorage.getItem(key) || 'null') } catch { return null }
+}
+
 export function useAllTasks() {
-  const [tasks, setTasks] = useState([])
-  const [projects, setProjects] = useState([])
-  const { updateTask: syncStore } = useTaskStore()
+  const [tasks, setTasks] = useState(() => readLocal('tasker-today-tasks') || [])
+  const [projects, setProjects] = useState(() => readLocal('tasker-today-projects') || [])
+  const [loading, setLoading] = useState(() => (readLocal('tasker-today-tasks') || []).length === 0)
+  const setStoreTasks  = useTaskStore(s => s.setTasks)
+  const addStoreTask   = useTaskStore(s => s.addTask)
+  const removeStoreTask = useTaskStore(s => s.removeTask)
+  const syncStore      = useTaskStore(s => s.updateTask)
 
   useEffect(() => {
     async function fetchAll() {
       const [{ data: projs }, { data: tsks }] = await Promise.all([
-        supabase.from('projects').select('*').order('position'),
-        supabase.from('tasks').select('*').order('position'),
+        supabase.from('projects').select(PROJECT_FIELDS).order('created_at'),
+        supabase.from('tasks').select(TASK_FIELDS).order('sort_order'),
       ])
-      if (projs) setProjects(projs)
-      if (tsks) setTasks(tsks)
+      if (projs) {
+        setProjects(projs)
+        try { localStorage.setItem('tasker-today-projects', JSON.stringify(projs)) } catch {}
+      }
+      if (tsks) {
+        setTasks(tsks)
+        setStoreTasks(tsks)
+        try { localStorage.setItem('tasker-today-tasks', JSON.stringify(tsks)) } catch {}
+      }
+      setLoading(false)
     }
 
     fetchAll()
 
     const sub = supabase
       .channel('focus-all-tasks')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'tasks' }, fetchAll)
+      .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'tasks' }, ({ new: t }) => {
+        setTasks(prev => [...prev, t])
+        addStoreTask(t)
+      })
+      .on('postgres_changes', { event: 'UPDATE', schema: 'public', table: 'tasks' }, ({ new: t }) => {
+        setTasks(prev => prev.map(x => x.id === t.id ? { ...x, ...t } : x))
+        syncStore(t.id, t)
+      })
+      .on('postgres_changes', { event: 'DELETE', schema: 'public', table: 'tasks' }, ({ old: t }) => {
+        setTasks(prev => prev.filter(x => x.id !== t.id))
+        removeStoreTask(t.id)
+      })
       .subscribe()
 
     return () => sub.unsubscribe()
   }, [])
 
-  const enriched = tasks.map(t => ({
+  const projectMap = useMemo(() => Object.fromEntries(projects.map(p => [p.id, p])), [projects])
+
+  const enriched = useMemo(() => tasks.map(t => ({
     ...t,
-    project: projects.find(p => p.id === t.project_id),
-  }))
+    project: projectMap[t.project_id],
+  })), [tasks, projectMap])
 
   async function toggleDone(task) {
-    const nowDone = !task.done
+    const nowDone = task.status !== 'done'
     const updates = {
-      done: nowDone,
-      in_progress: nowDone ? false : task.in_progress,
+      status: nowDone ? 'done' : 'pending',
       completed_at: nowDone ? new Date().toISOString() : null,
-      updated_at: new Date().toISOString(),
     }
     setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...updates } : t))
     syncStore(task.id, updates)
@@ -46,12 +76,34 @@ export function useAllTasks() {
   }
 
   async function toggleInProgress(task) {
-    const nowIP = !task.in_progress
-    const updates = { in_progress: nowIP, updated_at: new Date().toISOString() }
+    const nowIP = task.status !== 'in_progress'
+    const updates = { status: nowIP ? 'in_progress' : 'pending' }
     setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...updates } : t))
     syncStore(task.id, updates)
     await supabase.from('tasks').update(updates).eq('id', task.id)
   }
 
-  return { tasks: enriched, toggleDone, toggleInProgress }
+  async function setFocusDate(task, date) {
+    const updates = { focus_date: date }
+    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...updates } : t))
+    syncStore(task.id, updates)
+    await supabase.from('tasks').update(updates).eq('id', task.id)
+  }
+
+  // TDE-886: writes pinned_at/pin_snoozed like the other two paths, which it previously skipped —
+  // so a task marked critical from Today had a null pinned_at while the same action on the board
+  // set one.
+  async function setPinned(task) {
+    const nowPinned = !task.pinned
+    const updates = {
+      pinned: nowPinned,
+      pinned_at: nowPinned ? new Date().toISOString() : null,
+      pin_snoozed: false,
+    }
+    setTasks(prev => prev.map(t => t.id === task.id ? { ...t, ...updates } : t))
+    syncStore(task.id, updates)
+    await supabase.from('tasks').update(updates).eq('id', task.id)
+  }
+
+  return { tasks: enriched, projects, toggleDone, toggleInProgress, setFocusDate, setPinned, loading }
 }

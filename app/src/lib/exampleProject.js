@@ -139,116 +139,150 @@ export const EXAMPLE_PROJECT = {
     },
     {
       title: 'Marketing & Outreach',
-      groups: [],
-      tasks: [
+      groups: [
         {
-          text: 'Write launch announcement copy',
-          priority: 'high',
-          focus: {
-            reason: "Your announcement is the first impression for everyone who hasn't heard of you yet. Weak copy means a quiet launch — this deserves real attention.",
-            steps: [
-              { summary: 'Write for one person, not everyone', detail: 'Picture your ideal customer reading this. Write to them specifically, not to a generic audience.' },
-              { summary: 'Lead with the problem, not the product', detail: 'Start with the pain your customer feels, then introduce your solution as the answer. Never lead with features.' },
-              { summary: 'Write three versions of the headline', detail: 'Try a direct version, a curiosity version, and a bold claim version. Pick the one that makes you feel something.' },
-              { summary: 'Add social proof if you have it', detail: 'Even one beta user quote adds more credibility than five feature bullets. If you have it, use it.' },
-              { summary: 'End with one clear action', detail: 'One CTA only. Not a newsletter signup AND a demo AND a follow. Pick the most important next step and ask for only that.' },
-            ],
-          },
+          name: 'Content',
+          tasks: [
+            {
+              text: 'Write launch announcement copy',
+              priority: 'high',
+              focus: {
+                reason: "Your announcement is the first impression for everyone who hasn't heard of you yet. Weak copy means a quiet launch — this deserves real attention.",
+                steps: [
+                  { summary: 'Write for one person, not everyone', detail: 'Picture your ideal customer reading this. Write to them specifically, not to a generic audience.' },
+                  { summary: 'Lead with the problem, not the product', detail: 'Start with the pain your customer feels, then introduce your solution as the answer. Never lead with features.' },
+                  { summary: 'Write three versions of the headline', detail: 'Try a direct version, a curiosity version, and a bold claim version. Pick the one that makes you feel something.' },
+                  { summary: 'Add social proof if you have it', detail: 'Even one beta user quote adds more credibility than five feature bullets. If you have it, use it.' },
+                  { summary: 'End with one clear action', detail: 'One CTA only. Not a newsletter signup AND a demo AND a follow. Pick the most important next step and ask for only that.' },
+                ],
+              },
+            },
+            {
+              text: 'Build email waitlist landing page',
+              priority: 'high',
+              focus: {
+                reason: "Every person you tell about this product needs somewhere to go. A live page with a signup form means no interested person slips through the cracks.",
+                steps: [
+                  { summary: 'Write the headline first', detail: 'The headline is 80% of the page. It should name the problem and hint at the solution in one line.' },
+                  { summary: 'Add a subheadline with the payoff', detail: 'One sentence on what the user gets and why it is different. No jargon.' },
+                  { summary: 'Keep the page to one screen', detail: 'Above the fold should have: headline, subheadline, email input, and a submit button. Nothing else is required.' },
+                  { summary: 'Set up email capture', detail: 'Use Mailchimp, ConvertKit, or a simple form. Make sure submitted emails actually land somewhere you can access.' },
+                  { summary: 'Publish and test the flow', detail: 'Submit your own email to test the full journey. Check the confirmation message and that your email arrived in the tool.' },
+                ],
+              },
+            },
+            { text: 'Schedule social media posts', priority: 'medium' },
+          ],
         },
         {
-          text: 'Build email waitlist landing page',
-          priority: 'high',
-          focus: {
-            reason: "Every person you tell about this product needs somewhere to go. A live page with a signup form means no interested person slips through the cracks.",
-            steps: [
-              { summary: 'Write the headline first', detail: 'The headline is 80% of the page. It should name the problem and hint at the solution in one line.' },
-              { summary: 'Add a subheadline with the payoff', detail: 'One sentence on what the user gets and why it is different. No jargon.' },
-              { summary: 'Keep the page to one screen', detail: 'Above the fold should have: headline, subheadline, email input, and a submit button. Nothing else is required.' },
-              { summary: 'Set up email capture', detail: 'Use Mailchimp, ConvertKit, or a simple form. Make sure submitted emails actually land somewhere you can access.' },
-              { summary: 'Publish and test the flow', detail: 'Submit your own email to test the full journey. Check the confirmation message and that your email arrived in the tool.' },
-            ],
-          },
+          name: 'Outreach',
+          tasks: [
+            {
+              text: 'Reach out to 10 potential early adopters',
+              priority: 'rush',
+              focus: {
+                reason: "Early adopters are your launch amplifiers. Getting 10 committed before you ship means day-one momentum instead of silence.",
+                steps: [
+                  { summary: 'Define your ideal early adopter', detail: 'Write a one-sentence profile: who feels the pain most acutely and is willing to try something new? Use your interview findings.' },
+                  { summary: 'Build a list of 20 candidates', detail: 'You need 20 to get 10 to say yes. Search LinkedIn, communities, Twitter, and your existing network.' },
+                  { summary: 'Write a personal outreach message', detail: 'Keep it to 3 sentences: the problem you are solving, that you are launching soon, and a specific ask. No pitch decks.' },
+                  { summary: 'Send messages in batches', detail: 'Send 5–7 per day. Track responses in a simple spreadsheet — yes, no, and follow-up needed.' },
+                  { summary: 'Follow up once', detail: 'If no reply after 5 days, send one follow-up. If still no reply, move on to the next name on your list.' },
+                ],
+              },
+            },
+            { text: 'Prepare press kit', priority: 'low' },
+          ],
         },
-        { text: 'Schedule social media posts', priority: 'medium' },
-        {
-          text: 'Reach out to 10 potential early adopters',
-          priority: 'rush',
-          focus: {
-            reason: "Early adopters are your launch amplifiers. Getting 10 committed before you ship means day-one momentum instead of silence.",
-            steps: [
-              { summary: 'Define your ideal early adopter', detail: 'Write a one-sentence profile: who feels the pain most acutely and is willing to try something new? Use your interview findings.' },
-              { summary: 'Build a list of 20 candidates', detail: 'You need 20 to get 10 to say yes. Search LinkedIn, communities, Twitter, and your existing network.' },
-              { summary: 'Write a personal outreach message', detail: 'Keep it to 3 sentences: the problem you are solving, that you are launching soon, and a specific ask. No pitch decks.' },
-              { summary: 'Send messages in batches', detail: 'Send 5–7 per day. Track responses in a simple spreadsheet — yes, no, and follow-up needed.' },
-              { summary: 'Follow up once', detail: 'If no reply after 5 days, send one follow-up. If still no reply, move on to the next name on your list.' },
-            ],
-          },
-        },
-        { text: 'Prepare press kit', priority: 'low' },
       ],
+      tasks: [],
     },
     {
       title: 'Launch Day',
-      groups: [],
-      tasks: [
+      groups: [
         {
-          text: 'Publish product page',
-          priority: 'rush',
-          focus: {
-            reason: "Everything you have built until now points here. The product page is where interest becomes action — it has to be live before anything else.",
-            steps: [
-              { summary: 'Do a final copy review', detail: 'Read every word on the page out loud. Fix anything that sounds like marketing-speak. Clear beats clever.' },
-              { summary: 'Test all links and CTAs', detail: 'Click every button, form, and link. Make sure the primary call-to-action works and routes correctly.' },
-              { summary: 'Check on mobile', detail: 'Open the page on your phone. Most visitors will see it on mobile first — font sizes, buttons, and images need to work.' },
-              { summary: 'Set the page to live', detail: 'Remove any coming-soon gate or draft status. Double-check the URL is correct and accessible without login.' },
-              { summary: 'Take a screenshot for the record', detail: "Capture the live page at launch. You'll want to look back at this — and it's useful for social posts." },
-            ],
-          },
+          name: 'Pre-launch',
+          tasks: [
+            {
+              text: 'Publish product page',
+              priority: 'rush',
+              focus: {
+                reason: "Everything you have built until now points here. The product page is where interest becomes action — it has to be live before anything else.",
+                steps: [
+                  { summary: 'Do a final copy review', detail: 'Read every word on the page out loud. Fix anything that sounds like marketing-speak. Clear beats clever.' },
+                  { summary: 'Test all links and CTAs', detail: 'Click every button, form, and link. Make sure the primary call-to-action works and routes correctly.' },
+                  { summary: 'Check on mobile', detail: 'Open the page on your phone. Most visitors will see it on mobile first — font sizes, buttons, and images need to work.' },
+                  { summary: 'Set the page to live', detail: 'Remove any coming-soon gate or draft status. Double-check the URL is correct and accessible without login.' },
+                  { summary: 'Take a screenshot for the record', detail: "Capture the live page at launch. You'll want to look back at this — and it's useful for social posts." },
+                ],
+              },
+            },
+          ],
         },
         {
-          text: 'Send launch email to waitlist',
-          priority: 'rush',
-          focus: {
-            reason: "Your waitlist signed up because they want this. This email is the payoff of every person you asked to wait — don't let it sit in drafts.",
-            steps: [
-              { summary: 'Review the email one last time', detail: 'Check subject line, preview text, and body. The subject line is the most important word you will write today.' },
-              { summary: 'Send a test to yourself', detail: 'Send to your own email and open it on mobile. Look for broken formatting, clipped text, or missing links.' },
-              { summary: 'Verify the product page is live', detail: 'Do not send until the page works. Click the main link in the email yourself before hitting send.' },
-              { summary: 'Send to your full list', detail: "Hit send. Don't overthink it — a slightly imperfect email that goes out beats a perfect one that doesn't." },
-              { summary: 'Monitor open rates and clicks', detail: 'Check your email platform dashboard after 30 minutes. Follow up personally with the most engaged people.' },
-            ],
-          },
+          name: 'Go Live',
+          tasks: [
+            {
+              text: 'Send launch email to waitlist',
+              priority: 'rush',
+              focus: {
+                reason: "Your waitlist signed up because they want this. This email is the payoff of every person you asked to wait — don't let it sit in drafts.",
+                steps: [
+                  { summary: 'Review the email one last time', detail: 'Check subject line, preview text, and body. The subject line is the most important word you will write today.' },
+                  { summary: 'Send a test to yourself', detail: 'Send to your own email and open it on mobile. Look for broken formatting, clipped text, or missing links.' },
+                  { summary: 'Verify the product page is live', detail: 'Do not send until the page works. Click the main link in the email yourself before hitting send.' },
+                  { summary: 'Send to your full list', detail: "Hit send. Don't overthink it — a slightly imperfect email that goes out beats a perfect one that doesn't." },
+                  { summary: 'Monitor open rates and clicks', detail: 'Check your email platform dashboard after 30 minutes. Follow up personally with the most engaged people.' },
+                ],
+              },
+            },
+            {
+              text: 'Post on relevant communities',
+              priority: 'high',
+              focus: {
+                reason: "Communities are where your early adopters are already gathered. A well-timed, genuine post here can drive more day-one signups than any ad spend.",
+                steps: [
+                  { summary: 'List your target communities', detail: 'Identify 5–8 communities where your target users spend time: Reddit, Hacker News, Slack groups, Discord servers, or niche forums.' },
+                  { summary: "Read each community's rules", detail: 'Nothing kills launch momentum like a removed post. Check rules before posting — especially around self-promotion.' },
+                  { summary: 'Write a community-specific post', detail: 'Do not paste the same text everywhere. Each community has a different tone. Show you are a real member, not just a promoter.' },
+                  { summary: 'Post at peak hours', detail: "Most communities are most active on weekday mornings. Check each platform's analytics if available." },
+                  { summary: 'Respond to every comment', detail: 'Engagement drives visibility in most platforms. Reply to every comment within the first hour — it signals the post is active.' },
+                ],
+              },
+            },
+          ],
         },
         {
-          text: 'Post on relevant communities',
-          priority: 'high',
-          focus: {
-            reason: "Communities are where your early adopters are already gathered. A well-timed, genuine post here can drive more day-one signups than any ad spend.",
-            steps: [
-              { summary: 'List your target communities', detail: 'Identify 5–8 communities where your target users spend time: Reddit, Hacker News, Slack groups, Discord servers, or niche forums.' },
-              { summary: "Read each community's rules", detail: 'Nothing kills launch momentum like a removed post. Check rules before posting — especially around self-promotion.' },
-              { summary: 'Write a community-specific post', detail: 'Do not paste the same text everywhere. Each community has a different tone. Show you are a real member, not just a promoter.' },
-              { summary: 'Post at peak hours', detail: 'Most communities are most active on weekday mornings. Check each platform\'s analytics if available.' },
-              { summary: 'Respond to every comment', detail: 'Engagement drives visibility in most platforms. Reply to every comment within the first hour — it signals the post is active.' },
-            ],
-          },
+          name: 'Post-launch',
+          tasks: [
+            {
+              text: 'Monitor feedback and bug reports',
+              priority: 'high',
+              focus: {
+                reason: "The first hours after launch are the most information-dense of your entire project. What users do and say now shapes every next decision.",
+                steps: [
+                  { summary: 'Set up your monitoring channels', detail: 'Know where feedback will come from: email, community posts, in-app forms, social mentions. Have all tabs open before launch.' },
+                  { summary: 'Create a feedback log', detail: 'Use a spreadsheet or doc to capture every piece of feedback in real time. Do not rely on memory or email search later.' },
+                  { summary: 'Tag issues by type', detail: 'Label each item: bug, UX confusion, feature request, or positive feedback. Patterns will emerge fast.' },
+                  { summary: 'Fix critical bugs immediately', detail: 'If something is blocking users from completing the core action, drop everything and fix it. Communicate the fix publicly.' },
+                  { summary: 'Write a launch-day summary', detail: 'At the end of day one, write a brief summary of what you heard. This will directly inform your next sprint.' },
+                ],
+              },
+            },
+            { text: 'Write post-launch retrospective', priority: 'low' },
+          ],
         },
-        {
-          text: 'Monitor feedback and bug reports',
-          priority: 'high',
-          focus: {
-            reason: "The first hours after launch are the most information-dense of your entire project. What users do and say now shapes every next decision.",
-            steps: [
-              { summary: 'Set up your monitoring channels', detail: 'Know where feedback will come from: email, community posts, in-app forms, social mentions. Have all tabs open before launch.' },
-              { summary: 'Create a feedback log', detail: 'Use a spreadsheet or doc to capture every piece of feedback in real time. Do not rely on memory or email search later.' },
-              { summary: 'Tag issues by type', detail: 'Label each item: bug, UX confusion, feature request, or positive feedback. Patterns will emerge fast.' },
-              { summary: 'Fix critical bugs immediately', detail: 'If something is blocking users from completing the core action, drop everything and fix it. Communicate the fix publicly.' },
-              { summary: 'Write a launch-day summary', detail: 'At the end of day one, write a brief summary of what you heard. This will directly inform your next sprint.' },
-            ],
-          },
-        },
-        { text: 'Write post-launch retrospective', priority: 'low' },
       ],
+      tasks: [],
     },
   ],
+  context: {
+    goal: 'Successfully launch the product to market, acquire the first 100 paying customers, and establish a repeatable go-to-market motion.',
+    why: 'The product is built and ready. Every week without a launch is revenue and learning left on the table. Getting real customers is the only way to validate whether the core assumptions hold.',
+    scope: 'In scope: positioning, landing page, launch channels, onboarding flow, and initial outreach. Out of scope: new feature development, enterprise sales, or paid advertising beyond a small test budget.',
+    risks: 'Biggest risk is spending too long polishing messaging before getting real feedback. Second risk: launching to the wrong audience and mistaking low conversion for a product problem.',
+    definition_of_done: '100 paying customers acquired and at least 3 have completed the full onboarding flow without hand-holding.',
+    constraints: '6-week timeline, two people working on this part-time, zero paid marketing budget until first 10 customers.',
+    ai_behavior: 'Be proactive — flag if tasks are drifting away from the 100-customer goal or if scope is creeping into feature work.',
+  },
 }

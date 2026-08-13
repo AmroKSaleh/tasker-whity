@@ -1,0 +1,568 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import clsx from 'clsx'
+import { Play, Pause, X, Maximize2 } from 'lucide-react'
+import { rankTasks } from '../../lib/scoring'
+import { Kicker } from '../editorial/atoms'
+import AwaitingInputStrip from './AwaitingInputStrip'
+
+// ── Masthead constellation ──
+// One mote per standalone task: grey pending, green done, orange in flight
+// (drifts faster, breathes), indigo escalated (waiting on the human).
+// Data-true ambient presence — not decoration. Honors prefers-reduced-motion.
+function hexToRgba(hex, a) {
+  const h = hex.replace('#', '').trim()
+  if (h.length !== 6) return `rgba(107,104,103,${a})`
+  return `rgba(${parseInt(h.slice(0, 2), 16)},${parseInt(h.slice(2, 4), 16)},${parseInt(h.slice(4, 6), 16)},${a})`
+}
+
+export function MastheadSky({ tasks }) {
+  const ref = useRef(null)
+  const counts = useMemo(() => {
+    let done = 0, flight = 0, you = 0, pending = 0
+    for (const t of tasks) {
+      if (t.review_verdict?.escalated) you++
+      else if (t.status === 'done') done++
+      else if (t.status === 'in_progress') flight++
+      else pending++
+    }
+    return { done, flight, you, pending }
+  }, [tasks])
+
+  useEffect(() => {
+    const canvas = ref.current
+    if (!canvas) return
+    const ctx = canvas.getContext('2d')
+    const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    const css = getComputedStyle(document.documentElement)
+    const COLORS = {
+      done:    hexToRgba(css.getPropertyValue('--color-priority-done') || '#5C7A5F', 0.34),
+      pending: hexToRgba(css.getPropertyValue('--color-mute') || '#6B6867', 0.30),
+      flight:  hexToRgba(css.getPropertyValue('--color-accent') || '#D97757', 0.85),
+      you:     hexToRgba(css.getPropertyValue('--color-review') || '#4B57D8', 0.95),
+    }
+    let w = 0, h = 0, raf = 0, t = 0
+    let mx = 0.5, my = 0.5
+    const motes = []
+
+    function size() {
+      const dpr = Math.min(window.devicePixelRatio || 1, 2)
+      w = canvas.clientWidth; h = canvas.clientHeight
+      canvas.width = w * dpr; canvas.height = h * dpr
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0)
+    }
+    function seed() {
+      motes.length = 0
+      const total = Math.min(counts.done + counts.pending + counts.flight + counts.you, 400)
+      const kinds = []
+      for (let i = 0; i < counts.you; i++) kinds.push('you')
+      for (let i = 0; i < counts.flight; i++) kinds.push('flight')
+      for (let i = 0; i < counts.pending; i++) kinds.push('pending')
+      for (let i = 0; i < counts.done; i++) kinds.push('done')
+      for (let i = 0; i < total; i++) {
+        const kind = kinds[i]
+        const fast = kind === 'flight' || kind === 'you'
+        motes.push({
+          x: Math.random() * w, y: Math.random() * h, kind,
+          r: kind === 'you' ? 2.6 : kind === 'flight' ? 2.2 : 1.2 + Math.random() * 0.7,
+          vx: (Math.random() - 0.5) * (fast ? 0.22 : 0.07),
+          vy: (Math.random() - 0.5) * (fast ? 0.16 : 0.05),
+          ph: Math.random() * Math.PI * 2,
+        })
+      }
+    }
+    function frame() {
+      t += 0.016
+      ctx.clearRect(0, 0, w, h)
+      const px = (mx - 0.5) * 7, py = (my - 0.5) * 5
+      for (const m of motes) {
+        if (!reduced) {
+          m.x += m.vx; m.y += m.vy
+          if (m.x < -4) m.x = w + 4; if (m.x > w + 4) m.x = -4
+          if (m.y < -4) m.y = h + 4; if (m.y > h + 4) m.y = -4
+        }
+        const depth = m.kind === 'done' ? 0.35 : m.kind === 'pending' ? 0.6 : 1
+        const breathe = (m.kind === 'flight' || m.kind === 'you') && !reduced
+          ? 0.65 + 0.35 * Math.sin(t * 2 + m.ph) : 1
+        ctx.globalAlpha = breathe
+        ctx.fillStyle = COLORS[m.kind]
+        ctx.beginPath()
+        ctx.arc(m.x + px * depth, m.y + py * depth, m.r, 0, Math.PI * 2)
+        ctx.fill()
+      }
+      ctx.globalAlpha = 1
+      if (!reduced) raf = requestAnimationFrame(frame)
+    }
+    function onMove(e) { mx = e.clientX / window.innerWidth; my = e.clientY / window.innerHeight }
+    function onResize() { size(); seed(); if (reduced) frame() }
+
+    size(); seed(); frame()
+    window.addEventListener('pointermove', onMove, { passive: true })
+    window.addEventListener('resize', onResize)
+    return () => {
+      cancelAnimationFrame(raf)
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('resize', onResize)
+    }
+  }, [counts.done, counts.pending, counts.flight, counts.you])
+
+  return <canvas ref={ref} aria-hidden="true" className="absolute inset-0 w-full h-full pointer-events-none" />
+}
+
+// ── Front Page pieces ──
+function agoLabel(iso) {
+  if (!iso) return ''
+  const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000)
+  if (days <= 0) return 'TODAY'
+  if (days === 1) return 'YESTERDAY'
+  if (days < 14) return `${days}D AGO`
+  return new Date(iso).toLocaleDateString('en-US', { month: 'short', day: 'numeric' }).toUpperCase()
+}
+
+const PRI_LABEL = { rush: 'RUSH', high: 'HIGH', medium: 'MED', low: 'LOW' }
+
+function NextUpList({ ranked, sectionName, onOpenTask }) {
+  return (
+    <ol className="list-none m-0 p-0">
+      {ranked.map((t, i) => (
+        <li key={t.id}>
+          <button
+            onClick={() => onOpenTask(t.id)}
+            className="group w-full text-left flex items-baseline gap-3 py-2.5 px-0.5 border-b border-line-2"
+          >
+            <span className="font-mono text-[10px] text-mute-2 min-w-[18px] tabular-nums">{String(i + 1).padStart(2, '0')}</span>
+            <span className="flex-1 text-[13px] font-medium leading-snug text-ink group-hover:text-accent-dark transition-colors">{t.text}</span>
+            <span className="flex flex-col items-end gap-0.5 shrink-0">
+              {t.priority && (
+                <span className={clsx('font-mono text-[9px] tracking-[0.1em]', t.priority === 'rush' ? 'text-priority-rush font-bold' : 'text-mute')}>{PRI_LABEL[t.priority]}</span>
+              )}
+              <span className="font-mono text-[8.5px] tracking-[0.08em] text-mute-2 uppercase">{sectionName(t.section_id)}</span>
+            </span>
+          </button>
+        </li>
+      ))}
+      {ranked.length === 0 && <li className="text-[12px] text-mute-2 py-2">Nothing ranked — the backlog is quiet.</li>}
+    </ol>
+  )
+}
+
+function InFlightCard({ task, prefix, sectionName, onOpenTask, onPause }) {
+  return (
+    <article
+      onClick={() => onOpenTask(task.id)}
+      className="border border-line-2 bg-paper rounded-xl px-4 py-3.5 cursor-pointer shadow-sm transition-all duration-150 hover:-translate-y-[1px] hover:shadow-card hover:border-line"
+    >
+      <div className="flex items-center gap-2 mb-2">
+        <span className="w-[7px] h-[7px] rounded-full bg-accent dot-live shrink-0" />
+        <span className="font-mono text-[9.5px] tracking-[0.08em] text-mute">{prefix}-{task.short_id}</span>
+        <span className="font-mono text-[9px] tracking-[0.1em] text-mute-2 uppercase ml-auto">{sectionName(task.section_id)}</span>
+      </div>
+      <p className="text-[13px] font-medium leading-snug text-ink m-0">{task.text}</p>
+      <div className="flex gap-3 mt-2.5">
+        <button
+          onClick={e => { e.stopPropagation(); onOpenTask(task.id) }}
+          className="font-mono text-[9px] tracking-[0.12em] text-mute-2 hover:text-ink transition-colors"
+        >OPEN</button>
+        <button
+          onClick={e => { e.stopPropagation(); onPause(task) }}
+          className="font-mono text-[9px] tracking-[0.12em] text-mute-2 hover:text-ink transition-colors inline-flex items-center gap-1"
+        ><Pause size={8} /> PAUSE</button>
+      </div>
+    </article>
+  )
+}
+
+function LeadCard({ task, prefix, onOpenTask }) {
+  const [showCritique, setShowCritique] = useState(false)
+  const fails = (task.review_verdict?.results || []).filter(r => r.status === 'fail')
+  const narrative = task.review_verdict?.narrative
+  const deck = narrative?.core || fails[0]?.note || task.review_verdict?.critique || 'The judge escalated this task to you after exhausting its self-revision budget.'
+  return (
+    <article className="rounded-xl border border-review/30 bg-review-soft px-6 py-5 mb-4 transition-colors hover:border-review/60">
+      <div className="font-mono text-[9.5px] tracking-[0.15em] text-review font-bold mb-2.5 uppercase">
+        ◆ Needs you — judge escalated after {task.review_verdict?.attempt ?? 3} attempts
+      </div>
+      <h2
+        onClick={() => onOpenTask(task.id)}
+        className="font-display font-semibold text-[24px] leading-[1.18] tracking-[-0.01em] text-ink m-0 mb-2 cursor-pointer"
+        style={{ textWrap: 'balance' }}
+      >{task.text}</h2>
+      <p className="text-[13px] text-ink-2 leading-relaxed m-0 mb-3.5 max-w-[58ch]">{deck}</p>
+      {showCritique && (
+        <div className="border-l-2 border-review pl-3.5 py-1 mb-3.5 flex flex-col gap-1.5">
+          <span className="font-mono text-[9px] tracking-[0.12em] text-mute-2 uppercase">Validator notes</span>
+          {narrative?.sections?.length
+            ? narrative.sections.map((s, i) => <p key={i} className="text-[12.5px] text-ink-2 leading-snug m-0">{s.point}{s.consequence ? ` — ${s.consequence}` : ''}</p>)
+            : fails.length > 0
+              ? fails.map((f, i) => <p key={i} className="text-[12.5px] text-ink-2 leading-snug m-0">FAIL — {f.note || f.rule || 'no note recorded'}</p>)
+              : <p className="text-[12.5px] text-ink-2 m-0">{task.review_verdict?.critique || 'No detailed critique recorded.'}</p>}
+          {narrative?.secondary && <p className="text-[11px] text-mute-2 leading-snug m-0 mt-1">{narrative.secondary}</p>}
+        </div>
+      )}
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => onOpenTask(task.id)}
+          className="btn btn-sm hover:brightness-110"
+          style={{ background: 'var(--color-review)', borderColor: 'var(--color-review)', color: '#fff' }}
+        >Open task</button>
+        <button onClick={() => setShowCritique(s => !s)} className="btn btn-sm">{showCritique ? 'Hide the critique' : 'Read the critique'}</button>
+        <span className="font-mono text-[9px] tracking-[0.08em] text-mute-2 ml-1">{prefix}-{task.short_id}</span>
+      </div>
+    </article>
+  )
+}
+
+// ── The Front Page ──
+// Attention-first landing for the project: lead slot (escalations, then in-flight),
+// ranked Next Up (lib/scoring), Just Shipped, and the sections digest.
+// Recomposes when the lead is empty: Next Up takes the lead column.
+// TDE-873. Two bare counts side by side read as disjoint sets — "twenty new things arrived AND
+// ten old things were cleared". In the window that exposed this, 8 of the 10 completions were
+// among the 20 added and the open count moved by +10, so the honest headline is the NET figure
+// with the overlap stated under it. The relationship has to be shown; a reader will not assume it.
+//
+// Blocked is rendered struck through on purpose. It queries a task status that does not exist,
+// so it has only ever been able to print 0 — and a confident "0 Blocked" reads as "nothing is
+// stuck", which is a claim the data cannot support. Marked rather than removed so the defect
+// stays visible until it is pointed at the real signal (flow dependencies).
+function DeltaMetrics({ delta }) {
+  if (!delta) return null
+  const enriched = delta.added_still_open !== undefined   // absent on updates published before TDE-873
+  const net = delta.net_open_change ?? 0
+
+  return (
+    <div className="bg-surf-2 border border-line-2 rounded-lg p-3">
+      <div className="text-[10px] font-bold text-mute-2 uppercase tracking-wider mb-2">Attached metrics (Delta)</div>
+      <div className="flex gap-6 flex-wrap">
+        <div className="flex flex-col">
+          <span className="text-[15px] font-semibold text-ink">{delta.tasks_completed || 0}</span>
+          <span className="text-[10px] text-mute">Completed</span>
+        </div>
+        <div className="flex flex-col">
+          <span className="text-[15px] font-semibold text-ink">{delta.tasks_added || 0}</span>
+          <span className="text-[10px] text-mute">Added</span>
+        </div>
+        <div className="flex flex-col" title="This metric is broken: it queries a task status that does not exist, so it is always 0.">
+          <span className="text-[15px] font-semibold text-mute-2 line-through decoration-2">{delta.blocked_items || 0}</span>
+          <span className="text-[10px] text-mute-2 line-through">Blocked</span>
+        </div>
+      </div>
+
+      {enriched && (
+        <div className="mt-2.5 pt-2.5 border-t border-line-2 flex flex-col gap-1">
+          {/* TDE-873: the meaning lives HERE, not in another tile. A fourth bare number repeats the
+              defect this whole change exists to fix — figures side by side with no relationship
+              stated. Say it in words, in the order a person actually asks: what overlapped, and did
+              the pile get bigger or smaller. */}
+          <p className="text-[11px] text-mute leading-relaxed">
+            {delta.added_closed_same_window > 0
+              ? <><span className="text-ink-2 font-medium">{delta.added_closed_same_window} of the {delta.tasks_completed} completed were also added this period</span> — work found and fixed here, not taken off the backlog. {delta.completed_preexisting === 0 ? 'Nothing came off the old list.' : `Only ${delta.completed_preexisting} came off the old list.`}</>
+              : <>All {delta.tasks_completed} completed came off the standing backlog.</>}
+            {' '}
+            {net > 0
+              ? <>So the open pile <span className="text-ink-2 font-medium">grew by {net}</span>.</>
+              : net < 0
+                ? <>So the open pile <span className="text-ink-2 font-medium">shrank by {Math.abs(net)}</span>.</>
+                : <>The open pile ended the same size.</>}
+          </p>
+          {delta.duplicates_merged > 0 && (
+            <p className="text-[11px] text-mute-2 leading-relaxed">
+              Includes {delta.duplicates_merged} merged duplicate{delta.duplicates_merged === 1 ? '' : 's'}, counted in both figures but representing no work.
+            </p>
+          )}
+          <p className="text-[10px] text-mute-2 leading-relaxed">
+            Blocked is struck through because it is broken, not because it is zero — it reads a task status that never exists. TDE-880.
+          </p>
+        </div>
+      )}
+
+      <DayBreakdown days={delta.day_breakdown} />
+    </div>
+  )
+}
+
+// TDE-873: the FACT layer under the narrative. The written update is organised by thread, because
+// a discovery and what it changed is the part worth reading and it rarely respects midnight. This
+// answers the flatter question a person actually gets asked — "what did you do on the 4th" — and
+// it is the direct fix for not being able to remember your own days.
+//
+// Every date here comes from created_at / completed_at, so it cannot drift with the writer's
+// memory. The division of labour is the point: the server says what happened when, the author says
+// what it meant. Only the second half needs a human, and only the second half can be wrong.
+function DayBreakdown({ days }) {
+  const [open, setOpen] = useState(false)
+  if (!Array.isArray(days) || days.length === 0) return null   // absent on updates predating TDE-873
+
+  const label = (iso) => {
+    const d = new Date(`${iso}T12:00:00Z`)
+    return Number.isFinite(d.getTime())
+      ? d.toLocaleDateString('en-GB', { weekday: 'short', day: 'numeric', month: 'short' })
+      : iso
+  }
+
+  return (
+    <div className="mt-2.5 pt-2.5 border-t border-line-2">
+      <button
+        onClick={() => setOpen(v => !v)}
+        className="text-[10px] font-bold text-mute-2 uppercase tracking-wider hover:text-ink transition-colors"
+      >
+        By day ({days.length}) {open ? '−' : '+'}
+      </button>
+
+      {open && (
+        <div className="mt-2 flex flex-col gap-2.5">
+          {days.map(day => (
+            <div key={day.date}>
+              <div className="text-[11px] font-medium text-ink-2">
+                {label(day.date)}
+                <span className="text-mute-2 font-normal">
+                  {' — '}
+                  {day.completed.length > 0 && `finished ${day.completed.length}`}
+                  {day.completed.length > 0 && day.added.length > 0 && ' · '}
+                  {day.added.length > 0 && `found ${day.added.length}`}
+                </span>
+              </div>
+              <div className="mt-0.5 flex flex-col">
+                {day.completed.map(t => (
+                  <span key={`c-${t}`} className="text-[11px] text-mute truncate" title={t}>✓ {t}</span>
+                ))}
+                {day.added.map(t => (
+                  <span key={`a-${t}`} className="text-[11px] text-mute-2 truncate" title={t}>+ {t}</span>
+                ))}
+              </div>
+            </div>
+          ))}
+          {/* Days with nothing are omitted rather than zero-filled; days with one small thing are
+              kept, unflattering as that is. A report you have learned to distrust is worse than none. */}
+          <p className="text-[10px] text-mute-2">Days with no activity are omitted.</p>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export default function FrontPage({ project, tasks, sections, projectUpdates = [], onPublishUpdate, onDiscardUpdate, onOpenTask, onPause, onFocusSection }) {
+  const sectionById = useMemo(() => new Map(sections.map(s => [s.id, s])), [sections])
+  const sectionName = (id) => sectionById.get(id)?.name ?? ''
+
+  const needsYou = useMemo(() => tasks.filter(t => t.review_verdict?.escalated), [tasks])
+  const inFlight = useMemo(() => tasks.filter(t => t.status === 'in_progress' && !t.review_verdict?.escalated), [tasks])
+  const ranked = useMemo(() => rankTasks(tasks).slice(0, 5), [tasks])
+  const shipped = useMemo(() =>
+    tasks
+      .filter(t => t.status === 'done' && t.completed_at)
+      .sort((a, b) => (b.completed_at ?? '').localeCompare(a.completed_at ?? ''))
+      .slice(0, 5),
+    [tasks])
+
+  const draftUpdate = useMemo(() => projectUpdates.find(u => u.status === 'draft'), [projectUpdates])
+  const latestPublished = useMemo(() => projectUpdates.find(u => u.status === 'published'), [projectUpdates])
+  const history = useMemo(() => projectUpdates.filter(u => u.status === 'published'), [projectUpdates])
+  const [showHistory, setShowHistory] = useState(false)
+
+  const hasLead = needsYou.length > 0 || inFlight.length > 0 || draftUpdate || latestPublished
+
+  return (
+    <div className="flex-1 min-h-0 overflow-y-auto bg-paper">
+      <div className="px-7 pb-16">
+
+        <AwaitingInputStrip tasks={tasks} prefix={project.prefix} onOpenTask={onOpenTask} />
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 lg:gap-x-9 py-6">
+          {/* Lead column */}
+          <section className="lg:col-span-8">
+            {hasLead ? (
+              <>
+                {draftUpdate && (
+                  <article className="rounded-xl border border-accent/30 bg-accent/[0.03] px-6 py-5 mb-4 shadow-sm">
+                    <div className="flex items-center justify-between mb-3">
+                      <div className="font-mono text-[9.5px] tracking-[0.15em] text-accent font-bold uppercase">
+                        Draft Update Ready
+                      </div>
+                      <div className="flex items-center gap-2">
+                        <button onClick={() => onDiscardUpdate(draftUpdate.id)} className="text-xs text-mute hover:text-red-400 transition-colors">Discard</button>
+                        <button onClick={() => onPublishUpdate(draftUpdate.id)} className="text-xs font-bold bg-accent text-white px-3 py-1.5 rounded hover:bg-accent-dark transition-colors shadow-sm">Publish update</button>
+                      </div>
+                    </div>
+                    <div className="text-[13.5px] leading-relaxed text-ink mb-4 whitespace-pre-wrap">{draftUpdate.body}</div>
+                    
+                    <DeltaMetrics delta={draftUpdate.delta} />
+                  </article>
+                )}
+
+                {latestPublished && !draftUpdate && (
+                  <article className="rounded-xl border border-line-2 bg-paper px-6 py-5 mb-4 shadow-sm hover:border-line hover:shadow-card transition-all">
+                    <div className="flex items-center justify-between mb-2">
+                      <div className="flex items-center gap-2">
+                        {latestPublished.health === 'on_track' && <span className="w-2.5 h-2.5 rounded-full bg-priority-done" title="On Track" />}
+                        {latestPublished.health === 'at_risk' && <span className="w-2.5 h-2.5 rounded-full bg-amber-500" title="At Risk" />}
+                        {latestPublished.health === 'off_track' && <span className="w-2.5 h-2.5 rounded-full bg-red-500" title="Off Track" />}
+                        <span className="font-mono text-[10px] tracking-[0.1em] text-mute-2 uppercase font-medium">{agoLabel(latestPublished.created_at)}</span>
+                      </div>
+                      {history.length > 1 && (
+                        <button onClick={() => setShowHistory(true)} className="text-[10px] font-mono tracking-wider text-mute hover:text-ink">SEE HISTORY</button>
+                      )}
+                    </div>
+                    <div className="text-[13.5px] leading-relaxed text-ink mt-2 whitespace-pre-wrap">{latestPublished.body}</div>
+                    {(latestPublished.delta?.tasks_completed > 0 || latestPublished.delta?.tasks_added > 0) && (
+                      <div className="flex gap-4 mt-3 pt-3 border-t border-line-2 flex-wrap">
+                        {latestPublished.delta?.tasks_completed > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_completed} completed</span>}
+                        {latestPublished.delta?.tasks_added > 0 && <span className="text-[11px] text-mute-2 font-medium">{latestPublished.delta.tasks_added} added</span>}
+                        {/* TDE-873: the overlap, stated inline — without it the two counts above read as disjoint. */}
+                        {latestPublished.delta?.added_closed_same_window > 0 && (
+                          <span className="text-[11px] text-mute-2">{latestPublished.delta.added_closed_same_window} of those closed here</span>
+                        )}
+                        {latestPublished.delta?.net_open_change !== undefined && latestPublished.delta.net_open_change !== 0 && (
+                          <span className="text-[11px] text-ink-2 font-medium">
+                            {latestPublished.delta.net_open_change > 0
+                              ? `${latestPublished.delta.net_open_change} more open`
+                              : `${Math.abs(latestPublished.delta.net_open_change)} fewer open`}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </article>
+                )}
+
+                <div className="flex items-baseline justify-between mb-4 mt-2">
+                  <Kicker>Happening now</Kicker>
+                  <Kicker>{inFlight.length + needsYou.length} in flight{needsYou.length > 0 ? ` · ${needsYou.length} need${needsYou.length === 1 ? 's' : ''} you` : ''}</Kicker>
+                </div>
+                {needsYou.map(t => <LeadCard key={t.id} task={t} prefix={project.prefix} onOpenTask={onOpenTask} />)}
+                {inFlight.length > 0 && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
+                    {inFlight.map(t => (
+                      <InFlightCard key={t.id} task={t} prefix={project.prefix} sectionName={sectionName} onOpenTask={onOpenTask} onPause={onPause} />
+                    ))}
+                  </div>
+                )}
+              </>
+            ) : (
+              <>
+                <div className="flex items-baseline justify-between mb-2">
+                  <Kicker>Next up</Kicker>
+                  <Kicker>All quiet — ranked queue</Kicker>
+                </div>
+                <NextUpList ranked={ranked} sectionName={sectionName} onOpenTask={onOpenTask} />
+              </>
+            )}
+          </section>
+
+          {/* Rail */}
+          <aside className="lg:col-span-4 lg:border-l lg:border-line-2 lg:pl-9 mt-8 lg:mt-0 pt-8 lg:pt-0 border-t border-line-2 lg:border-t-0">
+            {hasLead ? (
+              <>
+                <div className="flex items-baseline justify-between mb-2">
+                  <Kicker>Next up</Kicker>
+                  <span title="Priority + due date + pins, with skip-decay"><Kicker>Ranked</Kicker></span>
+                </div>
+                <NextUpList ranked={ranked} sectionName={sectionName} onOpenTask={onOpenTask} />
+              </>
+            ) : (
+              <>
+                <div className="mb-2"><Kicker>Just shipped</Kicker></div>
+                <ShippedList shipped={shipped} onOpenTask={onOpenTask} />
+              </>
+            )}
+          </aside>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-12 lg:gap-x-9 py-6 border-t border-line-2">
+          {hasLead && (
+            <section className="lg:col-span-4">
+              <div className="mb-2"><Kicker>Just shipped</Kicker></div>
+              <ShippedList shipped={shipped} onOpenTask={onOpenTask} />
+            </section>
+          )}
+          <section className={clsx(hasLead ? 'lg:col-span-8 lg:border-l lg:border-line-2 lg:pl-9 mt-8 lg:mt-0' : 'lg:col-span-12')}>
+            <div className="flex items-baseline justify-between mb-2">
+              <Kicker count={sections.length}>Sections</Kicker>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 md:gap-x-9">
+              {sections.map(s => {
+                const pctS = s.totalCount ? Math.round((s.completedCount / s.totalCount) * 100) : 0
+                const untouched = s.totalCount > 0 && s.completedCount === 0
+                return (
+                  <button
+                    key={s.id}
+                    onClick={() => onFocusSection(s.id)}
+                    className="group flex items-center gap-3 py-2 border-b border-line-2 text-left"
+                    title={`${s.completedCount}/${s.totalCount} done — open ${s.name}`}
+                  >
+                    <span className="flex-1 text-[12.5px] font-medium text-ink group-hover:text-accent-dark transition-colors truncate">{s.name}</span>
+                    {untouched && <span className="font-mono text-[8.5px] tracking-[0.1em] border border-line rounded px-1.5 py-0.5 text-mute shrink-0">UNTOUCHED</span>}
+                    <span className="w-[74px] h-[3px] rounded-full bg-surf overflow-hidden shrink-0">
+                      <span className="block h-full bg-ink rounded-full" style={{ width: `${pctS}%` }} />
+                    </span>
+                    <span className="font-mono text-[10px] text-mute tabular-nums min-w-[44px] text-right shrink-0">{s.completedCount}/{s.totalCount}</span>
+                  </button>
+                )
+              })}
+            </div>
+          </section>
+        </div>
+      </div>
+
+      {showHistory && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/40">
+          <div className="w-[480px] h-full bg-paper shadow-2xl flex flex-col border-l border-line" style={{ animation: 'slideInRight 0.2s ease-out' }}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-line-2">
+              <h2 className="text-[16px] font-medium text-ink">Project History</h2>
+              <button onClick={() => setShowHistory(false)} className="text-mute hover:text-ink"><X size={18} /></button>
+            </div>
+            <div className="flex-1 overflow-y-auto px-6 py-4 flex flex-col gap-6">
+              {history.map(update => (
+                <div key={update.id} className="pb-6 border-b border-line-2 last:border-0 last:pb-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    {update.health === 'on_track' && <span className="w-2.5 h-2.5 rounded-full bg-priority-done" />}
+                    {update.health === 'at_risk' && <span className="w-2.5 h-2.5 rounded-full bg-amber-500" />}
+                    {update.health === 'off_track' && <span className="w-2.5 h-2.5 rounded-full bg-red-500" />}
+                    <span className="font-mono text-[10px] tracking-wider text-mute-2 font-medium">{new Date(update.created_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' })}</span>
+                  </div>
+                  <div className="text-[13px] leading-relaxed text-ink whitespace-pre-wrap">{update.body}</div>
+                  
+                  {update.delta && (update.delta.tasks_completed > 0 || update.delta.tasks_added > 0) && (
+                    <div className="mt-3 pt-3 border-t border-line-2 flex flex-col gap-2">
+                      <div className="text-[10px] font-mono tracking-wider text-mute-2 uppercase">Metrics</div>
+                      <div className="flex gap-4 flex-wrap">
+                        <span className="text-[11px] text-mute font-medium">{update.delta.tasks_completed || 0} completed</span>
+                        <span className="text-[11px] text-mute font-medium">{update.delta.tasks_added || 0} added</span>
+                        {update.delta.added_closed_same_window > 0 && (
+                          <span className="text-[11px] text-mute-2">{update.delta.added_closed_same_window} of those closed here</span>
+                        )}
+                        {update.delta.net_open_change !== undefined && update.delta.net_open_change !== 0 && (
+                          <span className="text-[11px] text-ink-2 font-medium">
+                            {update.delta.net_open_change > 0
+                              ? `${update.delta.net_open_change} more open`
+                              : `${Math.abs(update.delta.net_open_change)} fewer open`}
+                          </span>
+                        )}
+                        <span className="text-[11px] text-mute-2 font-medium line-through" title="Broken metric — reads a task status that never exists, so it is always 0. TDE-880.">{update.delta.blocked_items || 0} blocked</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ShippedList({ shipped, onOpenTask }) {
+  return (
+    <ul className="list-none m-0 p-0">
+      {shipped.map(t => (
+        <li key={t.id}>
+          <button onClick={() => onOpenTask(t.id)} className="group w-full text-left flex items-baseline gap-2.5 py-2">
+            <span className="text-priority-done text-[12px] leading-none translate-y-px">✓</span>
+            <span className="flex-1 text-[12.5px] text-ink-2 group-hover:text-ink transition-colors leading-snug">{t.text}</span>
+            <span className="font-mono text-[9px] tracking-[0.08em] text-mute-2 whitespace-nowrap">{agoLabel(t.completed_at)}</span>
+          </button>
+        </li>
+      ))}
+      {shipped.length === 0 && <li className="text-[12px] text-mute-2 py-2">Nothing shipped yet.</li>}
+    </ul>
+  )
+}

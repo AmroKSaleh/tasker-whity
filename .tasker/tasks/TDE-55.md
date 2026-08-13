@@ -5,7 +5,7 @@ status: done
 priority: medium
 section: bugs
 order: 6
-updated_at: 2026-07-14T23:09:51.590Z
+updated_at: 2026-08-01T09:35:21.793Z
 ---
 
 This is for sure the case on mobile. Test it on oc as well.

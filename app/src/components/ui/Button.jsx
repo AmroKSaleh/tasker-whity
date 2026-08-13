@@ -1,20 +1,20 @@
 const variants = {
-  filled:   'bg-primary text-on-primary hover:opacity-90 active:opacity-80',
-  tonal:    'bg-secondary-container text-on-secondary-container hover:opacity-90 active:opacity-80',
-  outlined: 'border border-outline text-primary hover:bg-primary hover:bg-opacity-8 active:bg-opacity-12',
-  text:     'text-primary hover:bg-primary hover:bg-opacity-8 active:bg-opacity-12',
+  filled:   'bg-ink text-paper hover:bg-ink-2 active:opacity-80',
+  outlined: 'border border-line text-ink hover:bg-surf active:bg-surf-2',
+  ghost:    'text-mute hover:text-ink hover:bg-surf active:bg-surf-2',
+  accent:   'bg-accent text-paper hover:bg-accent-dark active:opacity-80',
 }
 
 export default function Button({ variant = 'filled', children, className = '', disabled, ...props }) {
   return (
     <button
       className={`
-        inline-flex items-center justify-center gap-2
-        px-6 h-10 rounded-pill
-        text-label-large font-medium
-        transition-all duration-200
-        disabled:opacity-38 disabled:pointer-events-none
-        focus-visible:outline-2 focus-visible:outline-primary focus-visible:outline-offset-2
+        inline-flex items-center justify-center gap-1.5
+        px-4 h-9 rounded-md
+        text-[13px] font-semibold tracking-tight
+        transition-all duration-150
+        disabled:opacity-40 disabled:pointer-events-none
+        focus-visible:outline-2 focus-visible:outline-ink focus-visible:outline-offset-2
         ${variants[variant]}
         ${className}
       `}

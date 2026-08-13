@@ -4,8 +4,8 @@ title: "Make the board section heading clickable to \"focus on the section\""
 status: done
 priority: low
 section: core-app
-order: 19
-updated_at: 2026-07-14T23:09:51.590Z
+order: 21
+updated_at: 2026-07-25T07:41:59.616Z
 ---
 
 From the redesign review (2026-05-27). On the editorial project board, the section column heading should be clickable to "focus on the section" somehow. Exact behavior is TBD — discuss before building.

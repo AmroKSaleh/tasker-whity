@@ -4,6 +4,6 @@ title: Let users set a default project so MCP tools fall back to it when no proj
 status: done
 priority: medium
 section: core-app
-order: 4
-updated_at: 2026-07-14T23:09:51.590Z
+order: 6
+updated_at: 2026-08-06T20:05:11.033Z
 ---

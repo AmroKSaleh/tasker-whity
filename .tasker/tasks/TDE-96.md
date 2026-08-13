@@ -5,7 +5,7 @@ status: done
 priority: high
 section: mcp-integrations
 order: 20
-updated_at: 2026-07-14T23:09:51.590Z
+updated_at: 2026-07-25T07:41:59.616Z
 ---
 
 Return behavioral instructions automatically when AIs connect to the Tasker MCP, eliminating the need for users to manually create CLAUDE.md or .cursorrules files.

@@ -1,5 +1,6 @@
 import { supabase } from './supabase'
 import { useProjectStore } from '../store/useProjectStore'
+import { useEnvironmentStore } from '../store/useEnvironmentStore'
 
 async function seedTaskDiscussion(taskId, userId, focus) {
   await supabase.from('task_discussions').insert({
@@ -16,14 +17,16 @@ export async function createProjectWithStructure(structure) {
   const { data: { user } } = await supabase.auth.getUser()
   const { projects, addProject } = useProjectStore.getState()
 
-  const slug = structure.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+  const displayName = structure.description || structure.name || 'Project'
+  const slug = displayName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '') || 'project'
 
   const { data: proj } = await supabase.from('projects').insert({
-    name: slug,
-    description: structure.description || structure.name,
-    context: structure.context ?? null,
-    position: projects.length,
+    name: displayName,
+    slug,
+    description: displayName,
     user_id: user.id,
+    context: structure.context ?? null,
+    environment_id: useEnvironmentStore.getState().activeEnvironmentId,
   }).select().single()
 
   if (!proj) throw new Error('Failed to create project')
@@ -33,21 +36,20 @@ export async function createProjectWithStructure(structure) {
 
     const { data: section } = await supabase.from('sections').insert({
       project_id: proj.id,
-      title: sec.title,
-      position: si,
+      name: sec.name || sec.title,
+      sort_order: si,
     }).select().single()
 
     if (!section) continue
 
-    // Grouped tasks
     for (let gi = 0; gi < (sec.groups ?? []).length; gi++) {
       const grp = sec.groups[gi]
 
       const { data: group } = await supabase.from('groups').insert({
+        project_id: proj.id,
         section_id: section.id,
         name: grp.name,
-        position: gi,
-        user_id: user.id,
+        sort_order: gi,
       }).select().single()
 
       for (let ti = 0; ti < (grp.tasks ?? []).length; ti++) {
@@ -58,9 +60,8 @@ export async function createProjectWithStructure(structure) {
           group_id: group?.id ?? null,
           text: typeof t === 'string' ? t : t.text,
           priority: typeof t === 'object' ? (t.priority || null) : null,
-          position: ti,
+          sort_order: ti,
           user_id: user.id,
-          updated_at: new Date().toISOString(),
         }).select('id').single()
         if (taskData && typeof t === 'object' && t.focus) {
           await seedTaskDiscussion(taskData.id, user.id, t.focus)
@@ -68,7 +69,6 @@ export async function createProjectWithStructure(structure) {
       }
     }
 
-    // Ungrouped tasks
     for (let ti = 0; ti < (sec.tasks ?? []).length; ti++) {
       const t = sec.tasks[ti]
       const { data: taskData } = await supabase.from('tasks').insert({
@@ -77,9 +77,8 @@ export async function createProjectWithStructure(structure) {
         group_id: null,
         text: typeof t === 'string' ? t : t.text,
         priority: typeof t === 'object' ? (t.priority || null) : null,
-        position: ti,
+        sort_order: ti,
         user_id: user.id,
-        updated_at: new Date().toISOString(),
       }).select('id').single()
       if (taskData && typeof t === 'object' && t.focus) {
         await seedTaskDiscussion(taskData.id, user.id, t.focus)
