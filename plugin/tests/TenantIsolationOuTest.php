@@ -16,12 +16,15 @@ use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\AddTaskerProjectPrefixUnique;
+use Tasker\Migrations\AddTaskerTaskFlowAndContractColumns;
 use Tasker\Migrations\AddTaskerTaskShortIdUnique;
+use Tasker\Migrations\CreateTaskerFlowsTable;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
+use Tasker\Migrations\CreateTaskerTaskEdgesTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Migrations\CreateTaskerUserPrefsTable;
 use Tasker\TaskerPlugin;
@@ -117,6 +120,12 @@ final class TenantIsolationOuTest extends TestCase
         // every run, not just the first.
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_user_prefs CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_sections CASCADE');
+        // D5a Task 2: tasker_flows FK-references tasker_projects, so it must
+        // be dropped first -- same "drop the referencing table explicitly,
+        // don't rely on CASCADE to do it for you" reasoning as the
+        // tasker_milestones/tasker_task_discussions-before-tasker_tasks
+        // comment further down in this same method.
+        $this->pdo->exec('DROP TABLE IF EXISTS tasker_flows CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_projects CASCADE');
         // REGRESSION FIX (whole-branch review finding C2): this suite used to
         // assume it was always running against the host's own live,
@@ -229,13 +238,14 @@ final class TenantIsolationOuTest extends TestCase
         // would find nothing to reject.
         (new AddTaskerProjectPrefixUnique())->up($this->pdo);
         (new CreateTaskerSectionsTable())->up($this->pdo);
-        // Drop order matters: tasker_milestones and tasker_task_discussions
-        // both FK-reference tasker_tasks, so both must be dropped before
-        // tasker_tasks — otherwise `DROP TABLE tasker_tasks CASCADE` only
-        // cascade-drops the FK CONSTRAINT on the referencing table (Postgres
-        // semantics for a referenced table being dropped), leaving the table
-        // itself, and any stale rows from a PRIOR test run, in place for the
-        // next test.
+        // Drop order matters: tasker_task_edges, tasker_milestones, and
+        // tasker_task_discussions all FK-reference tasker_tasks, so all three
+        // must be dropped before tasker_tasks — otherwise `DROP TABLE
+        // tasker_tasks CASCADE` only cascade-drops the FK CONSTRAINT on the
+        // referencing table (Postgres semantics for a referenced table being
+        // dropped), leaving the table itself, and any stale rows from a
+        // PRIOR test run, in place for the next test.
+        $this->pdo->exec('DROP TABLE IF EXISTS tasker_task_edges CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_milestones CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_task_discussions CASCADE');
         $this->pdo->exec('DROP TABLE IF EXISTS tasker_tasks CASCADE');
@@ -248,6 +258,13 @@ final class TenantIsolationOuTest extends TestCase
         // testShortIdUniqueConstraintRejectsADuplicate below would find
         // nothing to reject.
         (new AddTaskerTaskShortIdUnique())->up($this->pdo);
+        // D5a Task 2: tasker_flows depends on tasker_projects (already
+        // created above); tasker_task_edges depends on tasker_tasks (just
+        // created); the column migration depends on tasker_flows existing
+        // too (flow_id references it), so it runs last of the three.
+        (new CreateTaskerFlowsTable())->up($this->pdo);
+        (new CreateTaskerTaskEdgesTable())->up($this->pdo);
+        (new AddTaskerTaskFlowAndContractColumns())->up($this->pdo);
         (new CreateTaskerMilestonesTable())->up($this->pdo);
         (new CreateTaskerTaskDiscussionsTable())->up($this->pdo);
         // D1b Task 12b: deleteProject()/listGroups()/createGroup() all call
@@ -3058,6 +3075,55 @@ final class TenantIsolationOuTest extends TestCase
         // retry would be pointless because nothing would ever reject a race.
         $this->expectException(\PDOException::class);
         $this->pdo->exec("UPDATE tasker_tasks SET short_id = 1 WHERE id = {$second}");
+    }
+
+    // ==================== Flow spine schema (D5a Task 2) ====================
+
+    /**
+     * Proves tasker_task_edges enforces its own invariants at the database
+     * level, not just in application code — deliberately run here, against a
+     * REAL PostgreSQL connection, rather than under the SQLite unit-test
+     * tier: SQLite does not enforce FOREIGN KEY constraints unless
+     * `PRAGMA foreign_keys = ON` is set on the connection, and nothing in
+     * this plugin's SQLite fixtures sets it (confirmed by inspection — grep
+     * for PRAGMA across plugin/tests turns up nothing). A cascade assertion
+     * against that tier would pass for the wrong reason: no row would be
+     * deleted, and COUNT(*) would read 0 not because the FK cascaded but
+     * because nothing was ever checked. See this same class's own
+     * {@see self::testSectionsDeleteWithDeleteTasksTrueCascadesToTasksAndGroups()}
+     * (whose docblock documents the identical SQLite-cannot-prove-cascade
+     * reasoning for its own predecessor) for the precedent this test
+     * follows.
+     *
+     * The self-edge CHECK half, by contrast, WOULD be enforced identically
+     * under SQLite (CHECK constraints are always evaluated there,
+     * independent of the foreign_keys pragma) — it stays in this one method,
+     * matching the brief's own test exactly, rather than being split across
+     * tiers for no behavioural gain.
+     */
+    public function testFlowAndEdgeSchemaEnforcesItsOwnInvariants(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Flow Schema');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        // A self-edge is refused by CHECK.
+        try {
+            $this->pdo->exec("INSERT INTO tasker_task_edges (public_id, tenant_id, source_task_id, target_task_id)
+                              VALUES ('11111111-1111-4111-8111-111111111111', 7, {$a}, {$a})");
+            self::fail('a self-edge must be refused');
+        } catch (\PDOException $e) {
+            self::assertNotSame('', $e->getMessage());
+        }
+
+        // Deleting the producer removes the edge by cascade -- no dangling source.
+        $this->pdo->exec("INSERT INTO tasker_task_edges (public_id, tenant_id, source_task_id, target_task_id)
+                          VALUES ('22222222-2222-4222-8222-222222222222', 7, {$a}, {$b})");
+        $this->pdo->exec("DELETE FROM tasker_tasks WHERE id = {$a}");
+
+        $left = (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn();
+        self::assertSame(0, $left, 'deleting a producer must cascade its edges away');
     }
 
     // ==================== MilestonesApiHandler::create() (whole-branch review finding C1) ====================

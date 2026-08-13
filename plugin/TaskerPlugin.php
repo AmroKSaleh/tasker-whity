@@ -16,13 +16,16 @@ use Tasker\Api\SessionApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\AddTaskerProjectPrefixUnique;
+use Tasker\Migrations\AddTaskerTaskFlowAndContractColumns;
 use Tasker\Migrations\AddTaskerTaskShortIdUnique;
+use Tasker\Migrations\CreateTaskerFlowsTable;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
+use Tasker\Migrations\CreateTaskerTaskEdgesTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Migrations\CreateTaskerUserPrefsTable;
 use Tasker\Migrations\GrantTaskerMilestonePermissions;
@@ -1574,6 +1577,13 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             GrantTaskerProjectPermissions::class,
             CreateTaskerTasksTable::class,
             AddTaskerTaskShortIdUnique::class,
+            // D5a Task 2: flows/edges depend on tasker_projects/tasker_tasks,
+            // both already created above; the column migration depends on
+            // tasker_flows existing too (flow_id references it), so it runs
+            // last of the three.
+            CreateTaskerFlowsTable::class,
+            CreateTaskerTaskEdgesTable::class,
+            AddTaskerTaskFlowAndContractColumns::class,
             GrantTaskerTaskPermissions::class,
             CreateTaskerMilestonesTable::class,
             GrantTaskerMilestonePermissions::class,
