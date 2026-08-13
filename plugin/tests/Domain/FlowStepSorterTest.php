@@ -176,4 +176,30 @@ final class FlowStepSorterTest extends TestCase
         self::assertTrue($r['ok']);
         self::assertSame([1 => 1, 2 => 2, 50 => 3], $r['positions']);
     }
+
+    public function testMemoryUsageOnALongCycleIsLinearNotQuadratic(): void
+    {
+        // A stuck chain of 5000 nodes should use O(N) memory with backtracking,
+        // not O(N^2) with copy-on-write. Previous by-value implementation used
+        // 30MB at N=1000, 66MB at N=1500, 102MB at N=2000, and would fatall
+        // uncatchably at N=5000. Backtracking version should stay well under 10MB.
+        $n       = 5000;
+        $taskIds = range(1, $n);
+        $edges   = [];
+        for ($i = 1; $i < $n; $i++) {
+            $edges[] = ['source' => $i, 'target' => $i + 1];
+        }
+        // Close the cycle: n -> 1
+        $edges[] = ['source' => $n, 'target' => 1];
+
+        $startMem = memory_get_usage(true);
+        $r = FlowStepSorter::sort($taskIds, $edges);
+        $peakMem = memory_get_peak_usage(true);
+
+        self::assertFalse($r['ok'], 'a cycle of 1..n->1 must be detected');
+        self::assertCount($n, $r['cycle'], "the full cycle path of {$n} nodes must be reported");
+
+        $memUsedMb = ($peakMem - $startMem) / 1024 / 1024;
+        self::assertLessThan(15, $memUsedMb, "memory usage {$memUsedMb}MB exceeds linear budget; quadratic blowup may have returned");
+    }
 }

@@ -110,7 +110,10 @@ final class FlowStepSorter
         sort($starts);
 
         foreach ($starts as $start) {
-            $found = self::walkForCycle($start, $stuck, $out, [], []);
+            $onPath = [];
+            $path   = [];
+
+            $found = self::walkForCycle($start, $stuck, $out, $onPath, $path);
             if ($found !== []) {
                 return $found;
             }
@@ -126,7 +129,7 @@ final class FlowStepSorter
      * @param list<int>             $path
      * @return list<int>
      */
-    private static function walkForCycle(int $at, array $stuck, array $out, array $onPath, array $path): array
+    private static function walkForCycle(int $at, array $stuck, array $out, array &$onPath, array &$path): array
     {
         if (isset($onPath[$at])) {
             // A real back-edge: everything from the revisited node onward IS the cycle.
@@ -146,6 +149,15 @@ final class FlowStepSorter
                 return $found;
             }
         }
+
+        // Backtrack explicitly. $onPath must mark only the CURRENT path, so a
+        // node abandoned here has to stop being a back-edge target -- otherwise
+        // a later branch would treat it as one and report a path that is not a
+        // cycle. This replaces by-value copying, which was correct but cost
+        // O(N^2) memory on a long stuck chain and fatalled uncatchably at
+        // N=5000 under a 128M limit.
+        unset($onPath[$at]);
+        array_pop($path);
 
         return [];
     }
