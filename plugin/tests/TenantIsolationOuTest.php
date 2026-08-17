@@ -6330,6 +6330,146 @@ final class TenantIsolationOuTest extends TestCase
         $handler = new FlowsApiHandler($this->pdo);
 
         self::assertSame(422, $handler->name(7, null, $projectId, 'Loop', [$a, $b], null, false, 2)->getStatusCode());
+
+        // REVIEW FIX: a 422 must leave NOTHING written, not merely report the
+        // right status code -- the brief's own stated requirement for a
+        // rejected cycle. Neither a flow row nor a stamped task may exist.
+        self::assertSame(
+            0,
+            (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_flows WHERE project_id = {$projectId}")->fetchColumn(),
+            'a rejected cycle must not create a flow row'
+        );
+        self::assertSame(
+            0,
+            (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE flow_id IS NOT NULL AND project_id = {$projectId}")->fetchColumn(),
+            'a rejected cycle must not stamp any task'
+        );
+    }
+
+    /**
+     * REVIEW FIX: name()'s own defence-in-depth OU check (projectVisible())
+     * had no direct coverage at all -- delete()'s OU boundary was tested but
+     * name()'s was not. Paired with a same-OU positive control, matching this
+     * file's own established convention (e.g.
+     * testResolveFlowRefusesASiblingOusFlowButFindsItsOwn()), so a bug that
+     * made EVERY project invisible could not masquerade as passing.
+     */
+    public function testNameFlowRefusesASiblingOusProjectButNamesItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'Own Naming', 'ON2');
+        $ownSection = $this->makeSectionDirect(7, $ownProject);
+        $ownTask    = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Own task');
+
+        $siblingProject = $this->makeProjectDirect(7, 3, 'Sibling Naming', 'SN2');
+        $siblingSection = $this->makeSectionDirect(7, $siblingProject);
+        $siblingTask    = $this->makeTaskDirect(7, $siblingProject, $siblingSection, 'Sibling task');
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        self::assertSame(
+            404,
+            $handler->name(7, 2, $siblingProject, 'Should not name', [$siblingTask], null, false, 2)->getStatusCode(),
+            'a project outside the caller\'s OU scope must 404, never leak an existence signal'
+        );
+        self::assertSame(
+            201,
+            $handler->name(7, 2, $ownProject, 'Should name', [$ownTask], null, false, 2)->getStatusCode(),
+            'the positive control: the SAME caller must still be able to name a flow in their own OU'
+        );
+    }
+
+    /**
+     * REVIEW FIX: list()'s own OU scoping had no coverage at all. Exercised
+     * in $projectId === null ("every flow in scope") mode specifically,
+     * since that is the mode a caller with no default project actually
+     * reaches -- the OU join must still hold with no project filter applied.
+     */
+    public function testListFlowsRefusesASiblingOusFlowButFindsItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $ownFlow     = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 2, 'List Own', 'LO2'), 'Own flow', 1);
+        $siblingFlow = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 3, 'List Sibling', 'LS2'), 'Sibling flow', 1);
+
+        $handler = new FlowsApiHandler($this->pdo);
+        $payload = json_decode($handler->list(7, 2, null)->getBody(), true);
+        $ids = array_column($payload['data'], 'id');
+
+        self::assertContains($ownFlow, $ids, 'the positive control: the caller\'s own flow must be visible');
+        self::assertNotContains($siblingFlow, $ids, 'visibility must never cross a sibling OU');
+    }
+
+    /**
+     * REVIEW FIX: no coverage existed for tasker_flows' own
+     * UNIQUE (project_id, name) constraint surfacing as the documented 409,
+     * as opposed to the generic 500 the ATOMICITY docblock warns a
+     * mis-structured transaction could produce instead. $b (not already in
+     * ANY flow) is used for the second attempt so this test isolates the
+     * name collision from the re-membership refusal
+     * (testNameFlowRefusesToStealATaskAlreadyInAnotherFlow() below covers
+     * that one separately).
+     */
+    public function testNameFlowRejectsADuplicateNameInTheSameProject(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Dupe', 'DUP');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        self::assertSame(201, $handler->name(7, null, $projectId, 'Repeat flow', [$a], null, false, 2)->getStatusCode());
+        self::assertSame(409, $handler->name(7, null, $projectId, 'Repeat flow', [$b], null, false, 2)->getStatusCode());
+    }
+
+    /**
+     * REVIEW FIX (item 4): name() used to happily re-stamp a task that
+     * already belonged to ANOTHER flow -- a second name_flow call over one of
+     * the first flow's own tasks returned 201 and silently emptied the FIRST
+     * flow's membership, with no warning on either side. Neither the brief
+     * nor the plan addressed re-membership, so this was unowned rather than
+     * contradicted, and the decision made here is to refuse outright (422),
+     * naming both the offending task id and the flow it already belongs to,
+     * and leaving the FIRST flow's membership completely untouched.
+     */
+    public function testNameFlowRefusesToStealATaskAlreadyInAnotherFlow(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Steal', 'STL');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'C');
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        $first = json_decode($handler->name(7, null, $projectId, 'First flow', [$a, $b], null, false, 2)->getBody(), true);
+        $firstFlowId = (int) $first['data']['id'];
+
+        $response = $handler->name(7, null, $projectId, 'Second flow', [$a, $c], null, false, 2);
+        self::assertSame(422, $response->getStatusCode());
+
+        $payload = json_decode($response->getBody(), true);
+        self::assertSame(
+            $a,
+            $payload['details']['conflicts'][0]['task_id'] ?? null,
+            'the 422 must name the offending task id'
+        );
+        self::assertSame(
+            $firstFlowId,
+            $payload['details']['conflicts'][0]['flow_id'] ?? null,
+            'the 422 must name the flow the task already belongs to'
+        );
+
+        $stillInFirst = (int) $this->pdo->query(
+            "SELECT COUNT(*) FROM tasker_tasks WHERE flow_id = {$firstFlowId}"
+        )->fetchColumn();
+        self::assertSame(2, $stillInFirst, 'naming a second flow must not steal a task out of the first');
     }
 
     public function testFlowsDeleteRejects404ForASiblingOusFlowAndDeletesItsOwn(): void
@@ -6344,5 +6484,25 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(404, $handler->delete(7, 2, $sibling)->getStatusCode());
         self::assertSame(200, $handler->delete(7, 2, $mine)->getStatusCode());
+    }
+
+    /**
+     * REVIEW FIX: no committed test existed for delete_flow's own mutating-
+     * route rule (a required identifier must 400 when absent, never fall
+     * back to a default) -- a global constraint every mutating route in this
+     * plugin is held to. Exercised at the ROUTE level (TaskerPlugin::deleteFlow()),
+     * not the handler, since the 400 fires before FlowsApiHandler is ever
+     * constructed.
+     */
+    public function testDeleteFlowReturns400WhenFlowIdIsAbsent(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('DELETE', '/api/tasker/flows');
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        self::assertSame(400, $plugin->deleteFlow($request)->getStatusCode());
     }
 }

@@ -4,12 +4,14 @@ declare(strict_types=1);
 
 namespace Tasker\Tests;
 
+use Tasker\Migrations\CreateTaskerFlowsTable;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
 use Tasker\Migrations\CreateTaskerPingTable;
 use Tasker\Migrations\CreateTaskerProjectsTable;
 use Tasker\Migrations\CreateTaskerSectionsTable;
 use Tasker\Migrations\CreateTaskerTaskDiscussionsTable;
+use Tasker\Migrations\CreateTaskerTaskEdgesTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Migrations\CreateTaskerUserPrefsTable;
 use Whity\Sdk\Tenant\TenantTableRegistry;
@@ -34,6 +36,16 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
             'tasker_milestones' => 'Task milestones are per-tenant.',
             'tasker_task_discussions' => 'Task AI discussions are per-tenant.',
             'tasker_user_prefs' => 'Per-user Tasker preferences are per-tenant.',
+            // D5a Task 5 REVIEW FIX: neither table was registered here when
+            // Task 2 created them, so the migration linter never checked
+            // either declares tenant_id, and the predicate scanner treated
+            // every query FlowsApiHandler runs against them (six, as of this
+            // task) as touching an UNKNOWN table -- unpoliced, not passing:
+            // deleting `AND tenant_id = :tenant_id` from any of those queries
+            // would still have shown green. Registered now, the first task
+            // with real handler SQL against either table.
+            'tasker_flows' => 'Flows are per-tenant, scoped through their project.',
+            'tasker_task_edges' => 'Task I/O edges are per-tenant.',
         ]);
     }
 
@@ -104,6 +116,13 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
             new CreateTaskerSectionsTable(),
             new CreateTaskerGroupsTable(),
             new CreateTaskerTasksTable(),
+            // D5a Task 5 REVIEW FIX: tasker_flows FK-references tasker_projects
+            // (already created above); tasker_task_edges FK-references
+            // tasker_tasks (just created) -- so both run only after their
+            // respective dependency, matching TenantIsolationOuTest's own
+            // migration order for the same two tables.
+            new CreateTaskerFlowsTable(),
+            new CreateTaskerTaskEdgesTable(),
             new CreateTaskerMilestonesTable(),
             new CreateTaskerTaskDiscussionsTable(),
             new CreateTaskerUserPrefsTable(),

@@ -1263,7 +1263,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                             ],
                             'context' => [
                                 'type' => 'object',
-                                'description' => 'Optional shared context for the flow -- background, goals, constraints, or instructions that apply to all tasks in it.',
+                                'description' => 'Optional shared context for the flow -- background, goals, constraints, or instructions that apply to all tasks in it. Must be a JSON OBJECT (not a string or array) -- see parity-allowlist.php for why this differs from the original.',
                             ],
                             'step_list_open' => [
                                 'type' => 'boolean',
@@ -1276,7 +1276,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         400 => ['description' => 'name, project_id, or a task_ids entry is missing, empty, or looks like a malformed short id'],
                         404 => ['description' => 'Project not found, or a task_ids entry not found, in the caller\'s tenant or OU scope'],
                         409 => ['description' => 'A flow with this name already exists in the project'],
-                        422 => ['description' => 'A task_ids entry does not belong to the project, or the tasks form a dependency cycle'],
+                        422 => ['description' => 'A task_ids entry does not belong to the project or already belongs to another flow, context is not a JSON object, or the tasks form a dependency cycle'],
                     ],
                 ],
             ],
@@ -3951,7 +3951,27 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             $taskIds[] = $resolvedTaskId;
         }
 
-        $context = is_array($decoded['context'] ?? null) ? $decoded['context'] : null;
+        // REVIEW FIX: this used to be a bare `is_array(...) ? ... : null`,
+        // which let a JSON ARRAY (e.g. `context: [1, 2]`) through unchecked —
+        // stored straight into the jsonb column as `[1,2]`, which Task 6's
+        // planned `context = context || :context::jsonb` merge does not
+        // MERGE with an existing object, it APPENDS
+        // (`'[1,2]'::jsonb || '{"a":1}'::jsonb` = `[1, 2, {"a": 1}]`).
+        // {@see self::isJsonObject()} already exists for exactly this check
+        // (updateProjectContext() uses it above) and was not being reused
+        // here. context is OPTIONAL on this route (unlike
+        // updateProjectContext(), where it is required), so an absent or
+        // explicit `null` context is still fine — only a PRESENT, non-null,
+        // non-object value 422s.
+        $context = null;
+        if (array_key_exists('context', $decoded) && $decoded['context'] !== null) {
+            if (!self::isJsonObject($decoded['context'])) {
+                return Response::error('context must be a JSON object', 422);
+            }
+            /** @var array<string, mixed> $context */
+            $context = $decoded['context'];
+        }
+
         $stepListOpen = $this->paramBool($request, 'step_list_open', false);
         $createdBy = $this->callerProfileId($request);
 

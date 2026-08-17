@@ -457,11 +457,36 @@ return [
         //    "DEPRECATED — ignored, kept so older callers do not error" /
         //    "kept for backward compatibility". There is no behaviour to
         //    port for a flag the original itself no longer honours.
+        //
+        // ALSO RECORDED HERE, though it has no `missing`/`extra`/`required`
+        // key to hang on (this test never compares TYPES, only property
+        // names/required/enum — see testEverySharedToolMatchesTheOriginalsArgumentShape()'s
+        // own docblock): `context` is a STRING on the original ("Optional
+        // shared context ... background, goals, constraints, or instructions
+        // that apply to all tasks in this flow") but an OBJECT here
+        // (tasker_flows.context is JSONB, decided in D5a Task 2, not this
+        // task). REVIEW FIX: this used to be silently unenforced -- any
+        // non-array value (including the original's own string shape) was
+        // simply discarded with no 400/422 at all. name_flow now calls the
+        // same isJsonObject() guard update_project_context already uses and
+        // 422s anything that is not a genuine JSON object, INCLUDING an
+        // original-shaped string. We deliberately require an object where
+        // the original takes a string, rather than accepting either: Task
+        // 6's planned `context = context || :context::jsonb` merge needs an
+        // object on both sides of `||` to actually MERGE (a jsonb array
+        // operand makes `||` APPEND instead, e.g.
+        // `'[1,2]'::jsonb || '{"a":1}'::jsonb` = `[1, 2, {"a": 1}]`), so
+        // accepting a bare string here would only push the same problem one
+        // task down the line.
         'missing' => ['short_id', 'bypass', 'bypass_reason'],
         'reason' => 'DEFERRED: short_id (custom short id override) has no equivalent -- every flow\'s short_id is '
             . 'auto-generated via ShortIdAllocator, matching tasker_tasks. bypass/bypass_reason are DEPRECATED '
             . 'no-ops on the original itself ("ignored, kept so older callers do not error"), so there is no live '
-            . 'behaviour to port.',
+            . 'behaviour to port. SEPARATELY (no missing/extra key applies -- this is a TYPE divergence, which the '
+            . 'test does not compare): context is a free-text STRING on the original; we require a JSON OBJECT '
+            . '(tasker_flows.context is jsonb, decided in D5a Task 2) and 422 anything else, including an '
+            . 'original-shaped string -- an object is what Task 6\'s planned `context || :context::jsonb` merge '
+            . 'needs on both sides to actually merge rather than silently append.',
     ],
 
     'list_flows' => [

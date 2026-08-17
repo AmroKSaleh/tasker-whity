@@ -37,47 +37,58 @@ use Whity\Sdk\Http\Response;
  * every current caller happens to be careful is one future call site away
  * from not being safe.
  *
- * ATOMICITY — name() DEVIATES from the brief's literal "runs in one
- * transaction" instruction, and this is a DELIBERATE, DOCUMENTED fix for a
- * real conflict in that instruction, not an oversight:
+ * ATOMICITY — name() runs in ONE real transaction, insert AND stamp loop
+ * both, matching the brief's literal instruction. An earlier version of this
+ * class argued that was impossible alongside the brief's OTHER instruction to
+ * insert via {@see ShortIdAllocator::withRetry()} (which recovers from a lost
+ * short_id race by catching a PDOException and retrying with a freshly
+ * computed candidate) — Postgres aborts an ENTIRE transaction block on the
+ * FIRST error any statement inside it raises, so a caught race-loss would
+ * normally poison the surrounding transaction and make the retry's own next
+ * SELECT fail immediately with "current transaction is aborted" (SQLSTATE
+ * 25P02) instead of actually retrying. That conclusion was WRONG: wrapping
+ * each individual insert ATTEMPT in `SAVEPOINT` / `ROLLBACK TO SAVEPOINT`
+ * (inside the withRetry() closure — see name()'s own comments) rescues the
+ * retry without ever leaving the outer transaction. A failed attempt rolls
+ * back only to its savepoint, not out of the transaction, so the connection
+ * is never poisoned and the next attempt's SELECT/INSERT runs normally. This
+ * needed no change to {@see ShortIdAllocator} itself — the savepoint dance
+ * lives entirely in this class's own closure.
  *
- * The brief also says to insert the flow row via
- * {@see ShortIdAllocator::withRetry()}, "copy[ing] the shape" of
- * {@see TasksApiHandler::create()}'s own call — and THAT method's sibling
- * {@see TasksApiHandler::moveToProject()} documents, at length, exactly why
- * withRetry() must NOT run inside an explicit BEGIN/COMMIT block on real
- * PostgreSQL: withRetry() recovers from a lost short_id race by catching a
- * PDOException and retrying with a freshly computed candidate, but Postgres
- * aborts an ENTIRE transaction block on the FIRST error any statement inside
- * it raises. Wrap withRetry() in an explicit transaction and a caught
- * race-loss poisons the surrounding transaction: the retry's own next SELECT
- * fails immediately with "current transaction is aborted" (SQLSTATE 25P02)
- * instead of actually retrying — and isRaceLoss() does not recognise 25P02 as
- * a race, so withRetry() rethrows it immediately. Worse, tasker_flows ALSO
- * carries `UNIQUE (project_id, name)` (tasker_tasks has no equivalent, so
- * this half of the conflict is new to this table): isRaceLoss() treats ANY
- * SQLSTATE 23505 as a lost race unconditionally (see its own docblock — it
- * does not check WHICH constraint fired), so a genuine, deterministic
- * duplicate-flow-name INSERT would ALSO be (wrongly) retried, and if that
- * whole call sat inside an explicit transaction, the second attempt's own
- * SELECT MAX(short_id) would hit the SAME 25P02-abort wall — turning an
- * ordinary, nameable 409 into a confusing, generic 500.
+ * This is simpler than the previous shape, not just more literal: there is
+ * no un-transacted insert, no separate compensating DELETE, and no
+ * orphan-flow failure mode (a flow committed with zero stamped members
+ * because the stamp loop failed AND the compensating delete also failed).
+ * Either the whole transaction (insert + every stamp) commits, or none of it
+ * does. A genuine duplicate flow name (tasker_flows' own
+ * `UNIQUE (project_id, name)`) still surfaces as the intended 409 via
+ * isUniqueViolation(): {@see ShortIdAllocator::isRaceLoss()} treats ANY
+ * SQLSTATE 23505 as a lost race unconditionally (it does not check WHICH
+ * constraint fired), so a duplicate name is retried MAX_ATTEMPTS times before
+ * the last real 23505 propagates out — wasteful but not wrong, and not
+ * something this task owns fixing (see ShortIdAllocator's own docblock).
  *
- * So: validation (task-project membership, edge loading, topological sort) is
- * ENTIRELY READ-ONLY and runs BEFORE any write, which is what actually
- * guarantees "a cycle/invalid task 422 leaves nothing written" — no
- * transaction is needed for that half at all. The flow row is then inserted
- * UN-TRANSACTED via ShortIdAllocator::withRetry() (exactly like
- * TasksApiHandler::create(), so its retry-on-race behaviour works exactly as
- * documented, and a genuine duplicate name surfaces as the intended 409 via
- * isUniqueViolation()). ONLY the per-member stamp loop right after — the part
- * the brief is actually worried about ("a flow that exists with half its
- * members stamped is a corrupt row") — runs inside a real transaction, so a
- * partial-stamp failure rolls every stamp back. If the stamp transaction
- * itself fails, the already-committed flow row is deleted as a compensating
- * action so the operation is atomic from the CALLER's point of view (either a
- * fully-formed, fully-stamped flow exists, or nothing does) even though it is
- * not implemented as one literal SQL transaction.
+ * Validation (task-project membership, re-membership, edge loading,
+ * topological sort) stays ENTIRELY READ-ONLY and runs BEFORE the transaction
+ * even opens — a cycle/invalid-task/already-in-another-flow 422 leaves
+ * nothing written and never even opens a transaction to roll back.
+ *
+ * THE STAMP LOOP'S OWN GUARD: the per-member `UPDATE` binds
+ * `AND project_id = :project_id`, not just `(id, tenant_id)`, and throws
+ * unless `rowCount() === 1`. This is NOT redundant with the transaction: the
+ * membership SELECT far above and this UPDATE are separated by the edge
+ * SELECT, the sort, and up to `ShortIdAllocator::MAX_ATTEMPTS` insert
+ * attempts, and under READ COMMITTED that snapshot can go stale in the
+ * window — a concurrent `move_task` committing in between would let a task
+ * that no longer belongs to `$projectId` still match a bare `(id,
+ * tenant_id)` UPDATE, silently producing the exact cross-project member the
+ * 422 earlier in this method exists to prevent; a concurrent `delete_task`
+ * would make the UPDATE match 0 rows silently, and this method would return
+ * 201 for a flow quietly missing a member the caller named. The transaction
+ * from item 1 does not close this window by itself — the stale SELECT was
+ * already read before the transaction opened — so the project-scoped UPDATE
+ * plus its own rowCount() check is what actually closes it, by rolling the
+ * WHOLE transaction back the instant either race is detected.
  */
 final class FlowsApiHandler
 {
@@ -128,17 +139,67 @@ final class FlowsApiHandler
 
         [$memberSql, $memberParams] = self::inClause('m', $taskIds);
         $membership = $this->db->prepare(
-            "SELECT id FROM tasker_tasks WHERE tenant_id = :tenant_id AND project_id = :project_id AND id IN ({$memberSql})"
+            "SELECT id, flow_id FROM tasker_tasks
+             WHERE tenant_id = :tenant_id AND project_id = :project_id AND id IN ({$memberSql})"
         );
         $membership->execute([':tenant_id' => $tenantId, ':project_id' => $projectId] + $memberParams);
+
         /** @var list<int> $validIds */
-        $validIds = array_map('intval', $membership->fetchAll(PDO::FETCH_COLUMN));
+        $validIds = [];
+        /** @var array<int, int> $existingFlowByTask task id => the OTHER flow it already belongs to */
+        $existingFlowByTask = [];
+        foreach ($membership->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $id = (int) $row['id'];
+            $validIds[] = $id;
+            if ($row['flow_id'] !== null) {
+                $existingFlowByTask[$id] = (int) $row['flow_id'];
+            }
+        }
 
         $offenders = array_values(array_diff($taskIds, $validIds));
         if ($offenders !== []) {
             return Response::error(
                 'task_ids must all belong to project ' . $projectId . '; offending id(s): ' . implode(', ', $offenders),
                 422
+            );
+        }
+
+        // REVIEW FIX: name() used to happily re-stamp a task that already
+        // belonged to ANOTHER flow, silently stealing it out — a second
+        // name_flow call over the same tasks returned 201 and left the FIRST
+        // flow with zero members, with no warning on either side. Neither the
+        // brief nor the plan addresses re-membership, so this is a deliberate
+        // decision, not a contradiction of either: refuse outright, naming
+        // both the offending task ids and the flow(s) they already belong to.
+        // A caller who genuinely wants to re-home tasks can delete_flow first
+        // (explicit), rather than name_flow silently emptying someone else's
+        // flow as a side effect nobody asked for.
+        if ($existingFlowByTask !== []) {
+            $conflictFlowIds = array_values(array_unique($existingFlowByTask));
+            [$flowSql, $flowParams] = self::inClause('ef', $conflictFlowIds);
+            $flowNameStmt = $this->db->prepare(
+                "SELECT id, name FROM tasker_flows WHERE tenant_id = :tenant_id AND id IN ({$flowSql})"
+            );
+            $flowNameStmt->execute([':tenant_id' => $tenantId] + $flowParams);
+            /** @var array<int, string> $flowNames */
+            $flowNames = [];
+            foreach ($flowNameStmt->fetchAll(PDO::FETCH_ASSOC) as $flowRow) {
+                $flowNames[(int) $flowRow['id']] = (string) $flowRow['name'];
+            }
+
+            $conflicts = [];
+            foreach ($existingFlowByTask as $taskId => $flowId) {
+                $conflicts[] = [
+                    'task_id' => $taskId,
+                    'flow_id' => $flowId,
+                    'flow_name' => $flowNames[$flowId] ?? null,
+                ];
+            }
+
+            return Response::error(
+                'task_ids already belong to another flow; delete_flow that flow first to re-home its tasks',
+                422,
+                ['conflicts' => $conflicts]
             );
         }
 
@@ -193,74 +254,119 @@ final class FlowsApiHandler
             $encodedContext = '{}';
         }
 
+        // REVIEW FIX: this class's own docblock used to argue that ONE real
+        // transaction covering both the insert and the stamp loop was
+        // impossible alongside ShortIdAllocator::withRetry() — wrong.
+        // SAVEPOINT/ROLLBACK TO SAVEPOINT around each individual insert
+        // ATTEMPT (inside the withRetry() closure) rescues the retry from
+        // Postgres's whole-transaction-abort-on-error behaviour: a caught
+        // race-loss rolls back only to the savepoint, not out of the
+        // transaction, so the NEXT attempt's own SELECT/INSERT runs against a
+        // live, un-poisoned transaction exactly as it would outside one. This
+        // makes the brief's literal "one transaction" instruction genuinely
+        // achievable, and it is simpler than the previous
+        // un-transacted-insert-plus-compensating-delete shape: no orphan-flow
+        // failure mode (there is nothing to compensate for — either the whole
+        // transaction commits or none of it does), and a genuine duplicate
+        // flow name still surfaces as 409 (isUniqueViolation() below), not a
+        // confusing 500, because the LAST attempt's real 23505 is what
+        // ultimately propagates once ShortIdAllocator::MAX_ATTEMPTS is spent.
+        $publicId = self::generateUuidV4();
+
         try {
-            $publicId = self::generateUuidV4();
+            $this->db->beginTransaction();
+
             ShortIdAllocator::withRetry(
                 $this->db,
                 $tenantId,
                 $projectId,
                 function (int $candidate) use ($publicId, $tenantId, $projectId, $name, $encodedContext, $stepListOpen, $createdBy): void {
-                    $insert = $this->db->prepare(
-                        'INSERT INTO tasker_flows
-                            (public_id, tenant_id, project_id, name, context, step_list_open, short_id, created_by, created_at, updated_at)
-                         VALUES
-                            (:public_id, :tenant_id, :project_id, :name, :context, :step_list_open, :short_id, :created_by, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
-                    );
-                    $insert->bindValue(':public_id', $publicId, PDO::PARAM_STR);
-                    $insert->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
-                    $insert->bindValue(':project_id', $projectId, PDO::PARAM_INT);
-                    $insert->bindValue(':name', $name, PDO::PARAM_STR);
-                    $insert->bindValue(':context', $encodedContext, PDO::PARAM_STR);
-                    $insert->bindValue(':step_list_open', $stepListOpen, PDO::PARAM_BOOL);
-                    $insert->bindValue(':short_id', $candidate, PDO::PARAM_INT);
-                    $insert->bindValue(':created_by', $createdBy, $createdBy === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
-                    $insert->execute();
+                    // A fresh SAVEPOINT per attempt: on success it is
+                    // RELEASEd (folded into the still-open outer
+                    // transaction); on failure it is rolled back to —
+                    // un-poisoning the outer transaction so the NEXT
+                    // attempt's own statements do not immediately fail with
+                    // "current transaction is aborted" (SQLSTATE 25P02) the
+                    // way they would without this.
+                    $this->db->exec('SAVEPOINT flow_insert_attempt');
+                    try {
+                        $insert = $this->db->prepare(
+                            'INSERT INTO tasker_flows
+                                (public_id, tenant_id, project_id, name, context, step_list_open, short_id, created_by, created_at, updated_at)
+                             VALUES
+                                (:public_id, :tenant_id, :project_id, :name, :context, :step_list_open, :short_id, :created_by, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)'
+                        );
+                        $insert->bindValue(':public_id', $publicId, PDO::PARAM_STR);
+                        $insert->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+                        $insert->bindValue(':project_id', $projectId, PDO::PARAM_INT);
+                        $insert->bindValue(':name', $name, PDO::PARAM_STR);
+                        $insert->bindValue(':context', $encodedContext, PDO::PARAM_STR);
+                        $insert->bindValue(':step_list_open', $stepListOpen, PDO::PARAM_BOOL);
+                        $insert->bindValue(':short_id', $candidate, PDO::PARAM_INT);
+                        $insert->bindValue(':created_by', $createdBy, $createdBy === null ? PDO::PARAM_NULL : PDO::PARAM_INT);
+                        $insert->execute();
+                    } catch (\Throwable $e) {
+                        $this->db->exec('ROLLBACK TO SAVEPOINT flow_insert_attempt');
+                        throw $e;
+                    }
+                    $this->db->exec('RELEASE SAVEPOINT flow_insert_attempt');
                 },
                 'tasker_flows'
             );
-        } catch (\Throwable $e) {
-            if (self::isUniqueViolation($e)) {
-                return Response::error('A flow named "' . $name . '" already exists in this project', 409);
-            }
 
-            return Response::error('Failed to create flow', 500);
-        }
+            // lastInsertId() is the row's true identity (PostgreSQL's
+            // BIGSERIAL sequence via lastval()) — see TasksApiHandler::create()'s
+            // own doc for why this is read AFTER withRetry() returns rather
+            // than trusting its own return value (the successful short_id
+            // candidate, not the row id). Still inside the SAME transaction:
+            // lastval() reads the sequence state on this connection, which a
+            // not-yet-committed INSERT already advanced.
+            $flowId = (int) $this->db->lastInsertId();
 
-        // lastInsertId() is the row's true identity (PostgreSQL's BIGSERIAL
-        // sequence via lastval()) — see TasksApiHandler::create()'s own doc
-        // for why this is read AFTER withRetry() returns rather than trusting
-        // its own return value (the successful short_id candidate, not the
-        // row id).
-        $flowId = (int) $this->db->lastInsertId();
-
-        try {
-            $this->db->beginTransaction();
             foreach ($sorted['positions'] as $taskId => $step) {
+                // REVIEW FIX: keyed only on (id, tenant_id) before, with no
+                // guard against what happened in the WINDOW between the
+                // membership SELECT far above and this UPDATE (the edge
+                // SELECT, the sort, and up to MAX_ATTEMPTS allocate-and-insert
+                // retries all sit in between). Under READ COMMITTED a
+                // concurrent move_task committing in that window could move a
+                // task out of $projectId and this UPDATE would still find and
+                // stamp it by bare id — producing exactly the cross-project
+                // member the 422 above exists to prevent. Adding
+                // `AND project_id = :project_id` closes that: a task that
+                // moved out no longer matches, so rowCount() drops to 0.
+                // A concurrent delete_task hits the same rowCount() === 0
+                // case. Either way this throws, which rolls back the WHOLE
+                // transaction (the flow insert included) rather than
+                // returning 201 for a flow silently missing a member the
+                // caller named.
                 $stamp = $this->db->prepare(
                     'UPDATE tasker_tasks SET flow_id = :flow_id, flow_step = :flow_step, updated_at = CURRENT_TIMESTAMP
-                     WHERE id = :id AND tenant_id = :tenant_id'
+                     WHERE id = :id AND tenant_id = :tenant_id AND project_id = :project_id'
                 );
                 $stamp->bindValue(':flow_id', $flowId, PDO::PARAM_INT);
                 $stamp->bindValue(':flow_step', $step, PDO::PARAM_INT);
                 $stamp->bindValue(':id', $taskId, PDO::PARAM_INT);
                 $stamp->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+                $stamp->bindValue(':project_id', $projectId, PDO::PARAM_INT);
                 $stamp->execute();
+
+                if ($stamp->rowCount() !== 1) {
+                    throw new \RuntimeException(
+                        "Task {$taskId} could not be stamped -- it no longer belongs to project {$projectId} "
+                        . '(moved or deleted concurrently)'
+                    );
+                }
             }
+
             $this->db->commit();
-        } catch (\Throwable) {
+        } catch (\Throwable $e) {
             if ($this->db->inTransaction()) {
                 $this->db->rollBack();
             }
 
-            // Compensating cleanup: the flow row committed above must not
-            // survive with zero stamped members — see this class's own
-            // ATOMICITY note. Best effort; if this ALSO fails there is
-            // nothing further this method can do.
-            try {
-                $cleanup = $this->db->prepare('DELETE FROM tasker_flows WHERE id = :id AND tenant_id = :tenant_id');
-                $cleanup->execute([':id' => $flowId, ':tenant_id' => $tenantId]);
-            } catch (\Throwable) {
-                // Nothing more to do here; the primary error below still reports.
+            if (self::isUniqueViolation($e)) {
+                return Response::error('A flow named "' . $name . '" already exists in this project', 409);
             }
 
             return Response::error('Failed to create flow', 500);
