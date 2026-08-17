@@ -221,10 +221,6 @@ final class IdentifierResolver
         $form  = self::classify($raw);
         $value = trim((string) ($raw ?? ''));
 
-        if ($form === 'empty' || $form === 'malformed_short_id') {
-            return null;
-        }
-
         if ($form === 'short_id') {
             [$prefix, $shortId] = explode('-', $value, 2);
 
@@ -248,8 +244,19 @@ final class IdentifierResolver
             return $id === false ? null : (int) $id;
         }
 
-        // Tasks have no slug and no prefix, so anything else is an id or UUID.
-        if ($form === 'prefix' || $form === 'slug') {
+        // REVIEW FIX (D5a Task 4 round 3): allowlist, not denylist. Tasks are
+        // addressable only via 'short_id' (handled above), 'integer', or
+        // 'uuid'. Everything else -- 'empty', 'malformed_short_id', 'prefix',
+        // 'slug', and classify()'s NEW 'flow_short_id' form -- is not a task
+        // identifier and resolves to null. The previous denylist here
+        // (`'prefix'`/`'slug'` only) predated 'flow_short_id' and let it fall
+        // through to `$column = 'id'` below, binding a non-numeric string
+        // like "TDE-F1" to a bigint column and raising an uncaught
+        // PDOException instead of a clean 404 -- the exact bug resolveFlow()
+        // was fixed for, reopened here by the same classify() change. An
+        // allowlist stays correct the next time classify() grows an eighth
+        // form; a denylist needs updating in lockstep every time.
+        if ($form !== 'integer' && $form !== 'uuid') {
             return null;
         }
 
@@ -500,7 +507,20 @@ final class IdentifierResolver
         $form  = self::classify($raw);
         $value = trim((string) ($raw ?? ''));
 
-        if ($form === 'empty' || $form === 'malformed_short_id' || $form === 'short_id') {
+        // REVIEW FIX (D5a Task 4 round 3): allowlist, not denylist. Sections
+        // and groups are addressable only via 'slug'/'prefix' (ambiguous
+        // slug lookup, below) or 'integer'/'uuid' (id lookup, further
+        // below). Everything else -- 'empty', 'malformed_short_id',
+        // 'short_id' (short ids name a TASK, not a section/group), and
+        // classify()'s NEW 'flow_short_id' form -- is not a section/group
+        // identifier and resolves to null. The previous denylist here
+        // (only 'empty'/'malformed_short_id'/'short_id') predated
+        // 'flow_short_id' and let it fall through to `$column = 'id'`
+        // further below, binding a non-numeric string like "TDE-F1" to a
+        // bigint column and raising an uncaught PDOException instead of a
+        // clean 404 -- the same bug resolveFlow() and resolveTask() were
+        // fixed for, reopened here by the same classify() change.
+        if ($form !== 'slug' && $form !== 'prefix' && $form !== 'uuid' && $form !== 'integer') {
             return null;
         }
 

@@ -3249,6 +3249,93 @@ final class TenantIsolationOuTest extends TestCase
         self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, null, ''));
     }
 
+    /**
+     * CRITICAL FIX under direct test (round 3 review finding). Adding
+     * 'flow_short_id' to classify() is a change to EVERY resolver that
+     * switches on classify(), not just resolveFlow(): resolveTask()'s guard
+     * denylisted only 'prefix'/'slug' after handling 'short_id', so the new
+     * form fell through to `$column = 'id'` and bound a non-numeric string
+     * like "CNF-F1" to a bigint column, raising an uncaught PDOException
+     * instead of 404. Confirmed against the pre-fix code:
+     * SQLSTATE[22P02] invalid input syntax for type bigint: "PRB-F1".
+     * This is a genuine D5a Task 4 regression, not pre-existing: before this
+     * slice, the same raw string classified as 'malformed_short_id' (not
+     * 'slug' -- verified by running the pre-Task-4 classify() directly), and
+     * resolveTask() already returned null for that form explicitly.
+     */
+    public function testResolveTaskReturnsNullForAFlowShortIdRatherThanThrowing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Confusable Task Side', 'CNF');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $this->makeTaskDirect(7, $projectId, $sectionId, 'Some task');
+
+        // A flow short id is the mirror-image realistic mistake to the one
+        // fixed in resolveFlow() above: an agent with a flow id in hand may
+        // pass it where a task id belongs. Must 404, not raise an uncaught
+        // bigint cast error from binding "CNF-F1" to t.id.
+        self::assertNull(IdentifierResolver::resolveTask($this->pdo, 7, null, 'CNF-F1'));
+    }
+
+    /**
+     * CRITICAL FIX under direct test (round 3 review finding), the
+     * resolveStructural() half shared by resolveSection() and
+     * resolveGroup(): its guard denylisted only 'empty'/'malformed_short_id'/
+     * 'short_id', so the new 'flow_short_id' form fell through to
+     * `$column = 'id'` exactly as in resolveTask(). Confirmed against the
+     * pre-fix code for both resolveSection() and resolveGroup(): the same
+     * SQLSTATE[22P02] bigint cast error.
+     */
+    public function testResolveSectionAndGroupReturnNullForAFlowShortIdRatherThanThrowing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Confusable Structural Side', 'CNF');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+
+        self::assertNull(IdentifierResolver::resolveSection($this->pdo, 7, null, 'CNF-F1', $projectId));
+        self::assertNull(IdentifierResolver::resolveGroup($this->pdo, 7, null, 'CNF-F1', $sectionId));
+    }
+
+    /**
+     * SYSTEMIC GUARD (round 3 review finding). The lesson generalises: adding
+     * a classify() form is a change to every consumer of classify(), not
+     * just the resolver the new form was added for. Feeds one value of EVERY
+     * classify() form to EVERY resolver in this class and asserts only that
+     * none of them throws -- each must either resolve or cleanly return
+     * null. The assertTrue() calls below are deliberately trivial: the
+     * property under test is "did not throw", so simply reaching each one
+     * (i.e. surviving the call without a fatal PDOException) IS the pass.
+     * This is the guard against an EIGHTH classify() form reopening the
+     * exact bigint-cast bug fixed here and in resolveFlow()/resolveTask(),
+     * in a resolver nobody remembers to update.
+     */
+    public function testNoResolverThrowsOnAnIdentifierFormItDoesNotSupport(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Crossfeed', 'XFD');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $taskId    = $this->makeTaskDirect(7, $projectId, $sectionId, 'A task');
+
+        // resolveSection()/resolveGroup()/resolveMilestoneById()/
+        // resolveMilestoneByIndex() all take a PARENT scoping id ($projectId,
+        // $sectionId, $taskId respectively), not a target row id -- no
+        // group or milestone row needs to exist for this test, since the
+        // property under test is "does not throw", not "resolves to a row".
+
+        // One value of EVERY classify() form, fed to EVERY resolver. None may
+        // throw.
+        $forms = ['XFD-F1', 'XFD-1', 'XFD', 'crossfeed', '', 'XFD-', '12345',
+                  '3d0b368a-cf4e-4e0f-b54c-5ff96ce84e23'];
+
+        foreach ($forms as $raw) {
+            IdentifierResolver::resolveProject($this->pdo, 7, null, $raw);
+            IdentifierResolver::resolveTask($this->pdo, 7, null, $raw);
+            IdentifierResolver::resolveFlow($this->pdo, 7, null, $raw);
+            IdentifierResolver::resolveSection($this->pdo, 7, null, $raw, $projectId);
+            IdentifierResolver::resolveGroup($this->pdo, 7, null, $raw, $sectionId);
+            IdentifierResolver::resolveMilestoneById($this->pdo, 7, $taskId, $raw);
+            IdentifierResolver::resolveMilestoneByIndex($this->pdo, 7, $taskId, $raw);
+            self::assertTrue(true, "no resolver threw on: {$raw}");
+        }
+    }
+
     // ==================== MilestonesApiHandler::create() (whole-branch review finding C1) ====================
 
     public function testMilestonesCreateDefaultsCheckedToFalse(): void
