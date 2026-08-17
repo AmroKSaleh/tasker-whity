@@ -8297,4 +8297,590 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(400, $plugin->deriveOutputContract($request)->getStatusCode());
     }
+
+    // ── D5a Task 10: the three reads, and the repair hatch ───────────────────
+    //
+    // get_task_connections / get_flow_order / recompute_flow_steps. All three
+    // methods take ?int $callerOuId, so per the plan's global constraint all of
+    // their coverage lives in this Postgres tier, and every OU-boundary case
+    // below pairs a sibling-OU 404 with a same-OU positive control.
+    //
+    // The brief ships TWO tests (testConnectionsReportsBlockersAndDependentsSeparately
+    // and testRecomputeIsANoOpWhenOrderIsAlreadyCorrect, both verbatim below);
+    // everything else here is added. Most of the additions are this project's
+    // standing obligations — a paired OU control per method, route-level wiring,
+    // and the malformed-short-id table. FOUR are worth naming, because each
+    // closes something the brief's own two structurally cannot:
+    //
+    //  1. testRecomputeRepairsFlowStepsCorruptedByADirectWrite() -- the brief's
+    //     testRecomputeIsANoOpWhenOrderIsAlreadyCorrect() asserts
+    //     assertSame($before, $after), which `recompute() { return
+    //     Response::ok(); }` satisfies perfectly. Every test the brief ships
+    //     for this method passes against a method that does nothing at all, so
+    //     one test has to corrupt flow_step and prove the repair actually
+    //     repairs.
+    //  2. testRecomputeRefuses422WhenTheFlowsEdgesFormACycle() -- recompute()
+    //     is the ONLY caller of the shared re-stamp helper that can reach its
+    //     FlowCycleException (both Task 7 call sites pre-validate), so this is
+    //     where that path is provable at all.
+    //  3. testConnectionsIgnoresAnEdgeReachingATaskInASiblingOu() and
+    //  4. testOrderOmitsAMemberInASiblingOusProject() -- the OU predicates on
+    //     the new queries. Task 9's review round 1 found consumerEdgesOf()'s
+    //     equivalent predicate had no test, which makes a defence-in-depth
+    //     filter indistinguishable from dead code; both tests below carry an
+    //     unrestricted-caller control so they prove the PREDICATE rather than a
+    //     broken join. (4) is not hypothetical: move_task's cross-project move
+    //     (TasksApiHandler::moveToProject()) does not clear flow_id, so a flow
+    //     member really can end up in another project -- and therefore another
+    //     OU -- through a ported tool. See the task-10 report.
+
+    public function testConnectionsReportsBlockersAndDependentsSeparately(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Conn', 'CON');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $up   = $this->makeTaskDirect(7, $projectId, $sectionId, 'Upstream');
+        $mid  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Middle');
+        $down = $this->makeTaskDirect(7, $projectId, $sectionId, 'Downstream');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $mid,  $up,  null, null, false);
+        $edges->setInput(7, null, $down, $mid, null, null, false);
+
+        $payload = json_decode($edges->connections(7, null, $mid)->getBody(), true);
+
+        self::assertSame([$up],   array_column($payload['data']['blockers'],  'id'));
+        self::assertSame([$down], array_column($payload['data']['dependents'], 'id'));
+    }
+
+    /**
+     * The two directions must not be silently interchangeable: an edge carries
+     * the CONSUMER's demand on its producer, so the contract read back on a
+     * blocker is the demand THIS task makes, and the one read back on a
+     * dependent is the demand made OF this task. A blockers/dependents swap
+     * would leave the test above green (it only checks which ids land in which
+     * bucket for a chain whose two edges are symmetric in shape), so this
+     * pins the edge metadata to the right side as well.
+     */
+    public function testConnectionsCarriesEachEdgesOwnDeclaredMetadata(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'ConnMeta', 'CNM');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $up   = $this->makeTaskDirect(7, $projectId, $sectionId, 'Upstream');
+        $mid  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Middle');
+        $down = $this->makeTaskDirect(7, $projectId, $sectionId, 'Downstream');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 4 WHERE id = {$up}");
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $mid, $up, 'document', ['rules' => [['label' => 'What Middle demands']]], false);
+        $edges->setInput(7, null, $down, $mid, 'code', ['rules' => [['label' => 'What Downstream demands']]], false);
+
+        $data = json_decode($edges->connections(7, null, $mid)->getBody(), true)['data'];
+
+        self::assertSame($mid, $data['taskId']);
+        self::assertSame('document', $data['blockers'][0]['expectedType']);
+        self::assertSame(['What Middle demands'], array_column($data['blockers'][0]['contract']['rules'], 'label'));
+        self::assertSame('CNM-4', $data['blockers'][0]['shortId'], 'a blocker must be addressable by short id');
+        self::assertSame('Upstream', $data['blockers'][0]['text']);
+
+        self::assertSame('code', $data['dependents'][0]['expectedType']);
+        self::assertSame(['What Downstream demands'], array_column($data['dependents'][0]['contract']['rules'], 'label'));
+        self::assertNull($data['dependents'][0]['shortId'], 'a task with no short id renders null, never a bare dash');
+    }
+
+    public function testConnectionsIsEmptyOnBothSidesForAnUnwiredTask(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'ConnAlone', 'CNA');
+        $lonely = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'Lonely');
+
+        $data = json_decode((new TaskEdgesApiHandler($this->pdo))->connections(7, null, $lonely)->getBody(), true)['data'];
+
+        self::assertSame([], $data['blockers']);
+        self::assertSame([], $data['dependents']);
+    }
+
+    /**
+     * Global constraint: every OU-boundary test pairs a sibling-OU 404 with a
+     * same-OU positive control -- a 404-only test can pass merely because the
+     * fixture was never visible in the first place.
+     */
+    public function testConnectionsRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibConn', 'SC0');
+        $sibTask    = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sib');
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnConn', 'OC0');
+        $ownTask    = $this->makeTaskDirect(7, $ownProject, $this->makeSectionDirect(7, $ownProject), 'Own');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        self::assertSame(404, $edges->connections(7, 2, $sibTask)->getStatusCode());
+        self::assertSame(200, $edges->connections(7, 2, $ownTask)->getStatusCode());
+    }
+
+    /**
+     * Both of connections()'s queries carry an OU predicate over the OTHER end
+     * of the edge, on top of the taskInfo() check on the task itself. Without
+     * it, a sibling OU's task NAME (and its edge's rule text) is quoted
+     * straight back to a caller who cannot see that task at all.
+     *
+     * Every edge written THROUGH this API has same-project endpoints
+     * (setInput()'s own 422), so the only way a cross-OU edge exists is a
+     * direct row insert -- which is what insertEdgeDirect() is for. The
+     * unrestricted control at the end is what makes this prove the PREDICATE
+     * rather than a broken join.
+     */
+    public function testConnectionsIgnoresAnEdgeReachingATaskInASiblingOu(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnConnEdge', 'OCE');
+        $ownSection = $this->makeSectionDirect(7, $ownProject);
+        $subject    = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Subject');
+        $ownUp      = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Own upstream');
+        $ownDown    = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Own downstream');
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibConnEdge', 'SCE');
+        $sibSection = $this->makeSectionDirect(7, $sibProject);
+        $sibUp      = $this->makeTaskDirect(7, $sibProject, $sibSection, 'Sibling upstream');
+        $sibDown    = $this->makeTaskDirect(7, $sibProject, $sibSection, 'Sibling downstream');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $subject, $ownUp, null, null, false);
+        $edges->setInput(7, null, $ownDown, $subject, null, null, false);
+        $this->insertEdgeDirect(7, $sibUp, $subject);
+        $this->insertEdgeDirect(7, $subject, $sibDown);
+
+        $scoped = json_decode($edges->connections(7, 2, $subject)->getBody(), true)['data'];
+        self::assertSame([$ownUp], array_column($scoped['blockers'], 'id'));
+        self::assertSame([$ownDown], array_column($scoped['dependents'], 'id'));
+        self::assertStringNotContainsString('Sibling', (string) json_encode($scoped),
+            'not even another OU\'s task NAME may be quoted back to a caller who cannot see it');
+
+        $unrestricted = json_decode($edges->connections(7, null, $subject)->getBody(), true)['data'];
+        self::assertSame([$ownUp, $sibUp], array_column($unrestricted['blockers'], 'id'),
+            'the control: both cross-OU edges ARE reachable, so the exclusion above was the OU predicate doing its job');
+        self::assertSame([$ownDown, $sibDown], array_column($unrestricted['dependents'], 'id'));
+    }
+
+    // ── get_flow_order ───────────────────────────────────────────────────────
+
+    public function testOrderListsTheFlowsMembersInFlowStepOrderNotIdOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Ordered', 'ORD');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'C');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Ordered flow', [$a, $b, $c], null, false, 2)->getBody(), true)['data']['id'];
+
+        // C feeds A -- the highest-id task produces for the lowest -- so the
+        // topological order (B, C, A) is NOT id order (A, B, C).
+        self::assertSame(200, (new TaskEdgesApiHandler($this->pdo))->setInput(7, null, $a, $c, null, null, false)->getStatusCode());
+
+        $data = json_decode($flows->order(7, null, $flowId)->getBody(), true)['data'];
+
+        self::assertSame([$b, $c, $a], array_column($data['steps'], 'id'));
+        self::assertSame([1, 2, 3], array_column($data['steps'], 'flowStep'));
+        self::assertSame($flowId, $data['flow']['id']);
+        self::assertSame('Ordered flow', $data['flow']['name']);
+    }
+
+    /**
+     * A member with a NULL flow_step (only reachable by a direct write, or by
+     * a future path that adds a member without stamping it) must still be
+     * LISTED, at the end -- `ORDER BY flow_step` puts NULLs last in
+     * PostgreSQL, and an unstamped member silently vanishing from the order is
+     * exactly what a caller consults this tool to find out about.
+     */
+    public function testOrderListsAnUnstampedMemberLastRatherThanDroppingIt(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'OrderedGap', 'ORG');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Gapped flow', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+        $this->pdo->exec("UPDATE tasker_tasks SET flow_step = NULL WHERE id = {$a}");
+
+        $data = json_decode($flows->order(7, null, $flowId)->getBody(), true)['data'];
+
+        self::assertSame([$b, $a], array_column($data['steps'], 'id'));
+        self::assertNull($data['steps'][1]['flowStep']);
+    }
+
+    /**
+     * RULING 4 (the widening): the original's get_flow_order also addresses a
+     * flow by task_id ("focus on that task's specific flow"), and NOTHING else
+     * on this surface maps a task to its flow -- get_task does not expose
+     * flow_id at all -- so dropping that form would drop a real capability. It
+     * is implemented rather than allowlisted; see the task-10 report.
+     */
+    public function testOrderResolvesTheFlowFromAnyOfItsMemberTasks(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'OrderByTask', 'OBT');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Task-addressed flow', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+
+        foreach ([$a, $b] as $member) {
+            $response = $flows->orderForTask(7, null, $member);
+            self::assertSame(200, $response->getStatusCode());
+            $data = json_decode($response->getBody(), true)['data'];
+            self::assertSame($flowId, $data['flow']['id']);
+            self::assertSame([$a, $b], array_column($data['steps'], 'id'));
+        }
+    }
+
+    public function testOrderForTaskReturns404WhenTheTaskBelongsToNoFlow(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'OrderNoFlow', 'ONF');
+        $loose = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'Loose');
+
+        self::assertSame(404, (new FlowsApiHandler($this->pdo))->orderForTask(7, null, $loose)->getStatusCode());
+    }
+
+    /**
+     * Global constraint: sibling-OU 404 paired with a same-OU positive
+     * control, for BOTH of get_flow_order's addressing forms.
+     */
+    public function testOrderRejects404ForASiblingOusFlowAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $flows = new FlowsApiHandler($this->pdo);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibOrder', 'SO0');
+        $sibTask    = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sib');
+        $sibFlow    = (int) json_decode($flows->name(7, null, $sibProject, 'Sib flow', [$sibTask], null, false, 2)->getBody(), true)['data']['id'];
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnOrder', 'OO0');
+        $ownTask    = $this->makeTaskDirect(7, $ownProject, $this->makeSectionDirect(7, $ownProject), 'Own');
+        $ownFlow    = (int) json_decode($flows->name(7, null, $ownProject, 'Own flow', [$ownTask], null, false, 2)->getBody(), true)['data']['id'];
+
+        self::assertSame(404, $flows->order(7, 2, $sibFlow)->getStatusCode());
+        self::assertSame(200, $flows->order(7, 2, $ownFlow)->getStatusCode());
+
+        self::assertSame(404, $flows->orderForTask(7, 2, $sibTask)->getStatusCode());
+        self::assertSame(200, $flows->orderForTask(7, 2, $ownTask)->getStatusCode());
+    }
+
+    /**
+     * The member query's OWN OU predicate, on top of the flow-level check.
+     * move_task's cross-project move does not clear flow_id, so a member
+     * really can end up in a project the caller cannot see -- and its text
+     * must not be listed back to them. Unrestricted control included, so this
+     * proves the predicate rather than a broken join.
+     */
+    public function testOrderOmitsAMemberInASiblingOusProject(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnMember', 'OM0');
+        $ownSection = $this->makeSectionDirect(7, $ownProject);
+        $stays  = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Stays');
+        $leaves = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Leaves');
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibMember', 'SM0');
+        $sibSection = $this->makeSectionDirect(7, $sibProject);
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $ownProject, 'Leaky flow', [$stays, $leaves], null, false, 2)->getBody(), true)['data']['id'];
+
+        // Exactly what move_task does today: re-home the task, keep flow_id.
+        $this->pdo->exec(
+            "UPDATE tasker_tasks SET project_id = {$sibProject}, section_id = {$sibSection} WHERE id = {$leaves}"
+        );
+
+        $scoped = json_decode($flows->order(7, 2, $flowId)->getBody(), true)['data'];
+        self::assertSame([$stays], array_column($scoped['steps'], 'id'));
+        self::assertStringNotContainsString('Leaves', (string) json_encode($scoped));
+
+        $unrestricted = json_decode($flows->order(7, null, $flowId)->getBody(), true)['data'];
+        self::assertSame([$stays, $leaves], array_column($unrestricted['steps'], 'id'),
+            'the control: the moved member IS still in the flow, so the exclusion above was the OU predicate');
+    }
+
+    // ── recompute_flow_steps: the repair hatch that should find nothing ──────
+
+    public function testRecomputeIsANoOpWhenOrderIsAlreadyCorrect(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Idem', 'IDM');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $b, $a, null, null, false);
+
+        $flows  = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Already ordered', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+
+        $before = $this->pdo->query("SELECT id, flow_step FROM tasker_tasks WHERE flow_id = {$flowId} ORDER BY id")->fetchAll(\PDO::FETCH_ASSOC);
+        self::assertSame(200, $flows->recompute(7, null, $flowId)->getStatusCode());
+        $after = $this->pdo->query("SELECT id, flow_step FROM tasker_tasks WHERE flow_id = {$flowId} ORDER BY id")->fetchAll(\PDO::FETCH_ASSOC);
+
+        self::assertSame($before, $after, 'auto-recompute means the manual hatch has nothing left to fix');
+    }
+
+    /**
+     * THE TEST THE BRIEF DOES NOT SHIP, and without which nothing here earns
+     * anything: testRecomputeIsANoOpWhenOrderIsAlreadyCorrect() above passes
+     * against `recompute() { return Response::ok(); }` -- assertSame($before,
+     * $after) is exactly what a method that does nothing guarantees. So this
+     * one corrupts flow_step with a raw UPDATE (the same shape a pre-D5a row,
+     * a hand-patched database, or a future un-stamping bug would leave behind)
+     * and requires the repair to actually land: B feeds A, so the only correct
+     * order is B=1, A=2, whatever the stored numbers say.
+     */
+    public function testRecomputeRepairsFlowStepsCorruptedByADirectWrite(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Repair', 'RPR');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $a, $b, null, null, false)->getStatusCode()); // B -> A
+
+        $flows  = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Repairable', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+        self::assertSame([2, 1], $this->stepsOf([$a, $b]), 'B feeds A, so B is step 1');
+
+        // Corrupt it: A first, B second, and both numbers wrong for the graph.
+        $this->pdo->exec("UPDATE tasker_tasks SET flow_step = 7 WHERE id = {$a}");
+        $this->pdo->exec("UPDATE tasker_tasks SET flow_step = 9 WHERE id = {$b}");
+
+        $response = $flows->recompute(7, null, $flowId);
+        self::assertSame(200, $response->getStatusCode());
+        self::assertSame([2, 1], $this->stepsOf([$a, $b]), 'the hatch must re-derive the order, not merely answer 200');
+
+        // And it reports the repaired order back, so a caller can see the fix.
+        $data = json_decode($response->getBody(), true)['data'];
+        self::assertSame([$b, $a], array_column($data['steps'], 'id'));
+        self::assertSame([1, 2], array_column($data['steps'], 'flowStep'));
+    }
+
+    /**
+     * recompute() is the ONLY caller of the shared re-stamp helper that can
+     * actually reach its FlowCycleException: set_task_input pre-validates the
+     * candidate edge over a strictly larger graph, and remove_task_input only
+     * ever removes a constraint. A cycle among a flow's members is therefore
+     * reachable only by direct writes -- which is precisely the state a repair
+     * hatch gets pointed at -- and it must be REFUSED with the cycle named,
+     * never half-stamped.
+     */
+    public function testRecomputeRefuses422WhenTheFlowsEdgesFormACycle(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Cyclic', 'CYC');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $flows  = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Cyclic flow', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+        self::assertSame([1, 2], $this->stepsOf([$a, $b]));
+
+        // Both directions, inserted RAW so setInput()'s own cycle check never
+        // sees them -- no supported call sequence can produce this.
+        $this->insertEdgeDirect(7, $a, $b);
+        $this->insertEdgeDirect(7, $b, $a);
+
+        $refused = $flows->recompute(7, null, $flowId);
+        self::assertSame(422, $refused->getStatusCode());
+        self::assertStringContainsString('cycle', strtolower((string) $refused->getBody()));
+        self::assertSame([1, 2], $this->stepsOf([$a, $b]), 'a refused recompute must leave every stamp exactly as it was');
+    }
+
+    public function testRecomputeRejects404ForASiblingOusFlowAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $flows = new FlowsApiHandler($this->pdo);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibRecomp', 'SR0');
+        $sibTask    = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sib');
+        $sibFlow    = (int) json_decode($flows->name(7, null, $sibProject, 'Sib flow', [$sibTask], null, false, 2)->getBody(), true)['data']['id'];
+        $this->pdo->exec("UPDATE tasker_tasks SET flow_step = 42 WHERE id = {$sibTask}");
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnRecomp', 'OR0');
+        $ownTask    = $this->makeTaskDirect(7, $ownProject, $this->makeSectionDirect(7, $ownProject), 'Own');
+        $ownFlow    = (int) json_decode($flows->name(7, null, $ownProject, 'Own flow', [$ownTask], null, false, 2)->getBody(), true)['data']['id'];
+        $this->pdo->exec("UPDATE tasker_tasks SET flow_step = 42 WHERE id = {$ownTask}");
+
+        self::assertSame(404, $flows->recompute(7, 2, $sibFlow)->getStatusCode());
+        self::assertSame([42], $this->stepsOf([$sibTask]), 'a 404 must not have re-stamped anything');
+
+        self::assertSame(200, $flows->recompute(7, 2, $ownFlow)->getStatusCode());
+        self::assertSame([1], $this->stepsOf([$ownTask]));
+    }
+
+    /**
+     * flow_step for each of $taskIds, in the order given.
+     *
+     * Read straight off the rows rather than out of a response body, so a
+     * stamp assertion cannot pass on what a handler CLAIMED to write. Takes a
+     * list (unlike this file's own three-argument flowSteps() above, written
+     * for Task 7's fixed A/B/C fixtures) because these tests need one, two and
+     * three-member flows.
+     *
+     * @param list<int> $taskIds
+     * @return list<int|null>
+     */
+    private function stepsOf(array $taskIds): array
+    {
+        $stmt = $this->pdo->prepare('SELECT id, flow_step FROM tasker_tasks WHERE id = ANY(:ids::bigint[])');
+        $stmt->bindValue(':ids', '{' . implode(',', $taskIds) . '}', PDO::PARAM_STR);
+        $stmt->execute();
+
+        /** @var array<int, int|null> $byId */
+        $byId = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $byId[(int) $row['id']] = $row['flow_step'] !== null ? (int) $row['flow_step'] : null;
+        }
+
+        return array_map(static fn (int $id): int|null => $byId[$id] ?? null, $taskIds);
+    }
+
+    // ── D5a Task 10: route-level wiring ──────────────────────────────────────
+
+    public function testGetTaskConnectionsRouteReadsTaskIdFromTheQueryString(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteConn', 'RC0');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $up  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Up');
+        $mid = $this->makeTaskDirect(7, $projectId, $sectionId, 'Mid');
+        (new TaskEdgesApiHandler($this->pdo))->setInput(7, null, $mid, $up, null, null, false);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('GET', "/api/tasker/tasks/connections?task_id={$mid}");
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->getTaskConnections($request);
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode($response->getBody(), true)['data'];
+        self::assertSame([$up], array_column($data['blockers'], 'id'));
+
+        $absent = $this->hostRequest('GET', '/api/tasker/tasks/connections');
+        $absent->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(404, $plugin->getTaskConnections($absent)->getStatusCode(),
+            'task_id has no default to fall back to, and an absent one is a miss, not somebody else\'s task');
+    }
+
+    public function testGetFlowOrderRouteAcceptsEitherIdentifierAnd400sWhenNeitherIsSupplied(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteOrder', 'RO0');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Routed flow', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+
+        $plugin = new TaskerPlugin();
+
+        $byFlow = $this->hostRequest('GET', "/api/tasker/flows/order?flow_id={$flowId}");
+        $byFlow->user = (object) ['profile_id' => self::CALLER_ID];
+        $flowResponse = $plugin->getFlowOrder($byFlow);
+        self::assertSame(200, $flowResponse->getStatusCode());
+
+        $byTask = $this->hostRequest('GET', "/api/tasker/flows/order?task_id={$b}");
+        $byTask->user = (object) ['profile_id' => self::CALLER_ID];
+        $taskResponse = $plugin->getFlowOrder($byTask);
+        self::assertSame(200, $taskResponse->getStatusCode());
+        self::assertSame(
+            json_decode($flowResponse->getBody(), true),
+            json_decode($taskResponse->getBody(), true),
+            'both addressing forms must describe the same flow identically'
+        );
+
+        // Neither identifier: 400, never "whatever your default project
+        // suggests" -- there is no default flow anywhere in this plugin.
+        $neither = $this->hostRequest('GET', '/api/tasker/flows/order');
+        $neither->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->getFlowOrder($neither)->getStatusCode());
+    }
+
+    /**
+     * recompute_flow_steps is a POST, not the GET the plan's prose called for:
+     * it WRITES, and a mutating GET is retryable and cacheable by anything
+     * sitting in front of it. flow_id is read via identifierFromRequest()
+     * (body-then-query) so both a real MCP POST body and a query-string call
+     * work, and it is REQUIRED -- this plugin's mutating-route rule forbids a
+     * mutation from resolving its own target from a caller default, which is
+     * exactly what the original's "required: nothing" shape does.
+     */
+    public function testRecomputeFlowStepsRouteWiresThroughAndRequiresFlowId(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteRecomp', 'RR0');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Routed recompute', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+        $this->pdo->exec("UPDATE tasker_tasks SET flow_step = 99 WHERE id = {$a}");
+
+        $plugin = new TaskerPlugin();
+
+        $request = $this->hostRequest('POST', '/api/tasker/flows/recompute', (string) json_encode(['flow_id' => $flowId]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(200, $plugin->recomputeFlowSteps($request)->getStatusCode());
+        self::assertSame([1, 2], $this->stepsOf([$a, $b]));
+
+        $absent = $this->hostRequest('POST', '/api/tasker/flows/recompute', (string) json_encode([]));
+        $absent->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->recomputeFlowSteps($absent)->getStatusCode());
+    }
+
+    /**
+     * The nine-read-route lesson from D1b: a malformed short id is a 400 on
+     * EVERY route that takes an identifier, not a puzzling 404 from a lookup
+     * that was never going to match. All three of this task's routes, plus
+     * get_flow_order's second identifier, in one table.
+     */
+    public function testTheThreeTask10Routes400OnAMalformedShortId(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $plugin = new TaskerPlugin();
+
+        $cases = [
+            ['GET', '/api/tasker/tasks/connections?task_id=TDE-x', '', 'getTaskConnections'],
+            ['GET', '/api/tasker/flows/order?flow_id=TDE-F', '', 'getFlowOrder'],
+            ['GET', '/api/tasker/flows/order?task_id=TDE-x', '', 'getFlowOrder'],
+            ['POST', '/api/tasker/flows/recompute', (string) json_encode(['flow_id' => 'TDE-F']), 'recomputeFlowSteps'],
+        ];
+
+        foreach ($cases as [$method, $path, $body, $handler]) {
+            $request = $this->hostRequest($method, $path, $body);
+            $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+            $response = $plugin->{$handler}($request);
+            self::assertSame(400, $response->getStatusCode(), "{$handler} must 400 on a malformed short id ({$path})");
+            self::assertStringContainsString('malformed', (string) $response->getBody());
+        }
+    }
 }

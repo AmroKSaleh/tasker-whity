@@ -6,13 +6,15 @@ namespace Tasker\Api;
 
 use PDO;
 use Tasker\Access\OuScopeResolver;
+use Tasker\Domain\FlowCycleException;
 use Tasker\Domain\FlowStepSorter;
 use Tasker\Domain\ShortIdAllocator;
 use Whity\Sdk\Http\Response;
 
 /**
  * name_flow/list_flows/delete_flow (D5a Task 5) — the flow-creating call and
- * its two siblings.
+ * its two siblings — plus get_flow_context/update_flow_context (Task 6) and
+ * get_flow_order/recompute_flow_steps (Task 10).
  *
  * Postgres-only, like every other OU-aware handler in this plugin
  * ({@see \Tasker\Api\SectionsApiHandler}'s own docblock explains why):
@@ -638,6 +640,243 @@ final class FlowsApiHandler
     }
 
     /**
+     * GET /api/tasker/flows/order?flow_id= — the original's get_flow_order:
+     * the flow's members in the order they must run, `flow_step` first and
+     * `id` as the tie-break (a static ORDER BY template, never branched at
+     * runtime).
+     *
+     * A member whose flow_step is NULL is LISTED LAST, not dropped —
+     * PostgreSQL's `ASC` already sorts NULLs last, spelt out as `NULLS LAST`
+     * here so the intent survives a future edit. An unstamped member is
+     * exactly the anomaly a caller consults this tool to discover (and the one
+     * recompute() exists to fix), so silently omitting it would hide the thing
+     * being asked about.
+     *
+     * Returns the whole flow record alongside the steps, the same way
+     * {@see self::getContext()} returns more than the context: a caller
+     * reading the order almost always wants to know WHICH flow answered, and
+     * the record is already loaded by the visibility check.
+     */
+    public function order(int $tenantId, ?int $callerOuId, int $flowId): Response
+    {
+        $row = $this->flowVisible($tenantId, $callerOuId, $flowId);
+        if ($row === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        return $this->orderResponse($tenantId, $callerOuId, $row);
+    }
+
+    /**
+     * GET /api/tasker/flows/order?task_id= — the SAME read, addressed by any
+     * member task instead of the flow itself.
+     *
+     * PORTED DELIBERATELY, and it is the one place this task widens on its
+     * brief (which specified flow_id only). The original's get_flow_order
+     * takes `task_id` to "focus on that task's specific flow", and NOTHING
+     * else on this surface maps a task to its flow — get_task does not expose
+     * flow_id at all — so declining this form would have dropped a real
+     * capability rather than narrowed a redundant one, on no principle: this
+     * plugin's mutating-route rule (a mutation never resolves its own target
+     * from a caller default) constrains MUTATIONS, and this is a read.
+     * task_id is still an EXPLICIT identifier, never a default.
+     *
+     * TWO 404s, deliberately distinguished by MESSAGE and not by status: a
+     * task outside the caller's tenant/OU scope is indistinguishable from one
+     * that does not exist ("Task not found"), while a task the caller CAN see
+     * that simply belongs to no flow gets told so. The second message reveals
+     * nothing — the caller already holds the task — and "not in a flow" is
+     * otherwise indistinguishable from "you cannot see this task", which is
+     * the single most confusing answer this route could give.
+     */
+    public function orderForTask(int $tenantId, ?int $callerOuId, int $taskId): Response
+    {
+        $task = $this->taskFlow($tenantId, $callerOuId, $taskId);
+        if (!$task['visible']) {
+            return Response::error('Task not found', 404);
+        }
+        if ($task['flowId'] === null) {
+            return Response::error('Task is not part of any flow', 404);
+        }
+
+        return $this->order($tenantId, $callerOuId, $task['flowId']);
+    }
+
+    /**
+     * POST /api/tasker/flows/recompute — the original's recompute_flow_steps:
+     * re-derive every member's flow_step from the edges among the flow's own
+     * members, and re-stamp.
+     *
+     * A REPAIR HATCH THAT SHOULD FIND NOTHING TO REPAIR, which is a deliberate
+     * divergence from the original rather than a coincidence: there,
+     * recompute_flow_steps is load-bearing, because nothing re-orders a flow
+     * when its I/O wiring changes. Here, every edge mutation re-stamps the
+     * owning flow's order inside the SAME transaction as the edge write itself
+     * (D5a Task 7 — see {@see \Tasker\Api\TaskEdgesApiHandler::setInput()}),
+     * so a correctly-behaving system never needs this call. It stays ported
+     * because the states it repairs are still reachable: rows written before
+     * this slice existed, a hand-patched database, or a future write path that
+     * forgets to re-stamp.
+     *
+     * A POST, NOT THE GET THE PLAN'S PROSE ASKED FOR. This WRITES, and a
+     * mutating GET is retryable and cacheable by anything sitting in front of
+     * it — the same reason derive_output_contract is a POST (see
+     * {@see \Tasker\TaskerPlugin::deriveOutputContract()}'s own route
+     * comment). The MCP surface is unaffected either way: a tool's schema is
+     * derived from `schema.request`/`operationId`, never from the HTTP method.
+     *
+     * IT MUST HOLD THE PROJECT LOCK BEFORE IT RE-STAMPS, and that is why the
+     * re-stamp goes through
+     * {@see \Tasker\Api\TaskEdgesApiHandler::restampFlowOrder()} rather than a
+     * local copy of the sort-and-stamp loop: that method opens the transaction
+     * and takes `lockProject()` beside the shared helper that requires them
+     * (see its own docblock, and TaskEdgesApiHandler's LOCKING section, for
+     * the member-SELECT/stamp-UPDATE race the lock closes). Re-stamping
+     * without it would reopen that race here, in the one method whose whole
+     * job is repairing exactly that class of damage.
+     *
+     * RETURNS THE REPAIRED ORDER, in {@see self::order()}'s own shape: for a
+     * hatch whose expected outcome is "nothing changed", the useful answer is
+     * what the order IS now, not a bare acknowledgement.
+     */
+    public function recompute(int $tenantId, ?int $callerOuId, int $flowId): Response
+    {
+        $row = $this->flowVisible($tenantId, $callerOuId, $flowId);
+        if ($row === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        try {
+            (new TaskEdgesApiHandler($this->db))->restampFlowOrder($tenantId, $flowId);
+        } catch (FlowCycleException $e) {
+            // Only reachable through direct, validation-bypassing writes (see
+            // restampFlowOrder()'s own docblock) -- but that is precisely the
+            // state a repair hatch gets pointed at, and a cycle is the one
+            // damage it cannot fix: there is no correct order to stamp. The
+            // whole transaction was rolled back before this, so every existing
+            // stamp is exactly as it was.
+            return Response::error(
+                'Cannot recompute this flow\'s steps while its tasks form a dependency cycle: '
+                . implode(' -> ', $e->cycle()),
+                422
+            );
+        } catch (\Throwable) {
+            return Response::error('Failed to recompute flow steps', 500);
+        }
+
+        return $this->orderResponse($tenantId, $callerOuId, $row);
+    }
+
+    /**
+     * The 200 {@see self::order()} and {@see self::recompute()} share: the flow
+     * record plus its members in step order.
+     *
+     * @param array<string, mixed> $flowRow a row from {@see self::flowVisible()}
+     */
+    private function orderResponse(int $tenantId, ?int $callerOuId, array $flowRow): Response
+    {
+        return Response::json(['data' => [
+            'flow' => $this->toPublicFlow($flowRow),
+            'steps' => $this->memberSteps($tenantId, $callerOuId, (int) $flowRow['id']),
+        ]], 200);
+    }
+
+    /**
+     * $flowId's member tasks in step order — flow_step first, id as the
+     * tie-break, unstamped members last. One static template.
+     *
+     * OU-SCOPED IN ITS OWN RIGHT, on top of the flow-level check its callers
+     * already made, and that is NOT merely defence in depth here: move_task's
+     * cross-project move ({@see \Tasker\Api\TasksApiHandler::moveToProject()})
+     * does not clear flow_id, so a member really can end up in a project — and
+     * therefore an OU — the caller cannot see, through a ported tool and with
+     * no direct database write involved. Listing such a member would quote
+     * another OU's task text straight back. Pinned by
+     * {@see \Tasker\Tests\TenantIsolationOuTest::testOrderOmitsAMemberInASiblingOusProject()},
+     * with an unrestricted control so the test proves the predicate rather
+     * than a broken join.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function memberSteps(int $tenantId, ?int $callerOuId, int $flowId): array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT t.id, t.public_id, t.text, t.short_id, t.status, t.flow_step, p.prefix
+             FROM tasker_tasks t
+             JOIN tasker_projects p ON p.id = t.project_id AND p.tenant_id = :tenant_id_p
+             WHERE t.flow_id = :flow_id AND t.tenant_id = :tenant_id AND {$ouClause}
+             ORDER BY t.flow_step ASC NULLS LAST, t.id ASC"
+        );
+        $stmt->bindValue(':flow_id', $flowId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $steps = [];
+        /** @var array<string, mixed> $row */
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $steps[] = [
+                'id' => (int) $row['id'],
+                'publicId' => (string) $row['public_id'],
+                'shortId' => self::renderTaskShortId(
+                    $row['prefix'] !== null ? (string) $row['prefix'] : null,
+                    $row['short_id'] !== null ? (int) $row['short_id'] : null
+                ),
+                'text' => (string) $row['text'],
+                'status' => (string) $row['status'],
+                'flowStep' => $row['flow_step'] !== null ? (int) $row['flow_step'] : null,
+            ];
+        }
+
+        return $steps;
+    }
+
+    /**
+     * Whether $taskId is visible to this caller at all, and which flow it
+     * belongs to — {@see self::orderForTask()}'s lookup, and the reason it can
+     * tell "you cannot see this task" apart from "this task is in no flow"
+     * without a second query.
+     *
+     * OU-scoped by joining through to the owning project, exactly like
+     * {@see \Tasker\Access\IdentifierResolver::taskByColumn()} — tasks carry no
+     * ou_id of their own.
+     *
+     * @return array{visible: bool, flowId: int|null}
+     */
+    private function taskFlow(int $tenantId, ?int $callerOuId, int $taskId): array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT t.flow_id FROM tasker_tasks t
+             JOIN tasker_projects p ON p.id = t.project_id
+             WHERE t.id = :id AND t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"
+        );
+        $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($row)) {
+            return ['visible' => false, 'flowId' => null];
+        }
+
+        return [
+            'visible' => true,
+            'flowId' => $row['flow_id'] !== null ? (int) $row['flow_id'] : null,
+        ];
+    }
+
+    /**
      * Whether $flowId exists, belongs to $tenantId, AND is within
      * $callerOuId's OU-descendant scope — the handler-level, defence-in-depth
      * check every mutating/single-id method in this class keeps even though
@@ -759,6 +998,24 @@ final class FlowsApiHandler
         $data[8] = chr((ord($data[8]) & 0x3f) | 0x80);
 
         return vsprintf('%s%s-%s-%s-%s-%s%s%s', str_split(bin2hex($data), 4));
+    }
+
+    /**
+     * "PREFIX-N" when the task's project has a prefix, the bare number when it
+     * has none, or null when the task has no short_id at all — a TASK's short
+     * id, so no "F" marker, unlike {@see self::renderFlowShortId()} directly
+     * below. Both live here because {@see self::memberSteps()} renders tasks
+     * while every other method in this class renders flows; mirrors
+     * {@see TasksApiHandler::renderShortId()} exactly (duplicated per handler
+     * — see {@see ProjectsApiHandler::isUniqueViolation()}'s own doc for why).
+     */
+    private static function renderTaskShortId(?string $prefix, ?int $shortId): ?string
+    {
+        if ($shortId === null) {
+            return null;
+        }
+
+        return $prefix !== null ? "{$prefix}-{$shortId}" : (string) $shortId;
     }
 
     /**

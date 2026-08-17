@@ -1635,6 +1635,101 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            // ========== Reading the graph back out (D5a Task 10) ==========
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/tasks/connections',
+                'handler' => [$this, 'getTaskConnections'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:view',
+                'schema' => [
+                    'operationId' => 'get_task_connections',
+                    'summary' => 'Both directions of a task\'s I/O wiring: BLOCKERS (the producers whose output it '
+                        . 'consumes) and DEPENDENTS (the consumers that consume its output), each with that edge\'s '
+                        . 'own expected_type and quality contract.',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'task_id', 'in' => 'query', 'required' => true, 'schema' => ['type' => 'string'], 'description' => 'Task UUID or short ID (e.g. TDE-31).'],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The two buckets: blockers, dependents'],
+                        400 => ['description' => 'task_id looks like a short id but is malformed'],
+                        403 => ['description' => 'Tenant context is required, or caller membership could not be resolved'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/flows/order',
+                'handler' => [$this, 'getFlowOrder'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'get_flow_order',
+                    'summary' => 'A flow\'s members in the order they must run (topological, recomputed on every I/O '
+                        . 'edge change). Address it either by flow_id, or by task_id to get the order of whichever '
+                        . 'flow that task belongs to. One of the two is required -- there is no default flow.',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        [
+                            'name' => 'flow_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Flow UUID, id, or short ID (e.g. TDE-F1). Takes precedence when task_id is also supplied.',
+                        ],
+                        [
+                            'name' => 'task_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Any task in the flow (UUID or short ID, e.g. TDE-31) -- the flow is found from it. Use instead of flow_id.',
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The flow and its members in step order'],
+                        400 => ['description' => 'Neither flow_id nor task_id was supplied, or one of them looks like a short id but is malformed'],
+                        403 => ['description' => 'Tenant context is required, or caller membership could not be resolved'],
+                        404 => ['description' => 'Flow or task not found in the caller\'s tenant or OU scope, or the task belongs to no flow'],
+                    ],
+                ],
+            ],
+            // POST, not GET, even though the plan's prose said GET for all
+            // three of this task's tools: this one WRITES (it re-stamps every
+            // member's flow_step), and a mutating GET is retryable and
+            // cacheable by anything sitting in front of it -- the same
+            // reasoning derive_output_contract's own route comment carries.
+            // The MCP surface is unaffected: a tool's schema is derived from
+            // schema.request/operationId, never from the HTTP method.
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/flows/recompute',
+                'handler' => [$this, 'recomputeFlowSteps'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'recompute_flow_steps',
+                    'summary' => 'Repair hatch: re-derive a flow\'s step order from its tasks\' I/O edges and '
+                        . 're-stamp it. Rarely needed -- set_task_input and remove_task_input already re-stamp the '
+                        . 'order in the same transaction as the edge write -- so a healthy flow comes back unchanged.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['flow_id'],
+                        'properties' => [
+                            'flow_id' => ['type' => 'string', 'description' => 'Flow UUID, id, or short ID (e.g. TDE-F1). Always required -- there is no default flow to fall back to.'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The flow and its members in the recomputed step order'],
+                        400 => ['description' => 'flow_id is missing or looks like a short id but is malformed'],
+                        403 => ['description' => 'Tenant context is required, or caller membership could not be resolved'],
+                        404 => ['description' => 'Flow not found in the caller\'s tenant or OU scope'],
+                        422 => ['description' => 'The flow\'s tasks form a dependency cycle, so there is no order to stamp'],
+                    ],
+                ],
+            ],
             [
                 'method' => 'GET',
                 'path' => '/api/tasker/milestones',
@@ -5045,6 +5140,197 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 
         return (new TaskEdgesApiHandler($pdo))
             ->deriveOutput($tenantId, $ou['ouId'], $taskId, $this->paramBool($request, 'apply', false));
+    }
+
+    /**
+     * GET /api/tasker/tasks/connections?task_id= — the original's
+     * get_task_connections (D5a Task 10): both directions of a task's I/O
+     * wiring in one read.
+     *
+     * task_id is REQUIRED and has no default fallback — a task's connections
+     * mean nothing without a task, and there is no "default task" concept
+     * anywhere in this plugin. Read via queryParam() (which reads $_GET and
+     * the path's own query string), never parse_url() alone: core merges every
+     * remaining MCP tool argument into the query string for a GET.
+     *
+     * Its shape mirrors getTask()'s exactly — malformed_short_id -> 400,
+     * otherwise the OU-scoped resolveTask() -> 404 on a miss — and
+     * {@see \Tasker\Api\TaskEdgesApiHandler::connections()} re-checks the task
+     * through its own taskInfo(), the same defence-in-depth layering every
+     * other route in this file applies.
+     *
+     * @param array<string, string> $params
+     */
+    public function getTaskConnections(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawTaskId = $this->queryParam($request, 'task_id');
+        if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TaskEdgesApiHandler($pdo))->connections($tenantId, $ou['ouId'], $taskId);
+    }
+
+    /**
+     * GET /api/tasker/flows/order?flow_id=|task_id= — the original's
+     * get_flow_order (D5a Task 10).
+     *
+     * TWO ADDRESSING FORMS, and the task_id one is a deliberate widening on
+     * this task's brief (which specified flow_id only) rather than an
+     * accident: the original addresses this read by task ("focus on that
+     * task's specific flow"), and nothing else on this surface maps a task to
+     * its flow — get_task does not expose flow_id — so declining it would have
+     * dropped a real capability on no principle. The mutating-route rule (a
+     * mutation never resolves its own target from a caller default) constrains
+     * MUTATIONS; this is a read, and task_id is an explicit identifier either
+     * way, never a default.
+     *
+     * PRECEDENCE AND STRICTNESS: flow_id wins whenever it is SUPPLIED, not
+     * merely when it resolves — a supplied-but-unresolvable flow_id 404s
+     * rather than quietly falling back to task_id, the same "a caller who
+     * named a specific thing and got it wrong should be told" rule
+     * listFlows() already documents for its own project_id. And a MALFORMED
+     * value in EITHER parameter is a 400 before either is resolved: silently
+     * ignoring a garbage task_id because flow_id happened to be valid would
+     * hide the caller's mistake. Neither supplied at all is
+     * also a 400: unlike listFlows(), there is nothing to fall back to (no
+     * default flow exists in this plugin, and "every flow in my default
+     * project" is the original's project_id form, which is not ported — see
+     * parity-allowlist.php).
+     *
+     * PARITY: the original's third form — project_id, returning EVERY flow in
+     * the project — is not ported; list_flows already enumerates a project's
+     * flows, so this is a bulk-read convenience gap rather than a capability
+     * gap. Recorded in parity-allowlist.php.
+     *
+     * @param array<string, string> $params
+     */
+    public function getFlowOrder(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawFlowId = $this->queryParam($request, 'flow_id');
+        $flowForm = IdentifierResolver::classify($rawFlowId);
+        if ($flowForm === 'malformed_short_id') {
+            return Response::error('flow_id looks like a short id but is malformed', 400);
+        }
+
+        $rawTaskId = $this->queryParam($request, 'task_id');
+        $taskForm = IdentifierResolver::classify($rawTaskId);
+        if ($taskForm === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+
+        $flows = new FlowsApiHandler($pdo);
+
+        if ($flowForm !== 'empty') {
+            $flowId = IdentifierResolver::resolveFlow($pdo, $tenantId, $ou['ouId'], $rawFlowId);
+            if ($flowId === null) {
+                return Response::error('Flow not found', 404);
+            }
+
+            return $flows->order($tenantId, $ou['ouId'], $flowId);
+        }
+
+        if ($taskForm !== 'empty') {
+            $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+            if ($taskId === null) {
+                return Response::error('Task not found', 404);
+            }
+
+            return $flows->orderForTask($tenantId, $ou['ouId'], $taskId);
+        }
+
+        return Response::error('flow_id or task_id is required', 400);
+    }
+
+    /**
+     * POST /api/tasker/flows/recompute — the original's recompute_flow_steps
+     * (D5a Task 10): the repair hatch that should find nothing to repair (see
+     * {@see \Tasker\Api\FlowsApiHandler::recompute()}'s own docblock for why,
+     * and for the project lock it holds while re-stamping).
+     *
+     * A POST rather than the GET the plan's prose listed, because it WRITES —
+     * see this route's own declaration comment in getRoutes().
+     *
+     * flow_id is REQUIRED and never falls back to anything, unlike the
+     * original, whose recompute_flow_steps requires NO argument at all and
+     * resolves its target from flow_id OR task_id OR project_id OR the
+     * caller's context. This plugin's mutating-route rule forbids a mutation
+     * from resolving its own target from a caller default, and "whichever flow
+     * my default project suggests" is exactly such a default — on a call that
+     * rewrites every member's flow_step. Same rule deleteFlow() and
+     * removeTaskInput() already enforce; recorded in parity-allowlist.php.
+     *
+     * Read via identifierFromRequest() (body-then-query) rather than the body
+     * alone: the body is the normal MCP POST carrier, but a caller (or a
+     * future transport change) putting flow_id on the query string gets the
+     * same behaviour instead of a puzzling 400. No JSON-object body check is
+     * needed for the same reason deleteFlow() needs none — flow_id is the
+     * route's only input, and that helper covers both carriers.
+     *
+     * @param array<string, string> $params
+     */
+    public function recomputeFlowSteps(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default -- see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'flow_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawFlowId = $this->identifierFromRequest($request, 'flow_id');
+        $form = IdentifierResolver::classify($rawFlowId);
+        if ($form === 'empty') {
+            return Response::error('flow_id is required', 400);
+        }
+        if ($form === 'malformed_short_id') {
+            return Response::error('flow_id looks like a short id but is malformed', 400);
+        }
+
+        $flowId = IdentifierResolver::resolveFlow($pdo, $tenantId, $ou['ouId'], $rawFlowId);
+        if ($flowId === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        return (new FlowsApiHandler($pdo))->recompute($tenantId, $ou['ouId'], $flowId);
     }
 
     /**

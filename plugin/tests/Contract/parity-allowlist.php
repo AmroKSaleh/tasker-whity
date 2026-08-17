@@ -22,6 +22,12 @@ declare(strict_types=1);
  *               A caller sending it gets it SILENTLY IGNORED, not rejected —
  *               core's InputSchemaValidator only enforces `required`, so
  *               undeclared arguments pass straight through and vanish.
+ *   GAP       — the original can do something we cannot, on no principle at
+ *               all: only scope. Distinguished from DEFERRED (which names a
+ *               later slice) and from the deliberately-stricter entries that
+ *               cite this plugin's own rules, because calling a plain gap
+ *               "principled" is how a gap stops being looked at. D5a Task 10's
+ *               get_flow_order is the one entry tagged this way.
  *   SEMANTIC  — the same call does something DIFFERENT here. These are the
  *               dangerous ones. There are SIX left: delete_environment
  *               reassigns behind a gate that 409s instead of moving anything,
@@ -117,6 +123,18 @@ declare(strict_types=1);
  * remove_task_input (its existing entry, which gains severity/dischargedBy),
  * neither of which waives any additional individual divergence, since both
  * tools' argument shapes still match the original exactly.
+ * D5a Task 9 ported derive_output_contract and added ONE property-less
+ * SEMANTIC entry for it (the 422 on an empty apply): 28 -> 29 entries, 6 -> 7
+ * semantic, divergences unchanged at 79 — its argument shape matches the
+ * original exactly. (Task 9 did not restate these totals here; they are
+ * recounted mechanically at Task 10's commit, along with everything below.)
+ * D5a Task 10 ported get_task_connections/get_flow_order/
+ * recompute_flow_steps and added TWO entries (get_task_connections needs
+ * none — its shape matches byte-for-byte): 29 -> 31 entries, 79 -> 84
+ * divergences (2 for get_flow_order, 3 for recompute_flow_steps), 48 -> 51
+ * shared tools, semantic unchanged at 7 — neither new entry is semantic, and
+ * the two are deliberately NOT described as the same kind of divergence (one
+ * is principled, one is an honest capability gap; see the section above them).
  *
  * D1b Task 12c closed move_task's SEMANTIC entry outright (a real port — see
  * moveTask()/moveToProject() — not a waiver) and opened one new ADDITIVE
@@ -894,4 +912,104 @@ return [
             . 'confirm_contract would then bless as one a human agreed to. The same accepted call with apply omitted '
             . 'still answers 200 with the empty draft and its assumptions, so nothing a READ could do is refused.',
     ],
+
+    // ── D5a Task 10: the three reads, and the repair hatch ───────────────────
+    //
+    // get_task_connections / get_flow_order / recompute_flow_steps.
+    // get_task_connections needs NO entry, and that is worth stating rather
+    // than leaving as an absence: its property set (task_id) and its required
+    // list (task_id) match the original byte-for-byte.
+    //
+    // The two entries below are NOT the same kind of divergence, and this task
+    // deliberately refuses to describe them as though they were.
+    // recompute_flow_steps' is PRINCIPLED (a mutation may not resolve its own
+    // target from a caller default) with two precedents already in this file.
+    // get_flow_order's is a genuine CAPABILITY GAP: it is a READ, so the
+    // mutating-route rule does not reach it, and nothing else justifies
+    // dropping what the original offers. Half of that gap was closed by
+    // IMPLEMENTING the original's task_id form rather than waiving it (see
+    // TaskerPlugin::getFlowOrder()); what is left is written down honestly
+    // below.
+
+    'get_flow_order' => [
+        // CAPABILITY GAP (not principled, not semantic), plus the flow_id
+        // addressing form this plugin uses everywhere else.
+        //
+        //  - project_id (missing): on the original this is the tool's REQUIRED
+        //    argument and its bulk form -- "If omitted [task_id], returns all
+        //    flows in the project". We answer for ONE flow per call and do not
+        //    implement that project-wide listing at all. There is no principle
+        //    behind that: it is scope. The capability is still reachable in two
+        //    calls (list_flows enumerates a project's flows, then get_flow_order
+        //    per flow), which makes it a bulk-read convenience gap rather than a
+        //    lost capability -- but a gap it is, and it is recorded as one.
+        //  - flow_id (extra): addressing a flow by its own id/UUID/short id,
+        //    which is how every other flow tool here works (delete_flow,
+        //    get_flow_context and update_flow_context all carry the identical
+        //    `extra`). The original has no flow_id on THIS tool at all.
+        //
+        // THE ORIGINAL'S OTHER FORM IS PORTED, deliberately, and that is why
+        // there is no `task_id` line above: "the order of the flow containing
+        // this task" is a real capability, get_task does not expose flow_id, and
+        // nothing else on this surface maps a task to its flow -- so dropping it
+        // would have cost a caller something with nothing offered in return.
+        // Implemented as FlowsApiHandler::orderForTask(); see
+        // testOrderResolvesTheFlowFromAnyOfItsMemberTasks().
+        //
+        // NO `required` DIVERGENCE EXISTS: the original requires project_id and
+        // we require neither of our two parameters (the ROUTE 400s when both are
+        // absent, which is behaviour rather than schema). NOT semantic either --
+        // an original-shaped call (project_id alone) has that argument dropped by
+        // core and gets a clean 400 naming what is missing, never a silently
+        // different answer for some other flow.
+        'missing' => ['project_id'],
+        'extra' => ['flow_id'],
+        'reason' => 'CAPABILITY GAP, stated as one: project_id is the original\'s required argument AND its bulk form '
+            . '("returns all flows in the project"), and we answer for exactly one flow per call -- no principle, just '
+            . 'scope. Reachable in two calls (list_flows, then get_flow_order per flow), so it is a bulk-read '
+            . 'convenience gap, not a lost capability. flow_id is EXTRA: addressing a flow by its own id is how every '
+            . 'other flow tool here works (same extra delete_flow/get_flow_context/update_flow_context carry). The '
+            . 'original\'s OTHER form, task_id ("focus on that task\'s specific flow"), is PORTED rather than waived '
+            . '-- nothing else here maps a task to its flow, since get_task does not expose flow_id. This is NOT '
+            . 'shielded by the mutating-route rule that covers delete_flow/remove_task_input/recompute_flow_steps: '
+            . 'that rule constrains mutations and this is a read. Not semantic: an original-shaped call gets a clean '
+            . '400, never a different flow\'s order.',
+    ],
+
+    'recompute_flow_steps' => [
+        // DEFERRED (alternate lookup forms) + a DELIBERATE stricter
+        // requirement -- byte-for-byte the same pair delete_flow's own entry
+        // above carries, for the same two reasons:
+        //  - task_id, project_id: the original resolves the flow from flow_id
+        //    OR any member task OR a project-narrowed name/short-id lookup.
+        //    None of that alternate-lookup machinery is ported.
+        //  - required: [flow_id]: the original requires NOTHING AT ALL (its
+        //    `required` list is literally empty), so a bare recompute_flow_steps
+        //    picks its own target from the caller's context. This plugin's
+        //    mutating-route rule forbids exactly that, and this call rewrites
+        //    every member's flow_step -- guessing which flow to rewrite is the
+        //    worst possible place to be helpful. An argument-less call 400s
+        //    here, cleanly, naming flow_id.
+        //
+        // NOT SEMANTIC, and worth spelling out because a reader may expect it
+        // to be: what the tool DOES when it is called is faithful (re-derive
+        // the topological order from the flow's own I/O edges, re-stamp every
+        // member). What differs is how often it is NEEDED -- every edge
+        // mutation here already re-stamps the owning flow in the same
+        // transaction as the edge write (D5a Task 7), so this hatch normally
+        // finds nothing to repair, where on the original it is load-bearing.
+        // A tool that is redundant is not a tool that behaves differently.
+        'missing' => ['task_id', 'project_id'],
+        'required' => ['flow_id'],
+        'reason' => 'DEFERRED + a deliberate stricter requirement, the same pair delete_flow carries. task_id (any '
+            . 'member task) and project_id (narrowing a name/short-id lookup) are the original\'s alternate-lookup '
+            . 'machinery, which is not ported -- flow_id is the only way to address a flow here. Making it REQUIRED is '
+            . 'the principled half: the original requires NO argument at all, so it resolves its own target from the '
+            . 'caller\'s context, and this plugin\'s mutating-route rule forbids a mutation from doing that (see '
+            . 'delete_flow and remove_task_input for the same rule applied identically) -- especially one that '
+            . 'rewrites every member\'s flow_step. An argument-less call 400s naming flow_id. NOT semantic: called '
+            . 'with a flow_id it does exactly what the original does; only its NECESSITY differs, since edge writes '
+            . 'here already re-stamp the order in their own transaction (D5a Task 7).',
+    ],
+
 ];

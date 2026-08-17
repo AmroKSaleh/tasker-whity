@@ -122,6 +122,15 @@ use Whity\Sdk\Http\Response;
  * and 10 — has exactly one contract regardless of caller: always call it
  * inside a transaction that ALREADY holds this project's lock.
  *
+ * D5a Task 10 brings the first caller from OUTSIDE this class
+ * ({@see \Tasker\Api\FlowsApiHandler::recompute()}, the recompute_flow_steps
+ * repair hatch), and it does NOT get to restate that contract for itself:
+ * {@see self::restampFlowOrder()} is a public entry point that opens the
+ * transaction and takes the lock beside the helper requiring them. The
+ * alternative — copying the sort-and-stamp body into FlowsApiHandler with a
+ * lock of its own — would put the same 50 lines in two classes and make the
+ * lock something a future editor of the copy has to already know about.
+ *
  * ── D5a Task 8: the producer's own contract, and the blessing ──────────────
  *
  * THE BLESSING IS ONE BOOLEAN PER TASK (`tasker_tasks.output_contract_blessed`,
@@ -185,6 +194,16 @@ use Whity\Sdk\Http\Response;
  * flow's membership or its internal edge set, and therefore none has any
  * reason to call {@see self::recomputeFlowOrder()} — whose docblock requires
  * that lock of every caller.
+ *
+ * ── D5a Task 10: reading the graph back out ───────────────────────────────
+ *
+ * {@see self::connections()} is the READ side of everything above: the two
+ * indexed queries (one per edge direction) that the normalised edge table
+ * exists to make possible, where the original scans every task's `input` JSON
+ * to answer the same question. Read-only, so it neither opens a transaction
+ * nor takes a lock; {@see self::restampFlowOrder()} — added in the same task —
+ * is the one that does both, on behalf of the repair hatch (see the LOCKING
+ * section above).
  */
 final class TaskEdgesApiHandler
 {
@@ -764,6 +783,138 @@ final class TaskEdgesApiHandler
     }
 
     /**
+     * GET /api/tasker/tasks/connections — the original's get_task_connections:
+     * every I/O edge touching $taskId, split by DIRECTION.
+     *
+     *   blockers   — the PRODUCERS whose output this task consumes: edges where
+     *                it is the TARGET. Each carries the contract THIS task
+     *                demands of that producer.
+     *   dependents — the CONSUMERS that consume this task's output: edges where
+     *                it is the SOURCE. Each carries the contract that consumer
+     *                demands OF this task.
+     *
+     * TWO INDEXED QUERIES, one per direction, and that is the whole payoff for
+     * normalising the edges into their own table (D5a Task 3): each hits its
+     * own column directly, where the original answers the same question by
+     * scanning every task's `input` JSON array. They are two SEPARATE SQL
+     * LITERALS selected by a strictly-typed bool inside
+     * {@see self::edgeNeighbours()} — never one template with a
+     * runtime-substituted column name, the same two-hardcoded-literals shape
+     * {@see \Tasker\Api\FlowsApiHandler::updateContext()} uses for its
+     * merge/replace pair.
+     *
+     * BOTH queries join tasker_projects for the OU predicate and bind tenant
+     * on every side, on top of the {@see self::taskInfo()} check on $taskId
+     * itself. That is not redundant here: every edge written THROUGH this API
+     * has same-project endpoints (see {@see self::setInput()}'s own 422), so a
+     * cross-OU neighbour can only arrive by some other path (a direct database
+     * write) — and dropping it is right, because otherwise another OU's task
+     * TEXT, and its edge's rule text, would be listed straight back to a
+     * caller who cannot see that task at all. Pinned by
+     * {@see \Tasker\Tests\TenantIsolationOuTest::testConnectionsIgnoresAnEdgeReachingATaskInASiblingOu()},
+     * which includes an unrestricted control so the test proves the predicate
+     * rather than a broken join — the identical reasoning
+     * {@see self::consumerEdgesOf()} carries.
+     *
+     * Read-only: no transaction, no lock, nothing written, so
+     * {@see self::recomputeFlowOrder()}'s caller contract does not apply.
+     */
+    public function connections(int $tenantId, ?int $callerOuId, int $taskId): Response
+    {
+        if ($this->taskInfo($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return Response::json(['data' => [
+            'taskId' => $taskId,
+            'blockers' => $this->edgeNeighbours($tenantId, $callerOuId, $taskId, true),
+            'dependents' => $this->edgeNeighbours($tenantId, $callerOuId, $taskId, false),
+        ]], 200);
+    }
+
+    /**
+     * One side of {@see self::connections()}: $blockers true reads the edges
+     * where $taskId is the TARGET (returning their sources — its producers),
+     * false reads the edges where it is the SOURCE (returning their targets —
+     * its consumers).
+     *
+     * ORDERED by the neighbour's own id — one static template per direction, no
+     * runtime-branched ORDER BY — so the payload's order is a property of the
+     * data and not of PostgreSQL's row-return order.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function edgeNeighbours(int $tenantId, ?int $callerOuId, int $taskId, bool $blockers): array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        // TWO complete literals, selected by a strictly-typed bool — never a
+        // column name interpolated into one shared template. See
+        // self::connections()'s own docblock.
+        $sql = $blockers
+            ? "SELECT n.id, n.public_id, n.text, n.short_id, n.status, p.prefix, e.expected_type, e.contract
+               FROM tasker_task_edges e
+               JOIN tasker_tasks n ON n.id = e.source_task_id AND n.tenant_id = :tenant_id_n
+               JOIN tasker_projects p ON p.id = n.project_id AND p.tenant_id = :tenant_id_p
+               WHERE e.tenant_id = :tenant_id AND e.target_task_id = :task_id AND {$ouClause}
+               ORDER BY n.id ASC"
+            : "SELECT n.id, n.public_id, n.text, n.short_id, n.status, p.prefix, e.expected_type, e.contract
+               FROM tasker_task_edges e
+               JOIN tasker_tasks n ON n.id = e.target_task_id AND n.tenant_id = :tenant_id_n
+               JOIN tasker_projects p ON p.id = n.project_id AND p.tenant_id = :tenant_id_p
+               WHERE e.tenant_id = :tenant_id AND e.source_task_id = :task_id AND {$ouClause}
+               ORDER BY n.id ASC";
+
+        $stmt = $this->db->prepare($sql);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_n', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':task_id', $taskId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $neighbours = [];
+        /** @var array<string, mixed> $row */
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $contract = $row['contract'] !== null ? json_decode((string) $row['contract'], true) : null;
+            $neighbours[] = [
+                'id' => (int) $row['id'],
+                'publicId' => (string) $row['public_id'],
+                'shortId' => self::renderShortId(
+                    $row['prefix'] !== null ? (string) $row['prefix'] : null,
+                    $row['short_id'] !== null ? (int) $row['short_id'] : null
+                ),
+                'text' => (string) $row['text'],
+                'status' => (string) $row['status'],
+                'expectedType' => $row['expected_type'] !== null ? (string) $row['expected_type'] : null,
+                'contract' => is_array($contract) ? $contract : null,
+            ];
+        }
+
+        return $neighbours;
+    }
+
+    /**
+     * "PREFIX-N" when the task's project has a prefix, the bare number when it
+     * does not, or null when the task has no short id at all — the identifier a
+     * caller can actually act on in a follow-up call. Mirrors
+     * {@see \Tasker\Api\TasksApiHandler::renderShortId()} exactly; duplicated
+     * per handler, as this codebase does with its small private helpers (see
+     * {@see \Tasker\Api\ProjectsApiHandler::isUniqueViolation()}'s own doc for
+     * why).
+     */
+    private static function renderShortId(?string $prefix, ?int $shortId): ?string
+    {
+        if ($shortId === null) {
+            return null;
+        }
+
+        return $prefix !== null ? "{$prefix}-{$shortId}" : (string) $shortId;
+    }
+
+    /**
      * The 200 both halves of {@see self::deriveOutput()} return: the draft, the
      * assumptions it rests on, and whether it was persisted.
      *
@@ -1030,6 +1181,88 @@ final class TaskEdgesApiHandler
     }
 
     /**
+     * The PUBLIC, SELF-LOCKING entry point to {@see self::recomputeFlowOrder()},
+     * for the one caller that lives outside this class:
+     * {@see \Tasker\Api\FlowsApiHandler::recompute()} — D5a Task 10's
+     * recompute_flow_steps repair hatch.
+     *
+     * IT EXISTS SPECIFICALLY SO THE LOCK CANNOT BE FORGOTTEN. recomputeFlowOrder()
+     * requires every caller to be inside a transaction that ALREADY HOLDS
+     * {@see self::lockProject()} on the flow's own project row (see its own
+     * docblock for the member-SELECT/stamp-UPDATE race that requirement
+     * closes). A cross-class caller re-stamping without that lock reopens
+     * exactly that race, so the transaction and the lock are taken HERE,
+     * beside the helper that demands them, rather than being restated as a
+     * contract a second class has to remember — and the whole sort-and-stamp
+     * body stays in ONE place instead of being copied into FlowsApiHandler.
+     *
+     * THE PROJECT ID IS DERIVED HERE, from the flow itself, rather than taken
+     * as a parameter: a caller passing the wrong project would lock the wrong
+     * row and the re-stamp would proceed anyway, unprotected and silent.
+     * Reading it before the lock is safe because a flow's project_id never
+     * changes — nothing in this plugin moves a flow between projects (see
+     * {@see \Tasker\Api\FlowsApiHandler::updateContext()}, the only writer of
+     * a flow row after creation, which touches context and step_list_open
+     * only).
+     *
+     * A flow that no longer exists re-stamps NOTHING and returns quietly: the
+     * only way to get here with one is a delete_flow committing between the
+     * caller's own visibility check and this call, and delete_flow already
+     * cleared every member's flow_step on its way out
+     * ({@see \Tasker\Api\FlowsApiHandler::delete()}), so there is genuinely
+     * nothing left to repair.
+     *
+     * @throws FlowCycleException when the flow's own members form a cycle —
+     *         reachable ONLY through direct, validation-bypassing writes (see
+     *         recomputeFlowOrder()'s own docblock), which is precisely the
+     *         state a repair hatch gets pointed at. The whole transaction is
+     *         rolled back first, so a refused recompute re-stamps nothing.
+     */
+    public function restampFlowOrder(int $tenantId, int $flowId): void
+    {
+        $projectId = $this->projectIdOfFlow($tenantId, $flowId);
+        if ($projectId === null) {
+            return;
+        }
+
+        try {
+            $this->db->beginTransaction();
+            $this->lockProject($tenantId, $projectId);
+            $this->recomputeFlowOrder($tenantId, $flowId);
+            $this->db->commit();
+        } catch (\Throwable $e) {
+            if ($this->db->inTransaction()) {
+                $this->db->rollBack();
+            }
+
+            throw $e;
+        }
+    }
+
+    /**
+     * The project $flowId belongs to, or null when no such flow exists in
+     * $tenantId — {@see self::restampFlowOrder()}'s lock target.
+     *
+     * Tenant-scoped only, deliberately: its one caller's own caller has
+     * already OU-checked the flow (FlowsApiHandler::recompute() calls
+     * flowVisible() first), and this lookup exists to name a row to LOCK, not
+     * to decide what the caller may see.
+     */
+    private function projectIdOfFlow(int $tenantId, int $flowId): ?int
+    {
+        $stmt = $this->db->prepare(
+            'SELECT project_id FROM tasker_flows WHERE id = :flow_id AND tenant_id = :tenant_id'
+        );
+        $stmt->bindValue(':flow_id', $flowId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->execute();
+
+        $projectId = $stmt->fetchColumn();
+
+        return $projectId === false ? null : (int) $projectId;
+    }
+
+    /**
      * Re-derives and re-stamps flow_step for every current member of
      * $flowId, from the edges among ITS OWN members only — mirroring
      * {@see \Tasker\Api\FlowsApiHandler::name()}'s own initial-stamp query
@@ -1039,7 +1272,11 @@ final class TaskEdgesApiHandler
      *
      * MUST run inside a transaction the CALLER already opened AND ALREADY
      * HOLDS {@see self::lockProject()}'s lock on this flow's own project
-     * (REVIEW FIX, round 2): the member SELECT below and the stamp UPDATEs
+     * (REVIEW FIX, round 2) — the two callers in this class do that inline;
+     * the one OUTSIDE it (D5a Task 10's recompute_flow_steps) reaches this
+     * method through {@see self::restampFlowOrder()}, which takes both on its
+     * behalf rather than restating the contract in a second class: the member
+     * SELECT below and the stamp UPDATEs
      * further down are separated by the edge SELECT and the sort, and under
      * READ COMMITTED a task committed INTO this flow in that window is
      * absent from $taskIds, never stamped, and nothing detects it — a
