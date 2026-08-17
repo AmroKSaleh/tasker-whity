@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Tasker\Tests;
 
+use Tasker\Migrations\AddTaskerTaskFlowAndContractColumns;
 use Tasker\Migrations\CreateTaskerFlowsTable;
 use Tasker\Migrations\CreateTaskerGroupsTable;
 use Tasker\Migrations\CreateTaskerMilestonesTable;
@@ -123,6 +124,24 @@ final class TenantIsolationTest extends TenantIsolationConformanceTestCase
             // migration order for the same two tables.
             new CreateTaskerFlowsTable(),
             new CreateTaskerTaskEdgesTable(),
+            // WHOLE-BRANCH REVIEW FIX (D5a): this migration's absence was filed
+            // during Task 11 as "a coverage gap", which understated it -- adding
+            // it here would have FAILED, because plugin-test.ps1 sets no
+            // PHPUNIT_PG_DSN, so RealEnginePdo::make() hands this suite
+            // in-memory SQLite, and the migration was written as
+            // `ADD COLUMN IF NOT EXISTS`, which SQLite cannot parse at all. So
+            // the gap and the portability defect were the same fact, recorded
+            // twice and never joined. The migration is portable now (see its own
+            // docblock), and running it HERE is what keeps it that way: this is
+            // the only test that applies the plugin's migrations to a real engine
+            // on the default, no-DSN local loop.
+            //
+            // Runs AFTER CreateTaskerFlowsTable above, which is not cosmetic --
+            // flow_id REFERENCES tasker_flows(id), and PostgreSQL refuses the
+            // ALTER outright (42P01) if that table is not there yet. SQLite does
+            // not enforce it, so the Postgres tier is the only place that order
+            // is actually policed.
+            new AddTaskerTaskFlowAndContractColumns(),
             new CreateTaskerMilestonesTable(),
             new CreateTaskerTaskDiscussionsTable(),
             new CreateTaskerUserPrefsTable(),

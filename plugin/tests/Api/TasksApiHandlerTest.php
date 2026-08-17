@@ -7,6 +7,8 @@ namespace Tasker\Tests\Api;
 use PDO;
 use PHPUnit\Framework\TestCase;
 use Tasker\Api\TasksApiHandler;
+use Tasker\Migrations\AddTaskerTaskFlowAndContractColumns;
+use Tasker\Migrations\CreateTaskerFlowsTable;
 use Tasker\Migrations\CreateTaskerTasksTable;
 use Tasker\Tests\Support\SqlitePolyfills;
 
@@ -132,21 +134,31 @@ final class TasksApiHandlerTest extends TestCase
         (new CreateTaskerTasksTable())->up($this->pdo);
         // D5a Task 11 (TDE-320): production's tasker_tasks carries flow_id via
         // AddTaskerTaskFlowAndContractColumns, and listFiltered()/listForSection()
-        // now read it (`flow_id IS NULL` — a flowed task is a flow step, not
-        // loose board work). That migration cannot be run against this double:
-        // its statements are `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, and
-        // SQLite has no IF NOT EXISTS form of ADD COLUMN at all — so the column
-        // is replicated here by hand instead, the same way tasker_projects and
-        // tasker_sections above are hand-rolled minimal doubles rather than real
-        // migrations. Without it every listFiltered() call raised "no such
-        // column: flow_id", which this handler's own catch-all turns into a 500
-        // — five tests in this file failed on a null `data` key, with nothing
+        // read it (`flow_id IS NULL` — a flowed task is a flow step, not loose
+        // board work). Without that column every listFiltered() call raised "no
+        // such column: flow_id", which this handler's own catch-all turns into a
+        // 500 — five tests in this file failed on a null `data` key, with nothing
         // naming the missing column.
         //
-        // flow_id ONLY: the same migration also adds flow_step/output_contract/
-        // output_contract_blessed, and no SQLite-tier query reads any of them.
-        // Add them here the day one does.
-        $this->pdo->exec('ALTER TABLE tasker_tasks ADD COLUMN flow_id INTEGER');
+        // THE REAL MIGRATION, NOT A HAND-ROLLED COLUMN (whole-branch review fix).
+        // This used to be `ALTER TABLE tasker_tasks ADD COLUMN flow_id INTEGER`,
+        // because the migration was written as `ADD COLUMN IF NOT EXISTS` and
+        // SQLite has no such form. That workaround was itself the bug report: the
+        // hand-rolled column DIVERGED from production's real one (INTEGER, with
+        // no FK, versus `BIGINT REFERENCES tasker_flows(id) ON DELETE SET NULL`),
+        // so this tier was testing against a schema nobody ships. The migration
+        // is portable now (see its own docblock) and runs here as itself —
+        // tasker_projects/tasker_sections above stay hand-rolled minimal doubles
+        // because no migration of THIS plugin creates them in the shape these
+        // tests need, which was never true of tasker_tasks' own columns.
+        //
+        // CreateTaskerFlowsTable first, so flow_id's FK target genuinely exists:
+        // SQLite parses a REFERENCES clause pointing at a missing table without
+        // complaint (verified), but a fixture that only works because the engine
+        // is not looking is the kind of thing that breaks the day someone sets
+        // `PRAGMA foreign_keys = ON`.
+        (new CreateTaskerFlowsTable())->up($this->pdo);
+        (new AddTaskerTaskFlowAndContractColumns())->up($this->pdo);
 
         $this->handler = new TasksApiHandler($this->pdo);
     }
