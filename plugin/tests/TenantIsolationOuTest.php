@@ -6472,6 +6472,108 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(2, $stillInFirst, 'naming a second flow must not steal a task out of the first');
     }
 
+    /**
+     * REVIEW FIX (round 3): testNameFlowRefusesToStealATaskAlreadyInAnotherFlow()
+     * above proves the SEQUENTIAL case -- a second name_flow call over an
+     * already-flowed task. It cannot prove the RACE twin: a concurrent claim
+     * landing strictly INSIDE the single window between this call's OWN
+     * membership/re-membership SELECT (which reads flow_id IS NULL and lets
+     * the task through) and its stamp UPDATE. A literal two-connection test
+     * cannot reach that window either -- confirmed directly: a second
+     * connection racing name_flow's OWN fresh membership SELECT would see
+     * the post-race state and just 422 before ever reaching the stamp loop,
+     * the same way the sequential test above does. The window exists ONLY
+     * inside the single synchronous call between ITS OWN earlier read and
+     * ITS OWN later write.
+     *
+     * Reproduced deterministically instead with a database trigger that
+     * fires synchronously as part of the SAME transaction as the flow
+     * INSERT (i.e. squarely inside the window, immediately after the
+     * membership/re-membership checks have already passed and immediately
+     * before the stamp loop runs) but performs ITS OWN write over `dblink` —
+     * a genuinely SEPARATE connection/session whose implicit transaction
+     * commits immediately and independently. That is what makes this a
+     * faithful stand-in for a real concurrent commit rather than a
+     * same-transaction side effect: when the outer transaction below rolls
+     * back (because the new `flow_id IS NULL` stamp guard catches the
+     * mismatch), the dblink write is NOT undone with it, exactly as a real
+     * second session's already-committed write would not be — verified
+     * manually before writing this test (`BEGIN; ...; the dblink UPDATE
+     * commits; ROLLBACK;` leaves the dblink's write in place, confirmed from
+     * a fresh session).
+     */
+    public function testNameFlowRollsBackWhenAConcurrentClaimLandsInsideTheStampWindow(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Race', 'RCE');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        // A genuinely pre-existing, already-committed OTHER flow -- the one
+        // that "concurrently" claims task A, deterministically, from inside
+        // the trigger below.
+        $otherFlowId = $this->makeFlowDirect(7, $projectId, 'Other flow', 1);
+
+        $this->pdo->exec('CREATE EXTENSION IF NOT EXISTS dblink');
+
+        $user = getenv('TASKER_TEST_PG_USER') ?: 'tasker';
+        $pass = getenv('TASKER_TEST_PG_PASS') ?: 'tasker_dev';
+
+        // host=localhost port=5432 is deliberately NOT the same as this
+        // test's own (possibly port-mapped, possibly host.docker.internal)
+        // PDO DSN: dblink_exec() runs SERVER-SIDE, inside the Postgres
+        // process itself, so it must address the server's OWN local
+        // loopback/default port -- always 5432 inside the postgres:15
+        // container, in both local dev and CI, regardless of whatever
+        // externally-mapped port or hostname this test's own PDO connection
+        // used to reach it.
+        $this->pdo->exec(
+            'CREATE OR REPLACE FUNCTION race_claim_task_a() RETURNS trigger AS $body$' . "\n"
+            . 'BEGIN' . "\n"
+            . "    IF NEW.name = 'Raced flow' THEN\n"
+            . "        PERFORM dblink_exec(\n"
+            . "            'dbname=' || current_database() || ' user={$user} password={$pass} host=localhost port=5432',\n"
+            . "            'UPDATE tasker_tasks SET flow_id = {$otherFlowId} WHERE id = {$a}'\n"
+            . "        );\n"
+            . "    END IF;\n"
+            . "    RETURN NEW;\n"
+            . 'END;' . "\n"
+            . '$body$ LANGUAGE plpgsql;'
+        );
+        $this->pdo->exec(
+            'CREATE TRIGGER race_claim_task_a_trigger AFTER INSERT ON tasker_flows '
+            . 'FOR EACH ROW EXECUTE FUNCTION race_claim_task_a()'
+        );
+
+        try {
+            $handler = new FlowsApiHandler($this->pdo);
+            $response = $handler->name(7, null, $projectId, 'Raced flow', [$a, $b], null, false, 2);
+
+            self::assertSame(
+                500,
+                $response->getStatusCode(),
+                'a concurrent claim landing inside the stamp window must fail the whole call, not silently succeed'
+            );
+
+            self::assertSame(
+                0,
+                (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_flows WHERE name = 'Raced flow'")->fetchColumn(),
+                'the whole transaction must roll back -- no orphan flow row from the failed attempt'
+            );
+
+            $finalFlowId = $this->pdo->query("SELECT flow_id FROM tasker_tasks WHERE id = {$a}")->fetchColumn();
+            self::assertSame(
+                $otherFlowId,
+                (int) $finalFlowId,
+                'the concurrent claim (committed independently, inside the window) must survive untouched, '
+                    . 'not be silently overwritten by the losing call'
+            );
+        } finally {
+            $this->pdo->exec('DROP TRIGGER IF EXISTS race_claim_task_a_trigger ON tasker_flows');
+            $this->pdo->exec('DROP FUNCTION IF EXISTS race_claim_task_a()');
+        }
+    }
+
     public function testFlowsDeleteRejects404ForASiblingOusFlowAndDeletesItsOwn(): void
     {
         $this->makeOu(1, 7, null);

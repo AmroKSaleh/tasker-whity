@@ -74,21 +74,40 @@ use Whity\Sdk\Http\Response;
  * nothing written and never even opens a transaction to roll back.
  *
  * THE STAMP LOOP'S OWN GUARD: the per-member `UPDATE` binds
- * `AND project_id = :project_id`, not just `(id, tenant_id)`, and throws
- * unless `rowCount() === 1`. This is NOT redundant with the transaction: the
- * membership SELECT far above and this UPDATE are separated by the edge
- * SELECT, the sort, and up to `ShortIdAllocator::MAX_ATTEMPTS` insert
- * attempts, and under READ COMMITTED that snapshot can go stale in the
- * window — a concurrent `move_task` committing in between would let a task
- * that no longer belongs to `$projectId` still match a bare `(id,
- * tenant_id)` UPDATE, silently producing the exact cross-project member the
- * 422 earlier in this method exists to prevent; a concurrent `delete_task`
- * would make the UPDATE match 0 rows silently, and this method would return
- * 201 for a flow quietly missing a member the caller named. The transaction
- * from item 1 does not close this window by itself — the stale SELECT was
- * already read before the transaction opened — so the project-scoped UPDATE
- * plus its own rowCount() check is what actually closes it, by rolling the
- * WHOLE transaction back the instant either race is detected.
+ * `AND project_id = :project_id AND flow_id IS NULL`, not just `(id,
+ * tenant_id)`, and throws unless `rowCount() === 1`. This is NOT redundant
+ * with the transaction: the membership SELECT far above (which is also where
+ * the re-membership check reads each member's CURRENT flow_id) and this
+ * UPDATE are separated by the edge SELECT, the sort, and up to
+ * `ShortIdAllocator::MAX_ATTEMPTS` insert attempts, and under READ COMMITTED
+ * that snapshot can go stale in the window:
+ *
+ *   - a concurrent `move_task` committing in between would let a task that no
+ *     longer belongs to `$projectId` still match a bare `(id, tenant_id)`
+ *     UPDATE, silently producing the exact cross-project member the 422
+ *     earlier in this method exists to prevent — closed by `project_id`;
+ *   - a concurrent `delete_task` would make the UPDATE match 0 rows silently,
+ *     and this method would return 201 for a flow quietly missing a member
+ *     the caller named — closed by the `rowCount() === 1` check itself;
+ *   - a SECOND `name_flow` call claiming this SAME task into a DIFFERENT flow,
+ *     committing in the identical window, is the race twin of the
+ *     re-membership guard above: that guard only refuses a member whose
+ *     flow_id was ALREADY non-null as of ITS OWN read, so a concurrent claim
+ *     landing strictly after it and before this UPDATE sails straight past
+ *     it, and — without `flow_id IS NULL` here — this UPDATE would silently
+ *     overwrite the concurrent claim's flow_id with this call's own, exactly
+ *     the "steal a task, no warning" behaviour the re-membership guard exists
+ *     to prevent, just reachable by a race instead of a sequential call.
+ *     Closed by `flow_id IS NULL`, which is safe to add unconditionally:
+ *     every member that reached this loop was already confirmed
+ *     flow_id-null by the earlier read, so the clause only ever fires when
+ *     something changed underneath us — precisely when it must.
+ *
+ * The transaction from item 1 does not close any of these three by itself —
+ * the stale SELECT was already read before the transaction opened — so this
+ * UPDATE's own three-part guard plus its rowCount() check is what actually
+ * closes them, by rolling the WHOLE transaction back the instant any of the
+ * three is detected.
  */
 final class FlowsApiHandler
 {
@@ -336,13 +355,37 @@ final class FlowsApiHandler
                 // `AND project_id = :project_id` closes that: a task that
                 // moved out no longer matches, so rowCount() drops to 0.
                 // A concurrent delete_task hits the same rowCount() === 0
-                // case. Either way this throws, which rolls back the WHOLE
+                // case.
+                //
+                // SECOND REVIEW FIX: `AND flow_id IS NULL` closes the sibling
+                // race straight back into the hole the re-membership guard
+                // above (the `$existingFlowByTask` check) was written to
+                // close — that guard only sees the state as of its OWN
+                // membership SELECT, which runs before this transaction even
+                // opens. If a SECOND name_flow call claims this SAME
+                // currently-unflowed task into a DIFFERENT flow and commits
+                // strictly between that SELECT and this UPDATE, the task's
+                // project never changed, so the `project_id` guard alone
+                // would not catch it — this UPDATE would silently overwrite
+                // the concurrent claim's flow_id with this call's own,
+                // exactly the "steal a task, no warning" behaviour the
+                // re-membership guard exists to prevent, just reachable by a
+                // race instead of a sequential call. `flow_id IS NULL` is
+                // safe to add unconditionally: the re-membership guard above
+                // already refused any member whose flow_id was non-null AS
+                // OF that read, so at this point every member SHOULD have
+                // flow_id IS NULL — the clause only ever fires when
+                // something changed underneath us, which is exactly when it
+                // must.
+                //
+                // Either race throws here, which rolls back the WHOLE
                 // transaction (the flow insert included) rather than
-                // returning 201 for a flow silently missing a member the
-                // caller named.
+                // returning 201 for a flow silently missing a member, wrongly
+                // including a cross-project one, or having silently stolen
+                // one out from under another flow.
                 $stamp = $this->db->prepare(
                     'UPDATE tasker_tasks SET flow_id = :flow_id, flow_step = :flow_step, updated_at = CURRENT_TIMESTAMP
-                     WHERE id = :id AND tenant_id = :tenant_id AND project_id = :project_id'
+                     WHERE id = :id AND tenant_id = :tenant_id AND project_id = :project_id AND flow_id IS NULL'
                 );
                 $stamp->bindValue(':flow_id', $flowId, PDO::PARAM_INT);
                 $stamp->bindValue(':flow_step', $step, PDO::PARAM_INT);
@@ -353,8 +396,8 @@ final class FlowsApiHandler
 
                 if ($stamp->rowCount() !== 1) {
                     throw new \RuntimeException(
-                        "Task {$taskId} could not be stamped -- it no longer belongs to project {$projectId} "
-                        . '(moved or deleted concurrently)'
+                        "Task {$taskId} could not be stamped -- it no longer belongs to project {$projectId}, or "
+                        . 'was concurrently claimed by another flow, since this call\'s own validation read it'
                     );
                 }
             }
