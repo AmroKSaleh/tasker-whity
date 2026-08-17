@@ -983,7 +983,16 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:delete',
                 'schema' => [
                     'operationId' => 'delete_task',
-                    'summary' => 'Delete a task',
+                    // The flow sentence is D5a's whole-branch review fix: the
+                    // deleted task's edges go with it via the FK cascade and
+                    // nothing re-stamps, so the flow's remaining step numbers
+                    // are left with a gap. Documented rather than repaired here
+                    // -- see recompute_flow_steps' own summary for why the
+                    // ordering is still correct and why the re-stamp is not done
+                    // on delete.
+                    'summary' => 'Delete a task. If the task is a flow step, the flow\'s remaining steps keep the '
+                        . 'right relative order but their numbering is left with a gap (1-2-3 becomes 1-3) -- call '
+                        . 'recompute_flow_steps to close it.',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
@@ -1709,10 +1718,23 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredRole' => null,
                 'requiredPermission' => 'tasker_structure:manage',
                 'schema' => [
+                    // "a healthy flow comes back unchanged" used to end this
+                    // sentence and was FALSE after any member deletion
+                    // (whole-branch review, D5a): delete_task's FK cascade
+                    // removes the deleted task's edges without re-stamping, so a
+                    // 1-2-3 flow becomes 1-3. The ORDER is still right --
+                    // removing a node from a topological order preserves the
+                    // relative order of the rest, and memberSteps() orders by
+                    // flow_step -- so this is contiguity only, and this hatch is
+                    // exactly what repairs it. Said here rather than fixed in
+                    // delete_task: re-stamping on delete needs lockProject() and
+                    // belongs with a locking review, not a description change.
                     'operationId' => 'recompute_flow_steps',
                     'summary' => 'Repair hatch: re-derive a flow\'s step order from its tasks\' I/O edges and '
-                        . 're-stamp it. Rarely needed -- set_task_input and remove_task_input already re-stamp the '
-                        . 'order in the same transaction as the edge write -- so a healthy flow comes back unchanged.',
+                        . 're-stamp it. Rarely needed for ORDER -- set_task_input and remove_task_input already '
+                        . 're-stamp it in the same transaction as the edge write. DO run it after delete_task '
+                        . 'removes a flow member: the remaining steps keep the right relative order, but their '
+                        . 'numbering is left with a gap (1-2-3 becomes 1-3) and recomputing closes it.',
                     'tags' => ['tasker'],
                     'request' => [
                         'type' => 'object',
