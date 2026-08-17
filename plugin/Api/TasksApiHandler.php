@@ -1338,6 +1338,33 @@ final class TasksApiHandler
         $task = $this->toPublicTask($row);
         $task['milestones'] = $this->fetchMilestonesForTask($tenantId, (int) $row['id']);
 
+        // D5a Task 9: THE READ PATH FOR THE OUTPUT CONTRACT. Without these two
+        // fields D5a shipped `output_contract` write-only — set_task_output,
+        // derive_output_contract and confirm_contract each echo the contract
+        // back as the result of their OWN write, and nothing on the surface
+        // could read back what a human had blessed. The original has no such
+        // gap: its get_task selects `'*, section:sections(name), …'`, so the
+        // `output` JSON holding the contract comes back on every call.
+        //
+        // ADDED HERE RATHER THAN IN {@see self::toPublicTask()}, deliberately.
+        // That mapper is shared with list()/readyWork()/create()/update() and
+        // every other method in this class, and their own SELECTs do not fetch
+        // these columns — so a `?? null` there would report "this task has no
+        // output contract" for every task in a list, which is a false statement
+        // rather than a missing field. {@see self::findVisible()} is the only
+        // SELECT that fetches them, and getOne() is the only caller that needs
+        // them; the other six callers of findVisible() are OU checks that
+        // discard the row or re-read it.
+        $contract = $row['output_contract'] !== null
+            ? json_decode((string) $row['output_contract'], true)
+            : null;
+        $task['outputContract'] = is_array($contract) ? $contract : null;
+        // Never a bare (bool) cast: pdo_pgsql can hand a boolean column back as
+        // the STRING "f", and `(bool) 'f'` is TRUE in PHP — which on THIS flag
+        // would report every unblessed contract as human-blessed, the single
+        // worst direction for it to be wrong in. See self::dbTruthy().
+        $task['outputContractBlessed'] = self::dbTruthy($row['output_contract_blessed']);
+
         return Response::json(['data' => $task], 200);
     }
 
@@ -1354,6 +1381,13 @@ final class TasksApiHandler
      * TaskDiscussionsApiHandler::taskVisible() only bind tenant_id on the
      * child table's side); that gap is a known, separately-tracked
      * carry-over item, not a pattern to repeat in new code.
+     *
+     * SELECTS output_contract/output_contract_blessed (D5a Task 9) even though
+     * only {@see self::getOne()} reads them — every other caller is an OU check
+     * that discards the row. Two more columns on a single-row lookup this class
+     * already runs costs less than a second round trip, and the alternative (a
+     * getOne()-only SELECT) would fork the one OU predicate all of those callers
+     * share, which is precisely what this method exists to prevent.
      *
      * ALSO used by the D1b Task 13 fix for update()/delete()/complete()/
      * uncomplete()/setPinned()/tag() (getOne() itself is a pure read, with
@@ -1379,7 +1413,8 @@ final class TasksApiHandler
         $stmt = $this->db->prepare(
             "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
                     t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
-                    t.short_id, t.created_by, t.created_at, t.updated_at
+                    t.short_id, t.created_by, t.created_at, t.updated_at,
+                    t.output_contract, t.output_contract_blessed
              FROM tasker_tasks t
              JOIN tasker_projects p ON p.id = t.project_id
              WHERE t.id = :id AND t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}"

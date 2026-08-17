@@ -2020,6 +2020,49 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame('Second step', $payload['data']['milestones'][1]['summary']);
     }
 
+    /**
+     * D5a Task 9 (added scope): get_task returns the OUTPUT CONTRACT and its
+     * blessing.
+     *
+     * Without this, D5a shipped `output_contract` WRITE-ONLY — a caller could
+     * set a contract with set_task_output and bless it with confirm_contract,
+     * and then had no tool anywhere on the surface that read back what they
+     * blessed (the three contract routes return it, but only as the echo of
+     * their own write). The original has no such gap: its get_task selects
+     * `'*, section:sections(name), …'`, so every column — including the `output`
+     * JSON the contract lives in — comes back on every call.
+     *
+     * OriginalContractParityTest structurally cannot catch this: it compares
+     * REQUEST schemas, and no request shape changes when a response loses a
+     * field.
+     */
+    public function testTasksGetOneReturnsTheOutputContractAndItsBlessingSoACallerCanReadBackWhatTheyBlessed(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Read the contract back');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $withContract = $this->makeTaskDirect(7, $projectId, $sectionId, 'Has a contract');
+        $withNone     = $this->makeTaskDirect(7, $projectId, $sectionId, 'Has none');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $withContract, ['rules' => [['label' => 'Cites its sources', 'kind' => 'judgment']]]);
+
+        $handler = new TasksApiHandler($this->pdo);
+
+        $unblessed = json_decode($handler->getOne(7, null, $withContract)->getBody(), true)['data'];
+        self::assertSame(['Cites its sources'], array_column($unblessed['outputContract']['rules'], 'label'),
+            'the stored contract must come back as a decoded JSON object, not a JSON string');
+        self::assertFalse($unblessed['outputContractBlessed'], 'an agent-authored contract reads back as AI-QA d');
+
+        $edges->confirmContract(7, null, $withContract);
+        $blessed = json_decode($handler->getOne(7, null, $withContract)->getBody(), true)['data'];
+        self::assertTrue($blessed['outputContractBlessed'],
+            'the whole point of the read path: a human can see WHAT they blessed, and that it is still blessed');
+
+        $none = json_decode($handler->getOne(7, null, $withNone)->getBody(), true)['data'];
+        self::assertNull($none['outputContract'], 'a task with no contract reports null, not an empty object');
+        self::assertFalse($none['outputContractBlessed']);
+    }
+
     public function testTasksGetOneRejects404ForATaskOutsideTheCallersTenant(): void
     {
         $otherProjectId = $this->makeProjectDirect(9, null, 'Other tenant project');

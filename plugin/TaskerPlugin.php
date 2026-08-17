@@ -1170,13 +1170,14 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:view',
                 'schema' => [
                     'operationId' => 'get_task',
-                    'summary' => 'Get a single task, including its milestones',
+                    'summary' => 'Get a single task, including its milestones and its output contract (the '
+                        . 'definition-of-done rules, and whether a human has blessed them)',
                     'tags' => ['tasker'],
                     'parameters' => [
                         ['name' => 'task_id', 'in' => 'query', 'required' => true, 'schema' => ['type' => 'string'], 'description' => 'Task UUID or short ID (e.g. TDE-31)'],
                     ],
                     'responses' => [
-                        200 => ['description' => 'The task and its milestones'],
+                        200 => ['description' => 'The task, its milestones, and its output contract with its blessing'],
                         400 => ['description' => 'task_id looks like a short id but is malformed'],
                         404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
                     ],
