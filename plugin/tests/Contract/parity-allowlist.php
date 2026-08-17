@@ -54,12 +54,17 @@ declare(strict_types=1);
  * property FAILS unless the behavioural test named in `dischargedBy` actually
  * exists in the suite. Behaviour first, schema second.
  *
- * 22 entries waiving 64 individual divergences across the 39 shared tools.
+ * 25 entries waiving 75 individual divergences across the 42 shared tools.
  * D5a Task 5 ported name_flow/list_flows/delete_flow and added 3 new DEFERRED
  * entries for them (8 more divergences: 3 for name_flow, 2 for list_flows, 2
  * missing + 1 required for delete_flow) — 19 -> 22 entries, 56 -> 64
  * divergences, 36 -> 39 shared tools, semantic count unchanged at 4 (none of
- * the three are semantic).
+ * the three are semantic). D5a Task 6 ported get_flow_context/
+ * update_flow_context/build_new_flow and added 3 more DEFERRED entries (11
+ * more divergences: 1 missing + 1 extra + 1 required for get_flow_context, 3
+ * missing + 2 extra + 1 required for update_flow_context, 2 missing for
+ * build_new_flow) — 22 -> 25 entries, 64 -> 75 divergences, 39 -> 42 shared
+ * tools, semantic count unchanged at 4 (none of the three are semantic).
  *
  * D1b Task 12c closed move_task's SEMANTIC entry outright (a real port — see
  * moveTask()/moveToProject() — not a waiver) and opened one new ADDITIVE
@@ -472,9 +477,10 @@ return [
         // 422s anything that is not a genuine JSON object, INCLUDING an
         // original-shaped string. We deliberately require an object where
         // the original takes a string, rather than accepting either: Task
-        // 6's planned `context = context || :context::jsonb` merge needs an
-        // object on both sides of `||` to actually MERGE (a jsonb array
-        // operand makes `||` APPEND instead, e.g.
+        // 6's `context = context || :context::jsonb` merge (now implemented
+        // on update_flow_context — see that entry below for the identical
+        // note) needs an object on both sides of `||` to actually MERGE (a
+        // jsonb array operand makes `||` APPEND instead, e.g.
         // `'[1,2]'::jsonb || '{"a":1}'::jsonb` = `[1, 2, {"a": 1}]`), so
         // accepting a bare string here would only push the same problem one
         // task down the line.
@@ -485,8 +491,8 @@ return [
             . 'behaviour to port. SEPARATELY (no missing/extra key applies -- this is a TYPE divergence, which the '
             . 'test does not compare): context is a free-text STRING on the original; we require a JSON OBJECT '
             . '(tasker_flows.context is jsonb, decided in D5a Task 2) and 422 anything else, including an '
-            . 'original-shaped string -- an object is what Task 6\'s planned `context || :context::jsonb` merge '
-            . 'needs on both sides to actually merge rather than silently append.',
+            . 'original-shaped string -- an object is what the `context || :context::jsonb` merge (Task 6, also on '
+            . 'update_flow_context) needs on both sides to actually merge rather than silently append.',
     ],
 
     'list_flows' => [
@@ -526,5 +532,88 @@ return [
             . 'ported, so flow_id is the only way to address a flow here. Making it REQUIRED is deliberate: this '
             . 'plugin\'s mutating-route rule (see delete_project/delete_section) forbids a delete route from ever '
             . 'resolving its own target from a caller default, so an absent flow_id 400s rather than falling back.',
+    ],
+
+    // ── DEFERRED (continued, D5a Task 6) ─────────────────────────────────────
+    //
+    // get_flow_context/update_flow_context/build_new_flow round out D5a's
+    // first user-facing flow tools. Same shape as name_flow/list_flows/
+    // delete_flow above: every divergence is either an out-of-scope
+    // capability (the original's task_id-based alternate lookup, renaming,
+    // a caller-chosen short_id, seeds, pagination-adjacent goal priming) or
+    // this plugin's own stricter mutating-route rule. None are semantic.
+
+    'get_flow_context' => [
+        // DEFERRED: task_id is the original's ONLY way to address a flow
+        // here ("any task in the flow") -- not ported, same as delete_flow's
+        // own identical divergence. flow_id is REQUIRED (this route has no
+        // "default flow" to fall back to, the same reason delete_flow's own
+        // flow_id is unconditionally required).
+        'missing' => ['task_id'],
+        'extra' => ['flow_id'],
+        'required' => ['flow_id'],
+        'reason' => 'DEFERRED: the original addresses a flow via task_id ("any task in the flow"); that alternate '
+            . 'lookup form is not ported, so flow_id is the only way to address a flow here -- same divergence '
+            . 'delete_flow already carries. flow_id is REQUIRED for the same reason: there is no default-flow '
+            . 'fallback anywhere in this plugin to fall back to.',
+    ],
+
+    'update_flow_context' => [
+        // DEFERRED, three groups, plus a TYPE divergence with no
+        // missing/extra/required key to hang on (same shape as name_flow's
+        // own context note above):
+        //  - task_id: same alternate-lookup gap as get_flow_context/
+        //    delete_flow.
+        //  - name, short_id: the original's update_flow_context ALSO renames
+        //    the flow and lets a caller set/change its short_id. Neither is
+        //    implemented -- this task's own brief scopes update_flow_context
+        //    to context + step_list_open only.
+        //  - flow_id (extra, required): same reasoning as get_flow_context.
+        //  - replace (extra): ADDITIVE, matching update_project_context's
+        //    own `replace` -- the original's update_flow_context always
+        //    replaces wholesale ("New shared context (replaces existing)"),
+        //    so `replace: true` reproduces that, and the default (merge) is
+        //    our own, non-destructive addition.
+        //
+        // SEPARATELY (no missing/extra/required key applies -- this is a
+        // TYPE divergence, which the parity test does not compare): context
+        // is a free-text STRING on the original; we require a JSON OBJECT,
+        // for the identical reason name_flow does (tasker_flows.context is
+        // jsonb; `context || :context::jsonb` needs an object on both sides
+        // to actually merge rather than silently append an array element).
+        // Enforced via the SAME isJsonObject() 422 nameFlow()/
+        // updateProjectContext() already use -- see
+        // FlowsApiHandler::updateContext()'s own docblock.
+        'missing' => ['task_id', 'name', 'short_id'],
+        'extra' => ['flow_id', 'replace'],
+        'required' => ['flow_id'],
+        'reason' => 'DEFERRED: task_id is the same unported alternate lookup as get_flow_context/delete_flow; name '
+            . '(renaming the flow) and short_id (a caller-chosen short id) are not implemented -- this task\'s brief '
+            . 'scopes update_flow_context to context + step_list_open only. flow_id (extra, required) mirrors '
+            . 'get_flow_context exactly. replace is ADDITIVE, matching update_project_context\'s own field: the '
+            . 'original always replaces wholesale, so replace: true reproduces that and the merge default is our own '
+            . 'non-destructive addition. SEPARATELY (a TYPE divergence the parity test cannot see): context is a '
+            . 'free-text STRING on the original; we require a JSON OBJECT (tasker_flows.context is jsonb, decided in '
+            . 'D5a Task 2) and 422 anything else via the SAME isJsonObject() check name_flow/update_project_context '
+            . 'already use -- an object is what the `context || :context::jsonb` merge needs on both sides to '
+            . 'actually merge rather than silently append.',
+    ],
+
+    'build_new_flow' => [
+        // DEFERRED: seed_id resolves a flow SEED (resolve_seed et al. are
+        // entirely unported, same gap create_task's own seed fields carry);
+        // goal primes the interview with the end deliverable in the
+        // caller's words, which this backend's static FlowBuildPlaybook does
+        // not need pre-supplied -- the playbook itself is the priming.
+        // project_id being OPTIONAL here (defaultProjectIdFor() fallback)
+        // rather than required, unlike the original, is us being MORE
+        // permissive, which the parity test does not flag (see list_flows'
+        // own identical note).
+        'missing' => ['goal', 'seed_id'],
+        'reason' => 'DEFERRED: seed_id resolves a flow seed -- the whole seed family (resolve_seed et al.) is '
+            . 'unported. goal primes the interview with the deliverable in the caller\'s own words; this backend '
+            . 'returns a STATIC playbook (FlowBuildPlaybook) with no seed to prime against, so there is nothing for '
+            . 'it to do yet. project_id being optional (vs. the original\'s required) is us being more permissive, '
+            . 'which the parity test does not flag.',
     ],
 ];

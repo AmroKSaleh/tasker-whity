@@ -16,6 +16,7 @@ use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\SessionApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
 use Tasker\Api\TasksApiHandler;
+use Tasker\Domain\FlowBuildPlaybook;
 use Tasker\Migrations\AddTaskerProjectPrefixUnique;
 use Tasker\Migrations\AddTaskerTaskFlowAndContractColumns;
 use Tasker\Migrations\AddTaskerTaskShortIdUnique;
@@ -1329,6 +1330,92 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         200 => ['description' => 'Deleted; reports how many tasks returned to the board'],
                         400 => ['description' => 'flow_id is missing or looks like a short id but is malformed'],
                         404 => ['description' => 'Flow not found in the caller\'s tenant or OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/flows/context',
+                'handler' => [$this, 'getFlowContext'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'get_flow_context',
+                    'summary' => 'Get a flow\'s shared context bag (plus its full record: name, members\' step '
+                        . 'order is on get_flow_order, step_list_open, etc.)',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        ['name' => 'flow_id', 'in' => 'query', 'required' => true, 'schema' => ['type' => 'string'], 'description' => 'Flow UUID, id, or short ID (e.g. TDE-F1).'],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The flow, including its context and stepListOpen'],
+                        400 => ['description' => 'flow_id looks like a short id but is malformed'],
+                        404 => ['description' => 'Flow not found in the caller\'s tenant or OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'PATCH',
+                'path' => '/api/tasker/flows/context',
+                'handler' => [$this, 'updateFlowContext'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'update_flow_context',
+                    'summary' => 'Merge or replace a flow\'s shared context, and/or flip step_list_open',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['flow_id'],
+                        'properties' => [
+                            'flow_id' => ['type' => 'string', 'description' => 'Flow UUID, id, or short ID (e.g. TDE-F1). Always required -- there is no default flow to fall back to.'],
+                            'context' => [
+                                'type' => 'object',
+                                'description' => 'The keys to write. Must be a JSON OBJECT (not a string or array) -- see parity-allowlist.php for why this differs from the original. Merged into the existing context by default (a shallow merge). Omit entirely to leave the context untouched (e.g. when you only want to flip step_list_open). Pass replace: true to discard the existing context wholesale instead.',
+                            ],
+                            'replace' => [
+                                'type' => 'boolean',
+                                'description' => 'When true, context replaces the whole document instead of merging into it. Defaults to false (merge). Ignored (treated as a no-op on context) when context itself is omitted.',
+                            ],
+                            'step_list_open' => [
+                                'type' => 'boolean',
+                                'description' => 'True = the full step list is not yet known (research/investigation discovering its next step as it goes). Set false once the extent is known -- changeable either way mid-run. Omit to leave unchanged.',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The flow, with its updated context and/or step_list_open'],
+                        400 => ['description' => 'flow_id is missing or looks like a short id but is malformed'],
+                        404 => ['description' => 'Flow not found in the caller\'s tenant or OU scope'],
+                        422 => ['description' => 'context is not a JSON object'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/flows/build',
+                'handler' => [$this, 'buildNewFlow'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'build_new_flow',
+                    'summary' => 'The interview playbook for building a new flow (task selection, I/O wiring, '
+                        . 'naming) grounded against a real project. Read-only -- this creates nothing; name_flow '
+                        . 'does the actual creating.',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        [
+                            'name' => 'project_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project.',
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The playbook, grounded to the resolved project'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed'],
+                        404 => ['description' => 'project_id was supplied but not found, or omitted with no default project set'],
                     ],
                 ],
             ],
@@ -4075,6 +4162,216 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new FlowsApiHandler($pdo))->delete($tenantId, $ou['ouId'], $flowId);
+    }
+
+    /**
+     * GET /api/tasker/flows/context?flow_id= — the original's
+     * get_flow_context (D5a Task 6).
+     *
+     * flow_id is REQUIRED, unlike getProject()/getBoard()'s project_id: there
+     * is no "default flow" fallback anywhere in this plugin (no
+     * defaultFlowIdFor(), no tasker_user_prefs column for one), so there is
+     * nothing to fall back to. Mirrors getTask()'s own shape exactly —
+     * malformed_short_id -> 400, otherwise resolveFlow() (OU-scoped) -> 404
+     * on a miss — rather than deleteFlow()'s explicit empty-check: flow_id is
+     * declared `required` on THIS route's own `parameters` (a GET query
+     * parameter, validated by core's InputSchemaValidator before the handler
+     * ever runs), not a `request` body `required` list subject to
+     * DELETE's own body-gets-emptied idiosyncrasy (see deleteFlow()'s own
+     * docblock for why THAT route needs the extra manual check).
+     *
+     * PARITY: the original addresses this by `task_id` ("any task in the
+     * flow"); that alternate lookup form is not ported, so flow_id is the
+     * only way to address a flow here — see this task's own
+     * parity-allowlist.php entry.
+     *
+     * @param array<string, string> $params
+     */
+    public function getFlowContext(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $rawFlowId = $this->queryParam($request, 'flow_id');
+        if (IdentifierResolver::classify($rawFlowId) === 'malformed_short_id') {
+            return Response::error('flow_id looks like a short id but is malformed', 400);
+        }
+
+        $flowId = IdentifierResolver::resolveFlow($pdo, $tenantId, $ou['ouId'], $rawFlowId);
+        if ($flowId === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        return (new FlowsApiHandler($pdo))->getContext($tenantId, $ou['ouId'], $flowId);
+    }
+
+    /**
+     * PATCH /api/tasker/flows/context — get_flow_context's write counterpart,
+     * the original's update_flow_context (D5a Task 6), narrowed to the two
+     * fields this backend actually models: context and step_list_open. A
+     * caller-chosen rename or short_id change is not ported (see this
+     * task's own parity-allowlist.php entry).
+     *
+     * `context` MUST be a genuine JSON object — the SAME
+     * {@see self::isJsonObject()} helper and the SAME 422
+     * updateProjectContext()/nameFlow() already use, deliberately not a
+     * second validation convention (see FlowsApiHandler::updateContext()'s
+     * own docblock for why a JSON ARRAY operand would make the planned
+     * `context || :context::jsonb` merge APPEND instead of merging).
+     * UNLIKE updateProjectContext(), `context` stays OPTIONAL here —
+     * matching the original (only `task_id` is required) AND nameFlow()'s
+     * own precedent on this exact resource: an absent or explicit-null
+     * `context` makes NO change to the stored context at all, regardless of
+     * `replace`. Implemented by forcing $merge=true with an EMPTY object in
+     * that case, which is a genuine SQL no-op (`x || '{}'::jsonb = x`) rather
+     * than a third SQL shape — the handler still only ever sees one of
+     * exactly two hardcoded literals. This deliberately keeps `replace:
+     * true` PLUS an omitted context from ever wiping a flow's context by
+     * accident, the same class of danger this slice's own review caught on
+     * update_project_context's project_id fallback (see next paragraph).
+     *
+     * `flow_id` is ALWAYS required — 400 on an absent one, for BOTH merge
+     * and replace, never a default fallback. This is stricter than
+     * updateProjectContext() (which keeps a default-project fallback for
+     * its non-destructive merge case): there is no "default flow" concept
+     * anywhere in this plugin to fall back TO, so unlike project_id there is
+     * no fallback for merge to keep. Mirrors deleteFlow()'s own unconditional
+     * requirement for the identical reason, and satisfies this slice's own
+     * rule that `replace: true` must never guess its destructive target —
+     * the exact defect D1b's review caught on update_project_context, where
+     * `replace` could wipe an unnamed project's Foundation.
+     *
+     * @param array<string, string> $params
+     */
+    public function updateFlowContext(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        $merge = true;
+        $context = [];
+        if (array_key_exists('context', $decoded) && $decoded['context'] !== null) {
+            if (!self::isJsonObject($decoded['context'])) {
+                return Response::error('context must be a JSON object', 422);
+            }
+            /** @var array<string, mixed> $context */
+            $context = $decoded['context'];
+            $merge = $this->mergeFromReplace($decoded);
+        }
+
+        $stepListOpen = array_key_exists('step_list_open', $decoded)
+            ? $this->bodyParamBool($decoded, 'step_list_open', false)
+            : null;
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError(). (There is no
+        // default to fall through to here, but the same guard still applies
+        // before flow_id's own emptiness is even checked.)
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'flow_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawFlowId = $this->identifierFromRequest($request, 'flow_id');
+        $form = IdentifierResolver::classify($rawFlowId);
+        if ($form === 'empty') {
+            return Response::error('flow_id is required', 400);
+        }
+        if ($form === 'malformed_short_id') {
+            return Response::error('flow_id looks like a short id but is malformed', 400);
+        }
+
+        $flowId = IdentifierResolver::resolveFlow($pdo, $tenantId, $ou['ouId'], $rawFlowId);
+        if ($flowId === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        return (new FlowsApiHandler($pdo))
+            ->updateContext($tenantId, $ou['ouId'], $flowId, $context, $merge, $stepListOpen);
+    }
+
+    /**
+     * GET /api/tasker/flows/build?project_id= — the original's
+     * build_new_flow (D5a Task 6).
+     *
+     * A READ, like {@see self::initSession()}: it creates nothing and calls
+     * no FlowsApiHandler method at all (there is nothing to persist — a flow
+     * is only actually created by name_flow). It composes a STATIC interview
+     * playbook ({@see FlowBuildPlaybook::text()}, the flow-building
+     * counterpart of {@see \Tasker\Domain\DirectivePlaybook::text()}) with
+     * live "project grounding" — here, simply the resolved, OU-scoped
+     * project id itself, proving the target project exists and is visible to
+     * the caller before the agent starts the interview — and returns both.
+     *
+     * project_id is OPTIONAL, using the same defaultProjectIdFor() fallback
+     * every other project-scoped read in this plugin uses (getProject()/
+     * getBoard()/listFlows()); an EXPLICITLY supplied project_id that fails
+     * to resolve still 404s, the same "a caller who named a specific project
+     * and got it wrong should be told" rule listFlows() already documents.
+     *
+     * PARITY: the original's build_new_flow also accepts `goal` (elicited
+     * inline) and `seed_id` (resolves a flow seed) — neither seeds
+     * (resolve_seed et al.) nor a goal-priming mechanism are ported; see this
+     * task's own parity-allowlist.php entry.
+     *
+     * @param array<string, string> $params
+     */
+    public function buildNewFlow(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $raw = $this->queryParam($request, 'project_id');
+        if (IdentifierResolver::classify($raw) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        return Response::json([
+            'data' => [
+                'projectId' => $projectId,
+                'playbook'  => FlowBuildPlaybook::text(),
+            ],
+        ], 200);
     }
 
     /**

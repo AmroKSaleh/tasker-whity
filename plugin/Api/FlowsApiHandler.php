@@ -525,6 +525,119 @@ final class FlowsApiHandler
     }
 
     /**
+     * GET /api/tasker/flows/context?flow_id= — the original's
+     * get_flow_context, addressed by flow_id directly rather than "any task
+     * in the flow" (see TaskerPlugin::getFlowContext()'s own docblock, and
+     * this task's own parity-allowlist.php entry, for why that alternate
+     * lookup form is not ported). Returns the SAME public flow shape
+     * {@see self::toPublicFlow()} already returns from name()/list() —
+     * context and stepListOpen are just two of its fields, and a caller
+     * asking for "the context" loses nothing by getting the whole flow back
+     * alongside it.
+     */
+    public function getContext(int $tenantId, ?int $callerOuId, int $flowId): Response
+    {
+        $row = $this->flowVisible($tenantId, $callerOuId, $flowId);
+        if ($row === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        return Response::json(['data' => $this->toPublicFlow($row)], 200);
+    }
+
+    /**
+     * PATCH /api/tasker/flows/context — the original's update_flow_context,
+     * narrowed to the two fields this backend actually models (context,
+     * step_list_open); a caller-chosen rename or short_id change is not
+     * ported (see this task's own parity-allowlist.php entry).
+     *
+     * MERGE VS REPLACE is byte-for-byte
+     * {@see \Tasker\Api\ProjectsApiHandler::updateContext()}'s own shape: TWO
+     * HARDCODED SQL LITERALS selected by the strictly-typed $merge bool,
+     * never composed from caller input — `context = context ||
+     * :context::jsonb` for merge, `context = :context::jsonb` for replace.
+     * $context must already be a genuine JSON object by the time it reaches
+     * here: validated by the ROUTE (TaskerPlugin::updateFlowContext(), via
+     * the SAME {@see \Tasker\TaskerPlugin::isJsonObject()} helper
+     * updateProjectContext()/nameFlow() already use — see this class's own
+     * docblock for why a JSON ARRAY operand would make `||` APPEND instead
+     * of merge), not re-validated here — the identical trust boundary
+     * {@see \Tasker\Api\ProjectsApiHandler::updateContext()} itself keeps
+     * (that method takes `array $context` with no internal JSON-shape check
+     * either).
+     *
+     * step_list_open is OPTIONAL and independent of context entirely: null
+     * leaves the column untouched (the SET list simply omits the fragment).
+     * This is a genuinely optional VALUE, not a security predicate, so
+     * appending it only when supplied follows this class's own list()
+     * precedent for its `$extra` project_id filter — never a caller-supplied
+     * value reaching SQL TEXT, only a server-decided structural choice
+     * (present vs. absent) about which of two fixed fragments to include.
+     *
+     * @param array<string, mixed> $context
+     */
+    public function updateContext(
+        int $tenantId,
+        ?int $callerOuId,
+        int $flowId,
+        array $context,
+        bool $merge,
+        ?bool $stepListOpen
+    ): Response {
+        if ($this->flowVisible($tenantId, $callerOuId, $flowId) === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        // An empty $context is encoded as the JSON OBJECT '{}', never the
+        // JSON ARRAY a bare json_encode([]) would produce -- copied verbatim
+        // from name()'s own identical guard (see that method's own comment).
+        // This is NOT cosmetic here: PostgreSQL's jsonb `||` does not treat
+        // an object concatenated with an ARRAY as a no-op merge -- it WRAPS
+        // the object as a new array element (`'{"a":1}'::jsonb ||
+        // '[]'::jsonb` = `[{"a": 1}]`), so passing the caller's `[]` (or this
+        // route's own "context omitted" no-op default) straight through
+        // json_encode() would silently replace an existing flow's context
+        // object with a ONE-ELEMENT ARRAY wrapping it -- corrupting the very
+        // no-op this call is supposed to be.
+        $encoded = ($context === []) ? '{}' : json_encode($context);
+        if ($encoded === false) {
+            return Response::error('context could not be encoded as JSON', 400);
+        }
+
+        $assignment = $merge ? 'context = context || :context::jsonb' : 'context = :context::jsonb';
+        $stepListOpenAssignment = $stepListOpen !== null ? ', step_list_open = :step_list_open' : '';
+
+        try {
+            $stmt = $this->db->prepare(
+                "UPDATE tasker_flows SET {$assignment}{$stepListOpenAssignment}
+                 WHERE id = :id AND tenant_id = :tenant_id"
+            );
+            $stmt->bindValue(':context', $encoded, PDO::PARAM_STR);
+            if ($stepListOpen !== null) {
+                $stmt->bindValue(':step_list_open', $stepListOpen, PDO::PARAM_BOOL);
+            }
+            $stmt->bindValue(':id', $flowId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->execute();
+        } catch (\Throwable) {
+            return Response::error('Failed to update flow context', 500);
+        }
+
+        // findScoped() (tenant-only), not a second flowVisible() call: the OU
+        // check already passed above, at the top of this method, against the
+        // SAME $tenantId/$callerOuId/$flowId that have not changed since —
+        // matching name()'s own identical precedent for reading back a row
+        // this method just confirmed/wrote (see name()'s own use of
+        // findScoped() after its insert, for the same reason).
+        $updated = $this->findScoped($flowId, $tenantId);
+        if ($updated === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        return Response::json(['data' => $this->toPublicFlow($updated)], 200);
+    }
+
+    /**
      * Whether $flowId exists, belongs to $tenantId, AND is within
      * $callerOuId's OU-descendant scope — the handler-level, defence-in-depth
      * check every mutating/single-id method in this class keeps even though

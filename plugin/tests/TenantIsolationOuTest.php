@@ -6607,4 +6607,200 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(400, $plugin->deleteFlow($request)->getStatusCode());
     }
+
+    // ── D5a Task 6: get_flow_context / update_flow_context / build_new_flow ──
+
+    public function testFlowContextMergesByDefaultAndReplacesWhenAsked(): void
+    {
+        $flowId  = $this->makeFlowDirect(7, $this->makeProjectDirect(7, null, 'Ctx', 'CTX'), 'Ctx flow', 1);
+        $handler = new FlowsApiHandler($this->pdo);
+
+        $handler->updateContext(7, null, $flowId, ['goal' => 'First', 'why' => 'Because'], true, null);
+        $merged = json_decode($handler->updateContext(7, null, $flowId, ['goal' => 'Second'], true, null)->getBody(), true);
+
+        self::assertSame('Second', $merged['data']['context']['goal']);
+        self::assertSame('Because', $merged['data']['context']['why'], 'merge must preserve keys not being written');
+
+        $replaced = json_decode($handler->updateContext(7, null, $flowId, ['goal' => 'Only'], false, null)->getBody(), true);
+        self::assertArrayNotHasKey('why', $replaced['data']['context']);
+    }
+
+    public function testStepListOpenRoundTrips(): void
+    {
+        $flowId  = $this->makeFlowDirect(7, $this->makeProjectDirect(7, null, 'Open', 'OPN'), 'Open flow', 1);
+        $handler = new FlowsApiHandler($this->pdo);
+
+        $handler->updateContext(7, null, $flowId, [], true, true);
+        self::assertTrue(json_decode($handler->getContext(7, null, $flowId)->getBody(), true)['data']['stepListOpen']);
+
+        $handler->updateContext(7, null, $flowId, [], true, false);
+        self::assertFalse(json_decode($handler->getContext(7, null, $flowId)->getBody(), true)['data']['stepListOpen']);
+    }
+
+    /**
+     * Global constraint (this slice's own rule): every OU-boundary test
+     * pairs a sibling-OU 404 with a same-OU positive control. Neither of the
+     * two brief-mandated tests above touches OU scope at all (both pass a
+     * null $callerOuId throughout), so getContext()'s own flowVisible() call
+     * — the same handler-level defence-in-depth check delete() already has
+     * committed coverage for, see testFlowsDeleteRejects404ForASiblingOusFlowAndDeletesItsOwn()
+     * above — had no test of its own before this one.
+     */
+    public function testGetFlowContextRejects404ForASiblingOusFlowAndReturnsOwnContext(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $sibling = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 3, 'Sib ctx', 'SBC'), 'Sib ctx flow', 1);
+        $mine    = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 2, 'Own ctx', 'OWC'), 'Own ctx flow', 1);
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        self::assertSame(404, $handler->getContext(7, 2, $sibling)->getStatusCode());
+        self::assertSame(200, $handler->getContext(7, 2, $mine)->getStatusCode());
+    }
+
+    /** Same rule as above, for updateContext()'s own flowVisible() check. */
+    public function testUpdateFlowContextRejects404ForASiblingOusFlowAndUpdatesItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $sibling = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 3, 'Sib upd', 'SBU'), 'Sib upd flow', 1);
+        $mine    = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 2, 'Own upd', 'OWU'), 'Own upd flow', 1);
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        self::assertSame(404, $handler->updateContext(7, 2, $sibling, ['x' => 1], true, null)->getStatusCode());
+        self::assertSame(200, $handler->updateContext(7, 2, $mine, ['x' => 1], true, null)->getStatusCode());
+    }
+
+    /**
+     * REVIEW-CLASS FIX, proactively tested rather than found in review: this
+     * task's own brief requires "replace: true must require a named
+     * flow_id -- 400 on an absent one, never a default fallback", the exact
+     * defect D1b's review caught on update_project_context's project_id.
+     * Unlike project_id, flow_id has NO default-flow fallback to keep even
+     * for the non-destructive merge case (no defaultFlowIdFor(), no
+     * tasker_user_prefs column for one exists anywhere in this plugin), so
+     * BOTH merge and replace are exercised here, and BOTH must 400.
+     */
+    public function testUpdateFlowContextRequiresANamedFlowIdForBothMergeAndReplace(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $plugin = new TaskerPlugin();
+
+        $mergeRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/flows/context',
+            (string) json_encode(['context' => ['goal' => 'x']])
+        );
+        $mergeRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->updateFlowContext($mergeRequest)->getStatusCode());
+
+        $replaceRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/flows/context',
+            (string) json_encode(['context' => ['goal' => 'x'], 'replace' => true])
+        );
+        $replaceRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->updateFlowContext($replaceRequest)->getStatusCode());
+    }
+
+    /**
+     * Proves update_flow_context reuses isJsonObject() for the SAME 422 the
+     * brief requires -- not a second validation convention. A JSON ARRAY is
+     * the specific shape Task 5's review caught name_flow silently
+     * discarding; it must be rejected here too, since
+     * `context = context || :context::jsonb` APPENDS rather than merges
+     * when the right-hand operand is an array.
+     */
+    public function testUpdateFlowContextRejectsAJsonArrayContextWith422(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $flowId = $this->makeFlowDirect(7, $this->makeProjectDirect(7, null, 'Ctx422', 'C422'), 'Ctx422 flow', 1);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/flows/context',
+            (string) json_encode(['flow_id' => $flowId, 'context' => [1, 2]])
+        );
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        self::assertSame(422, $plugin->updateFlowContext($request)->getStatusCode());
+    }
+
+    /**
+     * An absent context must leave the flow's existing context untouched --
+     * even under replace: true -- rather than silently wiping it, mirroring
+     * this slice's own caution around never destroying data the caller
+     * never mentioned.
+     */
+    public function testUpdateFlowContextWithNoContextLeavesExistingContextUntouchedEvenUnderReplace(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $flowId = $this->makeFlowDirect(7, $this->makeProjectDirect(7, null, 'NoCtx', 'NOC'), 'NoCtx flow', 1);
+        $this->pdo->exec("UPDATE tasker_flows SET context = '{\"goal\": \"keep me\"}' WHERE id = {$flowId}");
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/flows/context',
+            (string) json_encode(['flow_id' => $flowId, 'replace' => true, 'step_list_open' => true])
+        );
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+        $response = $plugin->updateFlowContext($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode($response->getBody(), true)['data'];
+        self::assertSame(['goal' => 'keep me'], $data['context'], 'an omitted context must never be wiped by replace: true');
+        self::assertTrue($data['stepListOpen'], 'step_list_open must still apply independently of context');
+    }
+
+    public function testBuildNewFlowReturnsThePlaybookGroundedInTheCallersDefaultProject(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'Build flow project', 'BFP');
+        (new \Tasker\Api\SessionApiHandler($this->pdo))->setDefaultProject(7, self::CALLER_ID, $projectId);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('GET', '/api/tasker/flows/build');
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->buildNewFlow($request);
+        self::assertSame(200, $response->getStatusCode());
+
+        $data = json_decode($response->getBody(), true)['data'];
+        self::assertSame($projectId, $data['projectId']);
+        self::assertIsString($data['playbook']);
+        self::assertNotSame('', trim($data['playbook']));
+    }
+
+    /**
+     * Global constraint: a sibling-OU 404 paired with the same-OU positive
+     * control above. build_new_flow's own OU scoping travels entirely
+     * through IdentifierResolver::resolveProject() (the same machinery
+     * getProject()/getBoard()/listFlows() already use), but nothing
+     * previously exercised it for THIS route.
+     */
+    public function testBuildNewFlowRejects404ForAProjectOutsideTheCallersOuScope(): void
+    {
+        $this->registerOusContainer();
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeMembership(self::CALLER_ID, 7, 2);
+        $outside = $this->makeProjectDirect(7, 1, 'Outside scope project', 'OSP');
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('GET', "/api/tasker/flows/build?project_id={$outside}");
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        self::assertSame(404, $plugin->buildNewFlow($request)->getStatusCode());
+    }
 }
