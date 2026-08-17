@@ -368,7 +368,28 @@ final class ProjectsApiHandler
             return Response::error('Project not found', 404);
         }
 
-        $encoded = json_encode($context);
+        // LIVE BUG FIX (found while porting this exact pattern to
+        // FlowsApiHandler::updateContext() in D5a Task 6 — see that method's
+        // own comment): a bare json_encode($context) turns PHP's empty array
+        // into the JSON ARRAY "[]", never "{}", because an empty array is
+        // ambiguous to json_encode(). isJsonObject() on the ROUTE
+        // (TaskerPlugin::updateProjectContext()) accepts `context: {}` --
+        // decoded to PHP as [] -- and passes it straight through to here
+        // unmodified, so `context: {}` used to encode to "[]" and run
+        // `context = context || '[]'::jsonb`. PostgreSQL's jsonb `||` does
+        // NOT treat "object concatenated with an array" as a no-op merge --
+        // it WRAPS the object as a new array element
+        // (`'{"goal":"x"}'::jsonb || '[]'::jsonb` = `[{"goal": "x"}]`), so
+        // every `update_project_context({context: {}})` call -- the
+        // ordinary, no-op-looking way to "just touch" a project without
+        // changing its Foundation -- silently replaced that project's ENTIRE
+        // Foundation with a one-element array wrapping it. Every later merge
+        // against that array-wrapped value keeps concatenating instead of
+        // merging, since `||` never recovers object semantics once the
+        // stored value is an array. Same fix as FlowsApiHandler's: encode an
+        // empty $context as the literal object '{}', never through
+        // json_encode() at all.
+        $encoded = ($context === []) ? '{}' : json_encode($context);
         if ($encoded === false) {
             return Response::error('context could not be encoded as JSON', 400);
         }

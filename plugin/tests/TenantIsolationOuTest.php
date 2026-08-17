@@ -6047,6 +6047,91 @@ final class TenantIsolationOuTest extends TestCase
     }
 
     /**
+     * LIVE BUG, found while porting this exact merge pattern to
+     * FlowsApiHandler::updateContext() in D5a Task 6: a bare
+     * json_encode($context) turns PHP's empty array into the JSON ARRAY
+     * "[]", never the object "{}", because an empty array is ambiguous to
+     * json_encode(). `update_project_context({context: {}})` -- accepted by
+     * isJsonObject(), and the ordinary, no-op-looking way to "just touch" a
+     * project without changing its Foundation -- decodes `{}` to PHP `[]`,
+     * which used to re-encode as "[]" and run
+     * `context = context || '[]'::jsonb`. PostgreSQL's jsonb `||` does NOT
+     * treat "object concatenated with an array" as a no-op merge -- it WRAPS
+     * the object as a new array element, so this silently replaced the
+     * project's entire Foundation with a one-element array wrapping it.
+     * {@see \Tasker\Api\ProjectsApiHandler::updateContext()}'s own comment
+     * has the full corruption trace; this proves the fix at the route level,
+     * the same way every other update_project_context test in this file
+     * does.
+     */
+    public function testUpdateProjectContextMergingAnEmptyObjectIsAGenuineNoOpNotAnArrayWrap(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $projectId = $this->makeProjectDirect(7, null, 'No-op merge project');
+        $this->pdo->exec("UPDATE tasker_projects SET context = '{\"goal\": \"keep me\", \"why\": \"also me\"}' WHERE id = {$projectId}");
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/project/context',
+            (string) json_encode(['project_id' => $projectId, 'context' => (object) []])
+        );
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+        $response = $plugin->updateProjectContext($request);
+
+        self::assertSame(200, $response->getStatusCode());
+        $context = json_decode(
+            (string) $this->pdo->query("SELECT context FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            true
+        );
+        // ksort: PostgreSQL's jsonb does not preserve key insertion order (it
+        // stores keys sorted by length then bytewise) -- same convention as
+        // testUpdateProjectContextReplaceRefusesToGuessTheCallersDefaultProject()
+        // above. Only the key/value pairs are the contract; their order is
+        // the engine's business.
+        ksort($context);
+        self::assertSame(
+            ['goal' => 'keep me', 'why' => 'also me'],
+            $context,
+            'merging an empty object must be a genuine no-op -- never wrap the existing Foundation into a one-element array'
+        );
+
+        // A second empty-object merge must still be a no-op -- proving the
+        // stored value stayed a genuine jsonb OBJECT, not an array a repeat
+        // merge would keep concatenating onto.
+        $secondRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/project/context',
+            (string) json_encode(['project_id' => $projectId, 'context' => (object) []])
+        );
+        $secondRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(200, $plugin->updateProjectContext($secondRequest)->getStatusCode());
+        $stillContext = json_decode(
+            (string) $this->pdo->query("SELECT context FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            true
+        );
+        ksort($stillContext);
+        self::assertSame(['goal' => 'keep me', 'why' => 'also me'], $stillContext);
+
+        // replace: true with an explicit context: {} still clears to a
+        // genuine empty OBJECT, not an array.
+        $clearRequest = $this->hostRequest(
+            'PATCH',
+            '/api/tasker/project/context',
+            (string) json_encode(['project_id' => $projectId, 'context' => (object) [], 'replace' => true])
+        );
+        $clearRequest->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(200, $plugin->updateProjectContext($clearRequest)->getStatusCode());
+        $cleared = json_decode(
+            (string) $this->pdo->query("SELECT context FROM tasker_projects WHERE id = {$projectId}")->fetchColumn(),
+            true
+        );
+        self::assertSame([], $cleared, 'an explicit replace with context: {} clears to an object, not an array');
+    }
+
+    /**
      * WHOLE-BRANCH REVIEW I4: update_project's schema declares
      * required => ['project_id'] while its reader fell back to
      * defaultProjectIdFor(). Over MCP core enforces `required`, but a direct
