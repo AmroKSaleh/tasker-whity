@@ -34,6 +34,19 @@ use PDO;
  * deliberate trade — deterministic and documented in each tool description,
  * rather than an ambiguity error that would break callers who work today.
  *
+ * D5a Task 4 (review finding) adds a second instance of that same accepted
+ * trade-off: the flow-short-id pattern is deliberately case-insensitive (the
+ * brief mandates TDE-F1 and tde-f12 both resolve), which widens what counts
+ * as "flow-shaped" beyond what an uppercase-only pattern would catch — a
+ * slug like "ab-f1", "off-f2", or "alpha-f10" now classifies as
+ * 'flow_short_id' rather than 'slug', and "tde-f" now classifies as
+ * 'malformed_short_id' rather than 'slug'. No real project slug is expected
+ * to collide with PREFIX-F<digits> shape in practice, and the failure mode
+ * if one ever does is the same deterministic, documented one the
+ * prefix/slug collision above already accepts — a clean miss, not data
+ * leaking across a boundary — so this is accepted rather than guarded
+ * against.
+ *
  * SCOPING is the security-critical part. Every resolution is tenant-scoped AND
  * OU-scoped via OuScopeResolver, using its single static SQL template. An
  * identifier that exists but sits outside the caller's scope resolves to null,
@@ -300,10 +313,6 @@ final class IdentifierResolver
         $form  = self::classify($raw);
         $value = trim((string) ($raw ?? ''));
 
-        if ($form === 'empty' || $form === 'malformed_short_id') {
-            return null;
-        }
-
         if ($form === 'flow_short_id') {
             // Split on the first "-" (not the literal "-F", which would miss
             // a lowercase match like "tde-f12"): the remainder always starts
@@ -321,8 +330,22 @@ final class IdentifierResolver
             );
         }
 
-        // Flows have no slug and no bare prefix, so anything else is an id or UUID.
-        if ($form === 'prefix' || $form === 'slug') {
+        // CRITICAL FIX (review finding): only 'integer' and 'uuid' remain as
+        // flow identifiers below. Everything else -- 'empty',
+        // 'malformed_short_id', a well-formed TASK 'short_id' (e.g. CNF-31),
+        // 'prefix', 'slug' -- is not a flow identifier and resolves to null,
+        // so the route answers 404. This is an ALLOWLIST, not a denylist of
+        // the forms known to be wrong at the time this was written: the
+        // previous denylist (only 'prefix'/'slug') let classify()'s
+        // pre-existing 'short_id' form fall through to `$column = 'id'`
+        // below, binding a raw string like "CNF-31" to f.id (bigint) and
+        // raising an uncaught PDOException instead of returning null -- a
+        // realistic, non-adversarial mistake (an agent confusing a task id
+        // with a flow id), not an adversarial probe. An allowlist stays
+        // correct the next time classify() grows a form; a denylist would
+        // need updating in lockstep every time, and silently reopen this
+        // exact bug if that update were missed.
+        if ($form !== 'integer' && $form !== 'uuid') {
             return null;
         }
 

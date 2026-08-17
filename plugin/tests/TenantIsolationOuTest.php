@@ -3195,6 +3195,60 @@ final class TenantIsolationOuTest extends TestCase
         self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, 2, 'THR-F1'));
     }
 
+    /**
+     * Review finding: the only prior resolveFlow() coverage exercised the
+     * flow_short_id form. The integer and uuid forms had none at all, which
+     * is exactly how the task-short-id crash below shipped with a green
+     * suite. Same shape as testResolveFlowRefusesASiblingOusFlowButFindsItsOwn()
+     * above -- sibling-OU 404 paired with a same-OU positive control -- for
+     * both remaining forms.
+     */
+    public function testResolveFlowByRawIdAndUuidRespectsTheOuBoundary(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $mineProject = $this->makeProjectDirect(7, 2, 'Own', 'OWN');
+        $sibProject  = $this->makeProjectDirect(7, 3, 'Sib', 'SIB');
+        $mine        = $this->makeFlowDirect(7, $mineProject, 'Own flow', 1);
+        $sibling     = $this->makeFlowDirect(7, $sibProject, 'Sib flow', 1);
+
+        $mineUuid = (string) $this->pdo->query("SELECT public_id FROM tasker_flows WHERE id = {$mine}")->fetchColumn();
+        $sibUuid  = (string) $this->pdo->query("SELECT public_id FROM tasker_flows WHERE id = {$sibling}")->fetchColumn();
+
+        // integer form
+        self::assertSame($mine, IdentifierResolver::resolveFlow($this->pdo, 7, 2, $mine));
+        self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, 2, $sibling));
+
+        // uuid form
+        self::assertSame($mine, IdentifierResolver::resolveFlow($this->pdo, 7, 2, $mineUuid));
+        self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, 2, $sibUuid));
+    }
+
+    /**
+     * CRITICAL FIX under direct test (review finding). classify()'s
+     * 'short_id' form -- a well-formed TASK short id like CNF-31 -- used to
+     * fall through resolveFlow()'s prefix/slug denylist straight into the
+     * uuid-or-id branch, binding the raw string "CNF-31" to f.id (bigint)
+     * and raising an uncaught PDOException instead of resolving to null. An
+     * agent confusing a task id with a flow id is a realistic, non-adversarial
+     * mistake -- exactly what the original app's resolve_reference tool
+     * exists to paper over -- so this must 404, not 500.
+     */
+    public function testResolveFlowReturnsNullForATaskShortIdRatherThanThrowing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Confusable', 'CNF');
+
+        // A task short id is a realistic mistake: an agent that has TDE-31 in
+        // hand may pass it where a flow id belongs. It must 404, not raise an
+        // uncaught bigint cast error from binding "CNF-31" to f.id.
+        self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, null, 'CNF-31'));
+        self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, null, 'confusable'));
+        self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, null, 'CNF'));
+        self::assertNull(IdentifierResolver::resolveFlow($this->pdo, 7, null, ''));
+    }
+
     // ==================== MilestonesApiHandler::create() (whole-branch review finding C1) ====================
 
     public function testMilestonesCreateDefaultsCheckedToFalse(): void
