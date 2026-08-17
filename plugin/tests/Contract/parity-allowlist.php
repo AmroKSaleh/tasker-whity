@@ -29,21 +29,31 @@ declare(strict_types=1);
  *               "principled" is how a gap stops being looked at. D5a Task 10's
  *               get_flow_order is the one entry tagged this way.
  *   SEMANTIC  — the same call does something DIFFERENT here. These are the
- *               dangerous ones. There are SIX left: delete_environment
+ *               dangerous ones. There are SEVEN left: delete_environment
  *               reassigns behind a gate that 409s instead of moving anything,
  *               get_task no longer auto-starts a task, delete_group fails
  *               SAFE (un-groups instead of the destructive delete_tasks:true
  *               the original also offers), get_ready_work ignores the
  *               original's agent_ready gate entirely (WHOLE-BRANCH REVIEW
  *               I2 — see that entry below for why it carries no
- *               missing/extra property at all), and D5a Task 8 added TWO
- *               more that are purely behavioural in the same way:
- *               set_task_input and remove_task_input both reset the human
- *               contract blessing on BOTH ENDS of the edge they touch, where
- *               the original resets neither task's. set_task_input's entry is
- *               property-less like get_ready_work's; remove_task_input's is
- *               not, but only because it ALSO carries an unrelated, non-
- *               semantic `required` waiver of its own. move_task — the collision
+ *               missing/extra property at all), D5a Task 8 added TWO
+ *               more that are purely behavioural in the same way
+ *               (set_task_input and remove_task_input both reset the human
+ *               contract blessing on both ends of the edge they touch — and
+ *               set_task_input, with replace: true, on every FURTHER producer
+ *               it unwires as collateral, a cascade a later round widened
+ *               past the literal "both ends" this legend used to claim —
+ *               where the original resets neither task's), and D5a Task 9
+ *               added derive_output_contract (a 422 where the original
+ *               answers 200 and writes nothing either). D5a Task 12 added no
+ *               EIGHTH entry: it added a SECOND proven divergence to each of
+ *               the two edge tools' existing entries — the cycle refusal on
+ *               set_task_input, the flow-order re-stamp on remove_task_input
+ *               — which is why `provenBy` now takes a map (see below).
+ *               set_task_input's entry is property-less like get_ready_work's;
+ *               remove_task_input's is not, but only because it ALSO carries
+ *               an unrelated, non-semantic `required` waiver of its own.
+ *               move_task — the collision
  *               between the original's cross-project move and D1's
  *               within-project one — was FIXED in D1b Task 12c (a real
  *               port, not a waiver; see TasksApiHandler::moveToProject()),
@@ -69,6 +79,20 @@ declare(strict_types=1);
  *                    stops a rename from silently orphaning the entry.
  *                    set_task_input/remove_task_input's cascade entries are
  *                    this kind.
+ *
+ * `provenBy` TAKES EITHER ONE TEST NAME OR A MAP OF THEM (D5a Task 12). This
+ * file is keyed by TOOL NAME, so a tool gets exactly one entry — but a tool
+ * can ship more than one deliberate divergence, and both edge tools now do.
+ * So a multi-divergence entry writes
+ * `'provenBy' => ['cycle refusal' => 'testX', 'blessing cascade' => 'testY']`,
+ * the label pairing each named test with the numbered divergence in the
+ * entry's own `reason`. EVERY name in the map is checked for existence on
+ * every run, so a tool with two proven divergences cannot end up with only one
+ * of them backed by evidence; a bare LIST is refused rather than accepted,
+ * because it cannot express that pairing and a reworded reason would then
+ * silently decouple from the tests meant to prove it. See
+ * OriginalContractParityTest::provenByTests() for both shapes and the
+ * malformed-shape failure.
  *
  * The reason is an escape hatch found in review:
  * every SEMANTIC divergence used to be expressed as a `missing` property
@@ -120,7 +144,9 @@ declare(strict_types=1);
  * confirm_contract is the ONE new shape divergence (3 missing properties, a
  * genuine capability gap fixed by the schema — see its own entry), and the
  * blessing CASCADE is the semantic pair: entries on set_task_input (new) and
- * remove_task_input (its existing entry, which gains severity/dischargedBy),
+ * remove_task_input (its existing entry, which gains severity/provenBy — this
+ * line said `dischargedBy` until D5a Task 12 corrected it, a leftover of the
+ * rename that introduced the two keys' opposite polarity in the first place),
  * neither of which waives any additional individual divergence, since both
  * tools' argument shapes still match the original exactly.
  * D5a Task 9 ported derive_output_contract and added ONE property-less
@@ -135,6 +161,20 @@ declare(strict_types=1);
  * shared tools, semantic unchanged at 7 — neither new entry is semantic, and
  * the two are deliberately NOT described as the same kind of divergence (one
  * is principled, one is an honest capability gap; see the section above them).
+ * D5a Task 12 ported NOTHING and added NO entry: 31 entries, 84 divergences,
+ * 51 shared tools and 7 semantic entries are all unchanged, and so are the
+ * 64-tool surface and EXPECTED_UNPORTED_COUNT's 92. What it changed is what
+ * two EXISTING entries record. It read the original's set_task_input/
+ * remove_task_input/recompute_flow_steps source directly instead of reasoning
+ * about them, and that reading moved three things: set_task_input gained a
+ * second proven divergence (the cycle refusal); remove_task_input gained one
+ * (the flow-order re-stamp on removal, which the original does not do);
+ * recompute_flow_steps' own comment and reason were CORRECTED, because both
+ * claimed a difference in necessity that is only half real. The plan's own
+ * Task 12 brief asked for a third entry — "flow_step auto-recomputed, so
+ * recompute_flow_steps is no longer required for correctness" — and that one
+ * was REFUSED as a fabricated record: the original auto-recomputes too. See
+ * the Task 7/8/12 section comment below for the evidence.
  *
  * D1b Task 12c closed move_task's SEMANTIC entry outright (a real port — see
  * moveTask()/moveToProject() — not a waiver) and opened one new ADDITIVE
@@ -687,24 +727,44 @@ return [
             . 'which the parity test does not flag.',
     ],
 
-    // ── D5a Task 7 + Task 8: the edges, and the blessing they invalidate ─────
+    // ── D5a Tasks 7, 8 and 12: the edges, and what they invalidate ───────────
     //
     // set_task_input/remove_task_input wire and unwire the I/O edges
     // themselves. NEITHER diverges in SHAPE -- both property sets and both
     // required lists match the original, except remove_task_input's one
     // deliberate stricter requirement below. What they diverge in is
-    // BEHAVIOUR, and D5a Task 8 is what added it: each of them now resets the
-    // human contract blessing on BOTH ENDS of the edge it touches.
+    // BEHAVIOUR, and each of them now carries TWO such divergences, which is
+    // why both entries name their proving tests as a `provenBy` MAP: this
+    // file gives a tool exactly one entry, so the second divergence had
+    // nowhere to go until Task 12 widened the key (see the header, and
+    // OriginalContractParityTest::provenByTests()).
+    //
+    // THE BLESSING CASCADE (Task 8): each of them resets the human contract
+    // blessing on both ends of the edge it touches -- and set_task_input,
+    // when `replace: true` deletes the consumer's OTHER inbound edges as
+    // collateral, resets it on every producer it unwires that way too. This
+    // comment used to say "BOTH ENDS" flatly; a later round widened the
+    // cascade past that (see TaskEdgesApiHandler::setInput()'s own
+    // $displacedProducerIds and testReplaceAllDropsTheOtherInboundEdges),
+    // and the wording is corrected here rather than left to mislead.
     //
     // VERIFIED AGAINST THE ORIGINAL rather than assumed (D5a Task 8's own
     // Step 3 required it, because the spec chose the cascade on reasoning and
     // not on evidence). The original's set_task_input writes the CONSUMER's
-    // `tasks.input` JSON column and nothing else — resetting that EDGE's own
+    // `tasks.input` JSON column — resetting that EDGE's own
     // `contract.confirmed` flag, since it rewrites the whole edge object —
     // and never touches either task's `output.contract.confirmed`. Its
-    // remove_task_input likewise rewrites only the consumer's `input`. So the
-    // original cascades to NEITHER end, and the spec's decision is a real
-    // divergence in both directions:
+    // remove_task_input likewise rewrites only the consumer's `input`.
+    //
+    // (This paragraph said set_task_input writes that column "and nothing
+    // else" until D5a Task 12 read the same function again for a different
+    // reason: it also re-stamps `flow_step`, which does not affect the
+    // blessing claim above — that function never touches either task's
+    // `output` — but does affect two other records. See WHAT TASK 12 FOUND,
+    // below.)
+    //
+    // So the original cascades to NEITHER end, and the spec's decision is a
+    // real divergence in both directions:
     //
     //   - the PRODUCER (source) is un-blessed here, and is not there. A
     //     producer contract derived from its consumers' demands (which is
@@ -724,6 +784,79 @@ return [
     // DOES, which is the one class of divergence
     // testEverySharedToolMatchesTheOriginalsArgumentShape() structurally
     // cannot see, and therefore the one class most worth writing down.
+    //
+    // ── WHAT TASK 12 FOUND, READING THE ORIGINAL RATHER THAN THE PLAN ───────
+    //
+    // Task 12's brief prescribed three semantic records. One had already been
+    // written (the blessing cascade, above). One is real and is added below
+    // (the cycle refusal). The THIRD DOES NOT EXIST, and refusing to write it
+    // is this task's main finding.
+    //
+    // THE FLOW-ORDER RE-STAMP IS NOT A DIVERGENCE ON set_task_input. The
+    // brief asked for an entry reading "flow_step auto-recomputed, so
+    // recompute_flow_steps is no longer required for correctness". Read
+    // against the original's own source, that is false: the original's
+    // set_task_input auto-recomputes too — index.ts:8387-8418, under its own
+    // comment "Auto-recompute flow_step if either task belongs to a named
+    // flow", right down to telling the caller so in its response ("Step order
+    // auto-recomputed (N tasks renumbered)"). Our in-transaction re-stamp is
+    // a FAITHFUL PORT of behaviour the original already had, and an entry
+    // claiming otherwise would have been a fabricated record in the one file
+    // whose entire value is that its records are true. NO ENTRY. Stated here
+    // rather than left as an absence, so the next reader of this brief does
+    // not re-derive it.
+    //
+    // IT IS A DIVERGENCE ON remove_task_input, which the same reading turned
+    // up and the brief did not ask for. The original's remove_task_input
+    // (index.ts:8715-8733) rewrites the consumer's `input` column and STOPS:
+    // no recompute, no note, nothing. So on the original every edge REMOVAL
+    // leaves flow_step describing a dependency that no longer exists, and
+    // that stale order stands until somebody calls recompute_flow_steps.
+    // Ours re-stamps in the same transaction as the delete. Recorded on
+    // remove_task_input's own entry below, and it is also why
+    // recompute_flow_steps' entry needed correcting rather than extending:
+    // its claim that the hatch is "load-bearing on the original" is true of
+    // removals and false of set_task_input, and it was written as a blanket.
+    //
+    // EDGE NORMALISATION NEEDS NO ENTRY, and that too is written down so
+    // nobody adds a redundant one the staleness guard would then reject. D5a
+    // Task 2 replaced the original's `tasks.input` jsonb array with the
+    // normalised tasker_task_edges table, but `tasks.input` was never an
+    // ARGUMENT of any tool — it was the column these two tools wrote — and
+    // neither tool's argument shape moved: set_task_input still takes
+    // {task_id, source_task_id, contract, expected_type, replace} and
+    // remove_task_input still takes {task_id, source_task_id}. So the change
+    // is invisible to a property-name/required/enum diff, and there is no
+    // `missing`/`extra`/`required`/enum key it could hang on. Nor is it a
+    // behavioural divergence needing the property-less shape: the observable
+    // contract — "this task consumes that one, with this expected_type and
+    // this contract" — is preserved exactly; only where it is stored moved.
+    // Where normalisation DID cost something observable, that cost is already
+    // recorded at the place it lands rather than here: the edge's own
+    // `confirmed` flag has no column, which is why confirm_contract cannot
+    // honour contract_type: "input" (its own entry) and why the blessing
+    // cascade resets a task flag instead (above). An entry for the
+    // normalisation itself would describe no divergence at all, and being
+    // property-less it could only be a SEMANTIC one — which the guard would
+    // then require a behavioural test to prove, for behaviour that does not
+    // differ.
+    //
+    // ONE FURTHER RE-STAMP DIFFERENCE, RECORDED AND DELIBERATELY NOT ENTERED:
+    // the re-stamp GATE. The original recomputes when EITHER endpoint is in a
+    // flow (`task.flow_id || source.flow_id`, index.ts:8388) and then
+    // force-adds the consumer into the member set it sorts
+    // (`memberMap.set(task.id, freshTask)`, 8396) — so an edge into an
+    // UNFLOWED consumer from a flowed producer stamps a flow_step onto a task
+    // that belongs to no flow, and renumbers that flow's real members around
+    // it. Ours gates on the consumer's own flow_id alone (see
+    // TaskEdgesApiHandler's docblock for why that is the only flow a call
+    // here can change the internal edge set of), so the same call stamps
+    // nothing. NOT given an entry: no test pins that case, and this task will
+    // not write one to justify a record — what the original does there
+    // writes a step number onto a non-member, which is a defect rather than a
+    // contract, and the entries in this file are for divergences we would
+    // defend, not for bugs we declined to copy. Written down so the next
+    // reader of these two gates does not have to re-derive it from index.ts.
 
     'set_task_input' => [
         'severity' => 'semantic',
@@ -737,15 +870,34 @@ return [
         // described. OriginalContractParityTest checks provenBy for existence
         // on every run, so renaming that test cannot silently orphan this
         // entry. See staleAllowlistEntries()'s own docblock.
-        'provenBy' => 'testAConsumerEdgeWriteUnblessesTheProducerToo',
-        'reason' => 'SEMANTIC: wiring an input edge resets the human contract blessing (output_contract_blessed) on '
-            . 'BOTH ends of it -- the consumer AND the producer -- where the original resets neither task\'s output '
-            . 'blessing (it rewrites the consumer\'s edge object, resetting that EDGE\'s own `confirmed` flag, a field '
-            . 'this schema has no column for). Deliberate, per the spec\'s blast-radius decision: a producer contract '
-            . 'derived from its consumers\' demands is only as valid as those demands, and a blessing that silently '
-            . 'outlives a change to them is the exact failure the flag exists to prevent. No missing/extra property is '
-            . 'waived -- set_task_input\'s argument shape still matches the original exactly, which is why this entry '
-            . 'has to exist: the property-name diff cannot see a purely behavioural divergence.',
+        //
+        // A MAP, not a single name (D5a Task 12): this tool ships TWO proven
+        // divergences and gets one entry, and each label pairs its test with
+        // the numbered divergence in `reason` below. Both are checked for
+        // existence on every run.
+        'provenBy' => [
+            'blessing cascade' => 'testAConsumerEdgeWriteUnblessesTheProducerToo',
+            'cycle refusal'    => 'testSetInputRefusesAnEdgeThatWouldCloseACycle',
+        ],
+        'reason' => 'SEMANTIC, TWO divergences, and NO missing/extra property is waived for either -- '
+            . 'set_task_input\'s argument shape still matches the original exactly, which is precisely why this entry '
+            . 'has to exist: the property-name diff cannot see a purely behavioural divergence. '
+            . '(1) BLESSING CASCADE (D5a Task 8): wiring an input edge resets the human contract blessing '
+            . '(output_contract_blessed) on the consumer AND the producer -- and, when replace: true deletes the '
+            . 'consumer\'s other inbound edges as collateral, on every producer unwired that way too -- where the '
+            . 'original resets neither task\'s output blessing (it rewrites the consumer\'s edge object, resetting '
+            . 'that EDGE\'s own `confirmed` flag, a field this schema has no column for). Deliberate, per the spec\'s '
+            . 'blast-radius decision: a producer contract derived from its consumers\' demands is only as valid as '
+            . 'those demands, and a blessing that silently outlives a change to them is the exact failure the flag '
+            . 'exists to prevent. '
+            . '(2) CYCLE REFUSAL (D5a Task 12): an edge that would close a dependency cycle is refused with 422 and '
+            . 'NOTHING is written, where the original writes it. Its set_task_input has no cycle check at all '
+            . '(index.ts:8365-8424; the only edge it refuses is a self-loop, 8370, which we refuse too), and its own '
+            . 'step sorter then absorbs the loop the call just created -- `if (stack.has(id)) return 0`, 8403 -- so '
+            . 'the caller is handed a step order no dependency ordering justifies, over a graph that can no longer be '
+            . 'ordered at all. We refuse the write instead, and over the whole I/O graph rather than one flow\'s '
+            . 'members, so a cycle never reaches storage. Deliberately STRICTER than the original, and in the safe '
+            . 'direction: the refused call 422s naming the cycle, so it is never mistaken for having succeeded.',
     ],
 
     'remove_task_input' => [
@@ -763,21 +915,34 @@ return [
         // such a default -- there is no way to honour the original's absent-
         // source_task_id form without guessing which edges the caller meant.
         //
-        // ALSO SEMANTIC (D5a Task 8), on top of that `required` divergence and
-        // independent of it: removing an edge un-blesses BOTH of its ends, the
-        // same cascade set_task_input's entry above describes in full. This is
-        // the further of the two from the original, which deletes the edge (and
-        // with it the edge's own blessing) and leaves both tasks' output
-        // blessings standing. severity/dischargedBy are set for the cascade;
-        // the `required` waiver above is NOT semantic and keeps its own
-        // reasoning (an old-shaped call 400s cleanly rather than silently doing
-        // something different).
+        // ALSO SEMANTIC, TWICE OVER, on top of that `required` divergence and
+        // independent of it:
+        //
+        //  - (D5a Task 8) removing an edge un-blesses BOTH of its ends, the
+        //    same cascade set_task_input's entry above describes in full. This
+        //    is the further of the two from the original, which deletes the
+        //    edge (and with it the edge's own blessing) and leaves both tasks'
+        //    output blessings standing.
+        //  - (D5a Task 12) removing an edge also RE-STAMPS the owning flow's
+        //    topological order, in the same transaction as the delete. The
+        //    original's remove_task_input does not recompute at all -- unlike
+        //    its OWN set_task_input, which does. See the section comment above
+        //    for the source reading, and for why this is the only half of D5a's
+        //    auto-recompute behaviour that is a divergence rather than a port.
+        //
+        // severity/provenBy are set for those two (the key is a MAP, one label
+        // per divergence); the `required` waiver above is NOT semantic and
+        // keeps its own reasoning (an old-shaped call 400s cleanly rather than
+        // silently doing something different).
         'required' => ['source_task_id'],
         'severity' => 'semantic',
         // provenBy for the same reason set_task_input's entry uses it -- see
         // that entry's own comment on the two keys' opposite polarity.
-        'provenBy' => 'testRemoveInputUnblessesBothEndsOfTheEdgeItRemoves',
-        'reason' => 'TWO divergences. (1) DEFERRED (deliberate, stricter requirement, not a silent gap): the original '
+        'provenBy' => [
+            'blessing cascade' => 'testRemoveInputUnblessesBothEndsOfTheEdgeItRemoves',
+            'flow-order re-stamp on removal' => 'testRemoveInputDeletesTheEdgeAndRestampsFlowOrder',
+        ],
+        'reason' => 'THREE divergences. (1) DEFERRED (deliberate, stricter requirement, not a silent gap): the original '
             . 'treats an absent source_task_id as "remove every input edge on task_id"; this plugin\'s mutating-route '
             . 'rule forbids a mutation from resolving its own target from a caller default, and "every edge" is itself '
             . 'such a default, so source_task_id is required here and an old-shaped call 400s cleanly instead of '
@@ -785,7 +950,14 @@ return [
             . '(D5a Task 8): removing an edge resets the human contract blessing on BOTH ends of it, where the '
             . 'original leaves both tasks\' output blessings standing and only discards the edge\'s own confirmed flag '
             . 'along with the edge -- see set_task_input\'s entry above for the full reasoning and the verification '
-            . 'against the original\'s source.',
+            . 'against the original\'s source. (3) SEMANTIC (D5a Task 12): removing an edge ALSO re-stamps every '
+            . 'member of the owning flow\'s flow_step, in the same transaction as the delete. The original\'s '
+            . 'remove_task_input (index.ts:8715-8733) rewrites the consumer\'s `input` column and stops -- no '
+            . 'recompute, no note -- even though its own set_task_input auto-recomputes (8387-8418). So on the '
+            . 'original an edge removal leaves flow_step describing a dependency that no longer exists, standing until '
+            . 'someone calls recompute_flow_steps; here that stale state cannot arise from a removal at all. This is '
+            . 'the ONE half of D5a\'s auto-recompute behaviour that is a genuine divergence: the set_task_input half '
+            . 'is a faithful port of what the original already did, and is deliberately NOT recorded as one.',
     ],
 
     // ── D5a Task 8: the producer's contract and the human blessing ───────────
@@ -994,11 +1166,24 @@ return [
         // NOT SEMANTIC, and worth spelling out because a reader may expect it
         // to be: what the tool DOES when it is called is faithful (re-derive
         // the topological order from the flow's own I/O edges, re-stamp every
-        // member). What differs is how often it is NEEDED -- every edge
-        // mutation here already re-stamps the owning flow in the same
-        // transaction as the edge write (D5a Task 7), so this hatch normally
-        // finds nothing to repair, where on the original it is load-bearing.
-        // A tool that is redundant is not a tool that behaves differently.
+        // member). What differs is how often it is NEEDED. A tool that is
+        // redundant is not a tool that behaves differently.
+        //
+        // CORRECTED IN D5a TASK 12, which read the original's source instead
+        // of reasoning about it. This comment used to end "...so this hatch
+        // normally finds nothing to repair, where on the original it is
+        // load-bearing", which overstated the difference by half. The
+        // original's OWN set_task_input already auto-recomputes flow_step
+        // (index.ts:8387-8418, its own comment and its own response note
+        // included), so after a set_task_input the hatch finds nothing to
+        // repair THERE either. Where it really is load-bearing on the
+        // original is after an edge REMOVAL: remove_task_input (8715-8733)
+        // recomputes nothing at all, so the order it leaves is stale until
+        // this tool is called. Ours re-stamps on removal too (recorded as a
+        // divergence on remove_task_input's own entry above), which is what
+        // closes that one genuine gap -- leaving this hatch to repair only
+        // what no tool of ours caused: direct database edits, and orders
+        // stamped before a fix landed.
         'missing' => ['task_id', 'project_id'],
         'required' => ['flow_id'],
         'reason' => 'DEFERRED + a deliberate stricter requirement, the same pair delete_flow carries. task_id (any '
@@ -1008,8 +1193,10 @@ return [
             . 'caller\'s context, and this plugin\'s mutating-route rule forbids a mutation from doing that (see '
             . 'delete_flow and remove_task_input for the same rule applied identically) -- especially one that '
             . 'rewrites every member\'s flow_step. An argument-less call 400s naming flow_id. NOT semantic: called '
-            . 'with a flow_id it does exactly what the original does; only its NECESSITY differs, since edge writes '
-            . 'here already re-stamp the order in their own transaction (D5a Task 7).',
+            . 'with a flow_id it does exactly what the original does; only its NECESSITY differs, and by less than '
+            . 'this entry first claimed -- D5a Task 12 read the original and found its own set_task_input '
+            . 'auto-recomputes as well (index.ts:8387-8418), so the difference is confined to edge REMOVALS, which '
+            . 'recompute nothing there and re-stamp here.',
     ],
 
 ];

@@ -423,6 +423,17 @@ final class OriginalContractParityTest extends TestCase
      * below, while `dischargedBy` keeps its original meaning untouched. An
      * entry names one or the other, never both.
      *
+     * ONE ENTRY, POSSIBLY SEVERAL PROVEN DIVERGENCES (D5a Task 12). The
+     * allowlist is keyed by TOOL NAME, so a tool has exactly one entry — but
+     * a tool can ship more than one deliberate divergence, and D5a's two edge
+     * tools each ship two. `provenBy` therefore accepts a MAP of
+     * divergence-label => test as well as a single test name (see
+     * {@see self::provenByTests()} for both shapes and why a bare list is
+     * refused), and EVERY test it names is checked, so a tool with two proven
+     * divergences can never end up with only one of them backed by evidence.
+     * A `provenBy` in a shape that cannot be read is itself a failure rather
+     * than a skip — an unparseable guard is an absent one.
+     *
      * NOT CLOSED HERE, and worth stating so it is not mistaken for covered: the
      * reverse hole. If somebody implements one of the four unported behaviours
      * and adds its `dischargedBy` test WITHOUT removing the entry, and the
@@ -450,8 +461,33 @@ final class OriginalContractParityTest extends TestCase
 
             $isSemantic = ($entry['severity'] ?? null) === 'semantic';
             $dischargedBy = is_string($entry['dischargedBy'] ?? null) ? trim($entry['dischargedBy']) : '';
-            $provenBy = is_string($entry['provenBy'] ?? null) ? trim($entry['provenBy']) : '';
-            if ($isSemantic && $dischargedBy === '' && $provenBy === '') {
+
+            // D5a Task 12: `provenBy` may name ONE test or SEVERAL — see
+            // provenByTests()'s own docblock. A shape it cannot read returns
+            // null and FAILS here rather than being skipped: a malformed
+            // provenBy that merely evaluated to "no tests named" would
+            // disable the existence check below without saying so, which is
+            // precisely the silent-disabling this key exists to prevent.
+            $provenBy = self::provenByTests($entry);
+            if ($provenBy === null) {
+                $failures[] = "allowlist[{$name}].provenBy is neither a single test method name nor a non-empty map "
+                    . 'of divergence-label => test method name. Those are the only two shapes provenByTests() reads, '
+                    . 'and an unreadable provenBy is an existence check that silently does not run — the same class '
+                    . 'of hole the dischargedBy/provenBy split was introduced to close. (A plain LIST of method '
+                    . 'names is deliberately rejected too: it cannot say which divergence each test proves, which is '
+                    . 'the whole reason a tool is allowed to name more than one.)';
+                // Degrade to "names no provenBy", which is what an unreadable
+                // one amounts to. A SEMANTIC entry will therefore ALSO trip
+                // the names-neither check just below and report twice — that
+                // is deliberate, not a double-count bug: both messages are
+                // true (no CHECKABLE test is named either way) and both are
+                // fixed by the same edit, and suppressing the second would
+                // mean carrying state to describe an entry that is already
+                // failing loudly.
+                $provenBy = [];
+            }
+
+            if ($isSemantic && $dischargedBy === '' && $provenBy === []) {
                 $failures[] = "allowlist[{$name}] is severity 'semantic' but names neither a dischargedBy nor a "
                     . 'provenBy test. A semantic divergence is a behaviour difference, so it must name a behavioural '
                     . 'test either way: dischargedBy for behaviour we have NOT ported (the test that has to exist '
@@ -466,17 +502,45 @@ final class OriginalContractParityTest extends TestCase
             // schema: a provenBy test is the sole evidence that a divergence we
             // chose to keep still behaves the way the entry says, so renaming
             // or deleting it must not silently orphan the entry.
-            if ($provenBy !== '' && !self::behaviourTestExists($provenBy)) {
+            //
+            // EVERY named test, not just the first (D5a Task 12): a tool gets
+            // exactly one allowlist entry, so a tool with two shipped
+            // divergences names two tests, and checking one of them would
+            // leave the other's record unbacked while the build stayed green.
+            foreach ($provenBy as $label => $provenTest) {
+                if (self::behaviourTestExists($provenTest)) {
+                    continue;
+                }
                 $failures[] = sprintf(
-                    'allowlist[%s] names provenBy %s(), but no test method of that name containing a real assertion '
+                    'allowlist[%s]%s names provenBy %s(), but no test method of that name containing a real assertion '
                     . 'exists in the suite. Unlike dischargedBy — which names a test that must NOT exist yet, because '
                     . 'it describes behaviour this backend has not ported — provenBy names the test that PROVES a '
                     . 'divergence we deliberately shipped, so it has to be real today. Restore the test, or rename '
                     . 'this key to match the test that replaced it.',
                     $name,
-                    $provenBy,
+                    $label === '' ? '' : " (the '{$label}' divergence)",
+                    $provenTest,
                 );
             }
+
+            // The test names this entry offers as evidence that a SEMANTIC
+            // divergence's behaviour landed, used by the `missing` loop below.
+            // provenBy when the entry has one (already proven), dischargedBy
+            // otherwise (not ported yet, so its absence is the healthy state).
+            $namedTests = $provenBy !== [] ? array_values($provenBy) : array_values(array_filter(
+                [$dischargedBy],
+                static fn (string $test): bool => $test !== '',
+            ));
+            $everyNamedTestExists = $namedTests !== [];
+            foreach ($namedTests as $namedTest) {
+                if (!self::behaviourTestExists($namedTest)) {
+                    $everyNamedTestExists = false;
+                    break;
+                }
+            }
+            $namedTestList = $namedTests === []
+                ? '<dischargedBy/provenBy unset>'
+                : implode('(), ', $namedTests);
 
             if (!isset($original[$name])) {
                 $failures[] = "allowlist[{$name}] names a tool the original does not have";
@@ -502,11 +566,10 @@ final class OriginalContractParityTest extends TestCase
                 // We now declare it. For an ordinary waiver that is a discharge.
                 // For a SEMANTIC one it is only a discharge if the behaviour
                 // actually landed, which is what the entry's named behavioural
-                // test has to prove — provenBy when the entry has one (a
-                // divergence deliberately shipped and already proven),
-                // dischargedBy otherwise.
-                $namedTest = $provenBy !== '' ? $provenBy : $dischargedBy;
-                if (!$isSemantic || self::behaviourTestExists($namedTest)) {
+                // test(s) have to prove — EVERY one of them, since an entry
+                // naming two divergences is only wholly discharged when both
+                // are.
+                if (!$isSemantic || $everyNamedTestExists) {
                     $failures[] = "allowlist[{$name}].missing lists '{$property}', which is no longer missing";
                     continue;
                 }
@@ -519,8 +582,8 @@ final class OriginalContractParityTest extends TestCase
                     . 'Implement the behaviour and add %s(), or revert the schema declaration.',
                     $name,
                     $property,
-                    $namedTest === '' ? '<dischargedBy/provenBy unset>' : $namedTest,
-                    $namedTest === '' ? '<dischargedBy/provenBy unset>' : $namedTest,
+                    $namedTestList,
+                    $namedTestList,
                 );
             }
             foreach (self::listOf($entry, 'extra') as $property) {
@@ -561,6 +624,78 @@ final class OriginalContractParityTest extends TestCase
         }
 
         return $failures;
+    }
+
+    /**
+     * The behavioural tests an entry's `provenBy` names, as
+     * divergence-label => test method name.
+     *
+     * TWO ACCEPTED SHAPES, the second added by D5a Task 12. A single proven
+     * divergence names its test directly, exactly as before:
+     *
+     *     'provenBy' => 'testTheDivergenceBehavesAsThisEntryDescribes',
+     *
+     * A tool with SEVERAL proven divergences names them as a map. This is not
+     * a stylistic option — it is forced by the file's own structure: the
+     * allowlist is keyed by TOOL NAME, so a tool gets exactly one entry, and
+     * D5a shipped two distinct proven divergences on each of the two edge
+     * tools (set_task_input: the blessing cascade AND the cycle refusal;
+     * remove_task_input: the blessing cascade AND the flow-order re-stamp).
+     * Before this, the second of each pair had nowhere to go:
+     *
+     *     'provenBy' => [
+     *         'blessing cascade' => 'testAConsumerEdgeWriteUnblessesTheProducerToo',
+     *         'cycle refusal'    => 'testSetInputRefusesAnEdgeThatWouldCloseACycle',
+     *     ],
+     *
+     * WHY A MAP AND NOT A LIST. The label is documentation — nothing checks
+     * it against anything, and it deliberately is not machine-checkable. What
+     * it buys is the PAIRING: a multi-divergence entry's `reason` enumerates
+     * its divergences in prose, and a bare list of method names leaves the
+     * mapping between the two implicit, so a later reword of the reason
+     * silently decouples them and no build ever notices. That decay — a
+     * record that still passes while no longer describing what it points at —
+     * is the one this whole file exists to prevent, so reintroducing it in
+     * the file's own schema would be perverse. A keyed map is also already
+     * this file's idiom for a multi-valued waiver (`enumExtra` is
+     * property => values), so it adds no new vocabulary. A list is therefore
+     * REJECTED rather than tolerated: its integer keys fail the label check
+     * below and produce an explicit failure, not a silent acceptance.
+     *
+     * @param array<string, mixed> $entry
+     * @return array<string, string>|null label => method name, where '' is
+     *         the label of the single-string form; [] when the entry names no
+     *         provenBy at all; NULL when `provenBy` is present but in a shape
+     *         this cannot read. Null must FAIL at the call site rather than be
+     *         treated as "no tests to check" — a guard that skips what it
+     *         cannot parse is not a guard.
+     */
+    private static function provenByTests(array $entry): ?array
+    {
+        $raw = $entry['provenBy'] ?? null;
+        if ($raw === null) {
+            return [];
+        }
+
+        if (is_string($raw)) {
+            $test = trim($raw);
+
+            return $test === '' ? null : ['' => $test];
+        }
+
+        if (!is_array($raw) || $raw === []) {
+            return null;
+        }
+
+        $tests = [];
+        foreach ($raw as $label => $test) {
+            if (!is_string($label) || trim($label) === '' || !is_string($test) || trim($test) === '') {
+                return null;
+            }
+            $tests[trim($label)] = trim($test);
+        }
+
+        return $tests;
     }
 
     /**
@@ -617,6 +752,19 @@ final class OriginalContractParityTest extends TestCase
             return false;
         }
 
+        // Memoised (D5a Task 12). Every call walks and tokenises the WHOLE
+        // test tree, and the same name is now asked about more than once —
+        // once to report a provenBy whose test has vanished, again to decide
+        // whether a `missing` waiver counts as discharged, and once per waived
+        // property within that. Safe to cache: the answer is a pure function
+        // of the method name and the test sources, and nothing rewrites a test
+        // file mid-run.
+        if (isset(self::$behaviourTestExistsCache[$method])) {
+            return self::$behaviourTestExistsCache[$method];
+        }
+
+        self::$behaviourTestExistsCache[$method] = false;
+
         foreach (self::testFiles() as $file) {
             $source = file_get_contents($file);
             if (!is_string($source) || !str_contains($source, "function {$method}(")) {
@@ -625,12 +773,20 @@ final class OriginalContractParityTest extends TestCase
 
             $body = self::methodBody($source, $method);
             if ($body !== null && preg_match('/\b(assert[A-Za-z]*|expectException)\s*\(/', $body) === 1) {
-                return true;
+                return self::$behaviourTestExistsCache[$method] = true;
             }
         }
 
         return false;
     }
+
+    /**
+     * {@see self::behaviourTestExists()}'s memo — method name => does a real,
+     * assertion-bearing declaration of it exist anywhere in the test tree.
+     *
+     * @var array<string, bool>
+     */
+    private static array $behaviourTestExistsCache = [];
 
     /**
      * The text of $method's real body — between its OWN opening `{` and its
