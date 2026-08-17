@@ -65,6 +65,18 @@ final class ContractDeriver
      * the consumer's DEMAND on this producer, or null when the edge declares
      * none.
      *
+     * ONE ENTRY PER CONSUMER, and a consumer's identity here is its POSITION in
+     * this list — never its label (REVIEW ROUND 1, Minor b). Labels are not
+     * unique: {@see \Tasker\Api\TaskEdgesApiHandler::consumerLabel()} falls back
+     * to the task's own text for a task with no short id, and two tasks can
+     * share text. Comparing labels made a genuine two-consumer merge report
+     * itself as one consumer repeating itself — the exact false note that this
+     * class's own duplicate-note split was written to prevent, arriving by
+     * another route. The one-edge-per-consumer premise is the caller's to keep
+     * and the schema enforces it for the only caller there is:
+     * `tasker_task_edges` is unique on (target_task_id, source_task_id), so for
+     * a fixed producer there is at most one edge per consumer.
+     *
      * The returned `rules` are ready to be persisted as an output contract
      * (`{"rules": [...]}`) exactly as they stand; `assumptions` is never
      * anything but human-readable prose, and an EMPTY `rules` with a non-empty
@@ -78,56 +90,38 @@ final class ContractDeriver
     {
         /** @var array<string, array<array-key, mixed>> $merged keyed by dedupe key, so insertion order is rule order */
         $merged = [];
-        /** @var array<string, string> $declaredBy dedupe key => the label that declared it FIRST */
+        /** @var array<string, array{index: int, label: string}> $declaredBy dedupe key => who declared it FIRST */
         $declaredBy = [];
-        /** @var list<string> $contributors consumers that declared at least one real rule */
+        /** @var list<string> $contributors consumers that declared at least one usable rule */
         $contributors = [];
         /** @var list<string> $lossNotes per-consumer losses, in edge order */
         $lossNotes = [];
 
-        foreach ($consumerEdges as $edge) {
+        foreach ($consumerEdges as $index => $edge) {
             $label = $edge['consumer_label'];
-            $declared = self::declaredRules($edge['contract']);
+            $read = self::readRules($edge['contract']);
 
-            $unusable = 0;
-            $contributed = 0;
-            foreach ($declared as $candidate) {
-                // A rule must be a JSON OBJECT. `array_is_list([])` is TRUE, so
-                // this ONE check refuses BOTH shapes that cannot be a rule: a
-                // genuine JSON array (a non-empty list, e.g. `["a", "b"]`) and
-                // an empty object/array (`{}` / `[]`, indistinguishable once
-                // json_decode() has run) -- the same single-check reasoning
-                // {@see \Tasker\Api\TaskEdgesApiHandler::setOutput()}'s own
-                // guard spells out for a whole contract.
-                if (!is_array($candidate) || array_is_list($candidate)) {
-                    $unusable++;
-                    continue;
-                }
+            if ($read['refused']) {
+                $lossNotes[] = sprintf(
+                    'Consumer %s declared its input rules as a JSON object rather than an array, so nothing could be '
+                    . 'derived from it: a contract is an ORDERED list of rules, and an object has no order to carry '
+                    . 'over (jsonb normalises its keys, so even the order it was written in is already gone). '
+                    . 'Re-author that edge with set_task_input, passing rules as an array.',
+                    $label
+                );
+                continue;
+            }
 
-                // The consumer's own `id` is dropped BEFORE the dedupe key is
-                // taken: it is that consumer's local handle on a rule in ITS
-                // edge contract, so carrying it into the producer's contract
-                // would both split the dedupe (two identical demands, two ids)
-                // and let two consumers collide on one id. Ids for the derived
-                // contract are this class's to assign, and are assigned only
-                // once the dedupe has finished -- see below.
-                $rule = $candidate;
-                unset($rule['id']);
-
-                // Counted even when this rule dedupes into one already merged:
-                // the consumer DID declare a real demand, it just happens to
-                // coincide with another's. That is a merge to report, not a
-                // consumer with nothing to say -- so it must not fall through to
-                // the "declares no input rules" note below.
+            foreach ($read['rules'] as $rule) {
                 $key = self::dedupeKey($rule);
-                $contributed++;
-                if (array_key_exists($key, $merged)) {
+                if (array_key_exists($key, $declaredBy)) {
                     // NAMES BOTH SIDES, and distinguishes the two ways a
                     // duplicate arrives. "Demanded by more than one consumer" is
                     // simply FALSE when one consumer listed the same rule twice
                     // on its own edge, and a merge note a human cannot trust is
-                    // worse than none.
-                    $lossNotes[] = $declaredBy[$key] === $label
+                    // worse than none. Compared by POSITION, not by label -- see
+                    // this method's own docblock for why labels cannot decide it.
+                    $lossNotes[] = $declaredBy[$key]['index'] === $index
                         ? sprintf(
                             'Consumer %s declared rule "%s" more than once on its own edge; the duplicates were '
                             . 'merged into a single output rule.',
@@ -138,38 +132,49 @@ final class ContractDeriver
                             'Rule "%s" is demanded by more than one consumer (%s and %s) and was merged into a '
                             . 'single output rule -- verify they really mean the same thing.',
                             self::ruleName($rule),
-                            $declaredBy[$key],
+                            $declaredBy[$key]['label'],
                             $label
                         );
                     continue;
                 }
 
                 $merged[$key] = $rule;
-                $declaredBy[$key] = $label;
+                $declaredBy[$key] = ['index' => $index, 'label' => $label];
             }
 
-            if ($unusable > 0) {
-                $lossNotes[] = $unusable === 1
-                    ? sprintf(
-                        'Consumer %s declared 1 input rule that is not a JSON object; it was skipped, so nothing '
-                        . 'was derived from it.',
-                        $label
-                    )
-                    : sprintf(
-                        'Consumer %s declared %d input rules that are not JSON objects; they were skipped, so '
-                        . 'nothing was derived from them.',
-                        $label,
-                        $unusable
-                    );
-            }
-
-            if ($contributed === 0) {
-                $lossNotes[] = sprintf(
-                    'Consumer %s declares no input rules on its edge from this task, so there is nothing to derive '
-                    . 'from it -- the bar for that handoff would be a guess, not a requirement. Author it with '
-                    . 'set_task_input, or leave the handoff deliberately ungated.',
-                    $label
+            if ($read['unusable'] > 0) {
+                $lossNotes[] = self::skipNote(
+                    $label,
+                    $read['unusable'],
+                    'that is not a JSON object',
+                    'that are not JSON objects'
                 );
+            }
+            if ($read['contentless'] > 0) {
+                $lossNotes[] = self::skipNote(
+                    $label,
+                    $read['contentless'],
+                    'with nothing in it to derive from (an empty object, or nothing but an id)',
+                    'with nothing in them to derive from (an empty object, or nothing but an id)'
+                );
+            }
+
+            // GATED ON NOTHING HAVING BEEN SKIPPED EITHER (REVIEW ROUND 1, Minor
+            // a): a consumer whose every rule was skipped above HAS declared
+            // input rules, so saying it "declares no input rules" here would
+            // contradict the note directly above it. Only a consumer that
+            // declared literally nothing -- a null contract, `{}`, or
+            // `rules: []` -- reaches this.
+            if ($read['rules'] === []) {
+                if ($read['unusable'] === 0 && $read['contentless'] === 0) {
+                    $lossNotes[] = sprintf(
+                        'Consumer %s declares no input rules on its edge from this task, so there is nothing to '
+                        . 'derive from it -- the bar for that handoff would be a guess, not a requirement. Author it '
+                        . 'with set_task_input, or leave the handoff deliberately ungated.',
+                        $label
+                    );
+                }
+
                 continue;
             }
 
@@ -214,27 +219,116 @@ final class ContractDeriver
     }
 
     /**
-     * The rule candidates $contract declares, read PERMISSIVELY: an edge
-     * contract is stored as any JSON object at all
-     * ({@see \Tasker\Api\TaskEdgesApiHandler::setInput()} validates only that
-     * it IS an object), so `rules` may be absent, null, or something other than
-     * a list. Anything that is not an array of candidates yields none, and the
-     * per-candidate shape check in {@see self::derive()} handles the rest.
+     * Reads one edge contract's `rules` into the rules that can actually be
+     * derived from, plus a count of everything that could not — so
+     * {@see self::derive()} can report each loss instead of dropping it. Nothing
+     * here is silent by design: every return path either yields a rule or
+     * increments something the caller turns into an assumption.
      *
-     * `array_values()` so a `rules` that arrived as a JSON OBJECT rather than an
-     * array (`{"a": {...}}`) still yields its values in declaration order,
-     * rather than being discarded wholesale for the shape of its keys.
+     * AN EDGE CONTRACT IS VALIDATED ONLY AS "some JSON object"
+     * ({@see \Tasker\Api\TaskEdgesApiHandler::setInput()} checks nothing else),
+     * so every shape below is real input a caller can store, not a defensive
+     * hypothetical.
+     *
+     *   - `rules` absent or null → no rules, nothing refused. The edge declares
+     *     a handoff and no bar, which is legitimate and common.
+     *   - `rules` not a LIST (a string, a number, or a JSON OBJECT such as
+     *     `{"a": {...}}`) → `refused`. Deliberately NOT read by taking the
+     *     object's values (REVIEW ROUND 1, Minor d — which is how it behaved
+     *     before): a contract is an ORDERED list of rules, and an object's order
+     *     is not the caller's. jsonb normalises object keys, so the authoring
+     *     order is already gone by the time it is read back — verified
+     *     empirically, a `{"b": …, "a": …}` rules object came back b-then-a
+     *     regardless of how it went in. Reading it would invent an order and
+     *     present the invention as the human's own bar.
+     *   - a candidate that is not a JSON object (a scalar, or a non-empty list
+     *     like `["a", "b"]`) → `unusable`.
+     *   - a candidate that is an object with NOTHING IN IT once its own `id` is
+     *     stripped — `{}`, or `{"id": "r1"}` → `contentless` (REVIEW ROUND 1,
+     *     THE IMPORTANT FINDING). The id strip happens before this check
+     *     precisely because it can EMPTY a rule that passed the object test: an
+     *     id-only rule used to survive as `{"id": "r1"}` with no content and no
+     *     assumption, and on `apply: true` that draft is a non-empty object, so
+     *     it cleared setOutput()'s own guard and left confirm_contract able to
+     *     bless a definition-of-done whose only rule said nothing.
+     *
+     * `contentless` rather than folding those into `unusable`: an empty object
+     * IS a JSON object, so a note calling it "not a JSON object" would be false,
+     * and this class's whole contract with its reader is that the notes are
+     * true.
      *
      * @param array<array-key, mixed>|null $contract
-     * @return list<mixed>
+     * @return array{rules: list<array<array-key, mixed>>, unusable: int, contentless: int, refused: bool}
      */
-    private static function declaredRules(?array $contract): array
+    private static function readRules(?array $contract): array
     {
-        if ($contract === null || !is_array($contract['rules'] ?? null)) {
-            return [];
+        $declared = $contract !== null ? ($contract['rules'] ?? null) : null;
+        if ($declared === null) {
+            return ['rules' => [], 'unusable' => 0, 'contentless' => 0, 'refused' => false];
+        }
+        if (!is_array($declared) || !array_is_list($declared)) {
+            return ['rules' => [], 'unusable' => 0, 'contentless' => 0, 'refused' => true];
         }
 
-        return array_values($contract['rules']);
+        $rules = [];
+        $unusable = 0;
+        $contentless = 0;
+
+        foreach ($declared as $candidate) {
+            // A non-empty LIST (`["a", "b"]`) or a scalar can never be a rule.
+            // `[]` is excluded from this arm on purpose: `array_is_list([])` is
+            // TRUE, but `{}` and `[]` are the same value after json_decode(), and
+            // an empty rule is better described by the contentless arm below.
+            if (!is_array($candidate) || (array_is_list($candidate) && $candidate !== [])) {
+                $unusable++;
+                continue;
+            }
+
+            // The consumer's own `id` is dropped BEFORE the dedupe key is taken:
+            // it is that consumer's local handle on a rule in ITS edge contract,
+            // so carrying it into the producer's contract would both split the
+            // dedupe (two identical demands, two ids) and let two consumers
+            // collide on one id. Ids for the derived contract are this class's to
+            // assign, and are assigned only once the dedupe has finished.
+            $rule = $candidate;
+            unset($rule['id']);
+
+            if ($rule === []) {
+                $contentless++;
+                continue;
+            }
+
+            $rules[] = $rule;
+        }
+
+        return ['rules' => $rules, 'unusable' => $unusable, 'contentless' => $contentless, 'refused' => false];
+    }
+
+    /**
+     * "Consumer TDE-2 declared 2 input rules that are not JSON objects; they
+     * were skipped, so nothing was derived from them."
+     *
+     * Shared by both skip buckets so the two notes cannot drift into differently
+     * phrased versions of the same sentence, and so the singular/plural
+     * agreement is written once. $singularWhy/$pluralWhy are the only part that
+     * differs — a `%s`-and-hope approach reads "1 input rule that are not JSON
+     * objects", which is the kind of thing that makes a caller distrust the rest
+     * of the message.
+     */
+    private static function skipNote(string $label, int $count, string $singularWhy, string $pluralWhy): string
+    {
+        return $count === 1
+            ? sprintf(
+                'Consumer %s declared 1 input rule %s; it was skipped, so nothing was derived from it.',
+                $label,
+                $singularWhy
+            )
+            : sprintf(
+                'Consumer %s declared %d input rules %s; they were skipped, so nothing was derived from them.',
+                $label,
+                $count,
+                $pluralWhy
+            );
     }
 
     /**
@@ -293,15 +387,31 @@ final class ContractDeriver
      * `r.rule?.toString().slice(0, 40)` label fallback, so one pathological
      * 2000-character rule cannot swamp the assumption list it appears in.
      *
+     * TRUNCATION IS MARKED (REVIEW ROUND 1, Minor c). `mb_substr()` alone made a
+     * cut name read as a complete one, inside a note whose whole job is to send a
+     * human to look at a specific rule — and `Rule "Has a summary of the source
+     * mater" is demanded by…` invites them to go hunting for a rule of that name.
+     * The marker is counted against the 40, so a name never grows past the
+     * budget, and the cut is right-trimmed first: `mb_strimwidth()` does this
+     * whole job in one call but leaves the space it cut on, printing
+     * `"…source material ..."`. ASCII "..." rather than an ellipsis character,
+     * matching every other runtime string in this class (its dashes are "--" for
+     * the same reason: these end up in JSON, where a non-ASCII character is
+     * escaped to \uXXXX in the raw body).
+     *
      * @param array<array-key, mixed> $rule
      */
     private static function ruleName(array $rule): string
     {
         foreach (['label', 'rule'] as $field) {
             $value = $rule[$field] ?? null;
-            if (is_string($value) && trim($value) !== '') {
-                return mb_substr(trim($value), 0, 40);
+            if (!is_string($value) || trim($value) === '') {
+                continue;
             }
+
+            $name = trim($value);
+
+            return mb_strlen($name) > 40 ? rtrim(mb_substr($name, 0, 37)) . '...' : $name;
         }
 
         return '(unlabelled)';

@@ -169,30 +169,146 @@ final class ContractDeriverTest extends TestCase
     }
 
     /**
-     * A rule must be a JSON OBJECT. `rules: ["just a string"]` or a nested
-     * array cannot be merged into a producer contract, and dropping a caller's
-     * declared demand without saying so is the exact failure mode this class's
-     * assumptions exist to prevent. `array_is_list([])` being TRUE means the one
-     * check also refuses `{}` — a rule with nothing in it — the same way
-     * {@see \Tasker\Api\TaskEdgesApiHandler::setOutput()}'s own guard does.
+     * A rule must be a JSON OBJECT WITH SOMETHING IN IT, and every candidate
+     * that is neither is counted and reported. Dropping a caller's declared
+     * demand without saying so is the exact failure mode this class's
+     * assumptions exist to prevent.
+     *
+     * The two buckets are reported separately because they are different facts:
+     * `{}` and `{"id": "r1"}` ARE JSON objects, so a note calling them "not a
+     * JSON object" would be false.
      */
-    public function testARuleThatIsNotAJsonObjectIsSkippedAndSaidSoRatherThanDroppedSilently(): void
+    public function testEveryCandidateThatCannotBecomeARuleIsCountedAndReportedByReason(): void
     {
         $r = ContractDeriver::derive([
             ['consumer_label' => 'TDE-2', 'contract' => ['rules' => [
                 'just a string',
+                ['not', 'an', 'object'],
                 [],
+                ['id' => 'r1'],
                 ['label' => 'The one real rule'],
             ]]],
         ]);
 
         self::assertSame(['The one real rule'], array_column($r['rules'], 'label'));
-        self::assertCount(1, $r['assumptions'], 'the consumer DID contribute a rule, so only the skip is worth saying');
+        self::assertSame(['r1'], array_column($r['rules'], 'id'),
+            'and the ids are this class\'s own, so the skipped id-only rule cannot have leaked one');
+
+        $joined = implode(' ', $r['assumptions']);
+        self::assertCount(2, $r['assumptions'], 'one note per reason, and no "declares no input rules" -- it did');
         // '2 input rules' rather than a bare '2': the label itself is "TDE-2",
         // so asserting on the digit alone would pass without the count ever
         // being reported.
-        self::assertStringContainsString('TDE-2 declared 2 input rules', $r['assumptions'][0],
-            'the human must be told WHICH consumer and HOW MANY declared rules were unusable');
+        self::assertStringContainsString('TDE-2 declared 2 input rules that are not JSON objects', $joined);
+        self::assertStringContainsString('TDE-2 declared 2 input rules with nothing in them', $joined);
+    }
+
+    /**
+     * REVIEW ROUND 1, THE IMPORTANT FINDING. An id-only rule is a JSON object,
+     * so it passes the object guard — and then the id strip empties it. It used
+     * to survive as `{"id": "r1"}`: a rule with no content at all, and no
+     * assumption recorded.
+     *
+     * Reachable, not hypothetical: set_task_input validates only that an edge
+     * contract IS a JSON object, so `{"rules":[{"id":"r1"}]}` is real, storable
+     * input. And on `apply: true` the resulting draft is a non-empty object, so
+     * it cleared setOutput()'s own non-empty guard, leaving confirm_contract able
+     * to bless a definition-of-done whose only rule said nothing.
+     */
+    public function testAnIdOnlyRuleIsRefusedRatherThanEmittedAsARuleWithNoContent(): void
+    {
+        $r = ContractDeriver::derive([
+            ['consumer_label' => 'TDE-2', 'contract' => ['rules' => [['id' => 'r1']]]],
+        ]);
+
+        self::assertSame([], $r['rules'], 'a rule that is empty once its id is stripped is not a rule');
+        self::assertCount(1, $r['assumptions']);
+        self::assertStringContainsString('TDE-2 declared 1 input rule with nothing in it', $r['assumptions'][0]);
+    }
+
+    /**
+     * REVIEW ROUND 1, Minor (a). A consumer whose every rule was skipped HAS
+     * declared input rules, so the "declares no input rules" note must not fire
+     * alongside the skip note and contradict it.
+     */
+    public function testAConsumerWhoseEveryRuleWasSkippedIsNotAlsoToldItDeclaredNone(): void
+    {
+        $r = ContractDeriver::derive([
+            ['consumer_label' => 'TDE-2', 'contract' => ['rules' => ['just a string']]],
+        ]);
+
+        self::assertSame([], $r['rules']);
+        self::assertCount(1, $r['assumptions'], 'one note about the skip, not a second one contradicting it');
+        self::assertStringNotContainsString('declares no input rules', $r['assumptions'][0]);
+    }
+
+    /**
+     * REVIEW ROUND 1, Minor (b). Labels are NOT unique — the route falls back to
+     * the task's own text for a task with no short id — so consumer identity
+     * here is the edge's POSITION. Comparing labels turned a genuine
+     * two-consumer merge into "one consumer repeated itself", the same false
+     * note the self-vs-cross split exists to prevent, arriving by another route.
+     */
+    public function testTwoConsumersSharingALabelAreStillTwoConsumers(): void
+    {
+        $rule = ['label' => 'Has a summary'];
+        $r = ContractDeriver::derive([
+            ['consumer_label' => 'Review the draft', 'contract' => ['rules' => [$rule]]],
+            ['consumer_label' => 'Review the draft', 'contract' => ['rules' => [$rule]]],
+        ]);
+
+        $joined = implode(' ', $r['assumptions']);
+        self::assertCount(1, $r['rules']);
+        self::assertStringContainsString('demanded by more than one consumer', $joined);
+        self::assertStringNotContainsString('more than once on its own edge', $joined);
+    }
+
+    /**
+     * REVIEW ROUND 1, Minor (d). A `rules` that arrived as a JSON OBJECT is
+     * REFUSED with a note, not silently read by taking its values: a contract is
+     * an ordered list, and an object's order is not the caller's — jsonb
+     * normalises object keys, so the authoring order is already gone. Reading it
+     * would invent an order and present the invention as the human's own bar.
+     *
+     * The fixture is deliberately keyed b-then-a, which is how the old
+     * array_values() behaviour was caught: it derived "Second" before "First".
+     */
+    public function testRulesDeclaredAsAJsonObjectAreRefusedRatherThanSilentlyReordered(): void
+    {
+        $r = ContractDeriver::derive([
+            ['consumer_label' => 'TDE-2', 'contract' => ['rules' => [
+                'b' => ['label' => 'Second'],
+                'a' => ['label' => 'First'],
+            ]]],
+        ]);
+
+        self::assertSame([], $r['rules']);
+        self::assertCount(1, $r['assumptions']);
+        self::assertStringContainsString('TDE-2 declared its input rules as a JSON object', $r['assumptions'][0]);
+        self::assertStringContainsString('set_task_input', $r['assumptions'][0], 'and how to fix it');
+    }
+
+    /**
+     * REVIEW ROUND 1, Minor (c). A truncated rule name must not read as a
+     * complete one, inside a note whose whole job is to send a human to look at
+     * one specific rule.
+     */
+    public function testALongRuleNameIsTruncatedWithAVisibleMarker(): void
+    {
+        $long = ['label' => 'Has a summary of the source material that covers every section of the outline'];
+        $r = ContractDeriver::derive([
+            ['consumer_label' => 'TDE-2', 'contract' => ['rules' => [$long]]],
+            ['consumer_label' => 'TDE-3', 'contract' => ['rules' => [$long]]],
+        ]);
+
+        $joined = implode(' ', $r['assumptions']);
+        self::assertStringContainsString('Has a summary of the source material...', $joined);
+        self::assertStringNotContainsString('every section', $joined, 'the name is cut, and says so');
+        self::assertSame(
+            $long['label'],
+            $r['rules'][0]['label'],
+            'only the NAME in the prose is shortened -- the rule itself keeps the label the consumer wrote'
+        );
     }
 
     /**

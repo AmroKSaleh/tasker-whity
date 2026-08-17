@@ -8129,6 +8129,12 @@ final class TenantIsolationOuTest extends TestCase
         $edges->setInput(7, null, $c, $p, null, null, false);
         $noRules = $edges->deriveOutput(7, null, $p, true);
         self::assertSame(422, $noRules->getStatusCode());
+        // REVIEW ROUND 1, Minor (b): this consumer has no short id, so its label
+        // falls back to its text -- WITH its task id appended, because text is
+        // not unique and "Consumer X" naming two different tasks identifies
+        // neither.
+        self::assertStringContainsString("Consumer with nothing to say (task {$c})", $noRules->getBody(),
+            'the fallback label must identify exactly one task');
 
         self::assertSame(
             ['Hand authored, and still valid'],
@@ -8180,6 +8186,62 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertSame(200, $edges->deriveOutput(7, 2, $ownProducer, true)->getStatusCode());
         self::assertSame(['Anything at all'], array_column($this->storedContractFor($ownProducer)['rules'], 'label'));
+    }
+
+    /**
+     * REVIEW ROUND 1, Minor (e): consumerEdgesOf()'s OU predicate had NO test —
+     * deleting it left the whole suite green, which makes a defence-in-depth
+     * filter indistinguishable from dead code.
+     *
+     * Every edge written THROUGH this API has same-project endpoints
+     * (setInput()'s own 422), so the only way a cross-OU consumer edge can exist
+     * is a direct row insert — which is exactly what insertEdgeDirect() is for.
+     * Without the predicate, a sibling OU's rule TEXT (and the consumer's name,
+     * in the assumptions) is quoted straight back to a caller who cannot see
+     * that task at all.
+     *
+     * The unrestricted-caller control at the end is what makes this test prove
+     * the PREDICATE rather than a broken join: the same fixture, read with no OU
+     * restriction, yields both consumers.
+     */
+    public function testDeriveOutputIgnoresAConsumerInASiblingOuEvenWhenAnEdgeReachesIt(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnEdge', 'OE9');
+        $ownSection = $this->makeSectionDirect(7, $ownProject);
+        $producer    = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Producer');
+        $ownConsumer = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Own consumer');
+
+        $sibProject  = $this->makeProjectDirect(7, 3, 'SibEdge', 'SE9');
+        $sibConsumer = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sibling consumer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $ownConsumer, $producer, null, ['rules' => [['label' => 'Visible demand']]], false);
+        // Direct insert + a raw UPDATE for the contract column the helper does
+        // not take -- this file's own convention for exactly that (see the
+        // short_id updates above).
+        $crossOuEdge = $this->insertEdgeDirect(7, $producer, $sibConsumer);
+        $this->pdo->exec(
+            'UPDATE tasker_task_edges SET contract = \'{"rules": [{"label": "Sibling secret demand"}]}\'::jsonb'
+            . " WHERE id = {$crossOuEdge}"
+        );
+
+        $scoped = json_decode($edges->deriveOutput(7, 2, $producer, false)->getBody(), true)['data'];
+        self::assertSame(['Visible demand'], array_column($scoped['rules'], 'label'));
+        self::assertStringNotContainsString('Sibling secret demand', (string) json_encode($scoped),
+            'another OU\'s rule text must not be quoted back to a caller who cannot see that task');
+        self::assertStringNotContainsString('Sibling consumer', (string) json_encode($scoped),
+            'and not even its NAME, which an assumption about it would carry');
+
+        $unrestricted = json_decode($edges->deriveOutput(7, null, $producer, false)->getBody(), true)['data'];
+        self::assertSame(
+            ['Visible demand', 'Sibling secret demand'],
+            array_column($unrestricted['rules'], 'label'),
+            'the control: the cross-OU edge IS reachable, so the exclusion above was the OU predicate doing its job'
+        );
     }
 
     /**

@@ -855,8 +855,17 @@ final class TaskEdgesApiHandler
      * (`derived_from: sources.map(s => s.text)`); a short id is preferred here
      * because task text is neither unique nor addressable. The text is still the
      * FALLBACK for a task with no short id at all (nothing allocates one
-     * retroactively, and every pre-D1b row has none), with the id as a last
-     * resort so an assumption can never name a consumer as "".
+     * retroactively, and every pre-D1b row has none).
+     *
+     * THAT FALLBACK CARRIES THE TASK ID (REVIEW ROUND 1, Minor b): two tasks can
+     * share text, and a bare text label made two DISTINCT consumers
+     * indistinguishable in the assumptions — "Merged the input rules of 2
+     * consumers (Review the draft, Review the draft)" names one consumer twice
+     * and identifies neither. `id` is not sensitive here: every task response on
+     * this surface already carries it. So the label is unique per task on every
+     * branch, which is what {@see \Tasker\Domain\ContractDeriver}'s notes need to
+     * be readable — though the deriver deliberately does NOT rely on that for
+     * consumer IDENTITY (it compares edge positions; see its derive() docblock).
      *
      * The short-id rendering mirrors {@see \Tasker\Api\TasksApiHandler::renderShortId()}
      * exactly — duplicated per handler, as this codebase does with its small
@@ -871,7 +880,7 @@ final class TaskEdgesApiHandler
 
         $trimmed = trim($text);
 
-        return $trimmed !== '' ? $trimmed : "task {$taskId}";
+        return $trimmed !== '' ? "{$trimmed} (task {$taskId})" : "task {$taskId}";
     }
 
     /**
