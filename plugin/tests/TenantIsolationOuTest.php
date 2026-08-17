@@ -7150,8 +7150,9 @@ final class TenantIsolationOuTest extends TestCase
         $this->makeOu(3, 7, 1);
 
         $sibProject = $this->makeProjectDirect(7, 3, 'SibRm', 'SRM');
-        $sibA = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'SibA');
-        $sibB = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'SibB');
+        $sibSection = $this->makeSectionDirect(7, $sibProject);
+        $sibA = $this->makeTaskDirect(7, $sibProject, $sibSection, 'SibA');
+        $sibB = $this->makeTaskDirect(7, $sibProject, $sibSection, 'SibB');
 
         $ownProject = $this->makeProjectDirect(7, 2, 'OwnRm', 'ORM');
         $ownSection = $this->makeSectionDirect(7, $ownProject);
