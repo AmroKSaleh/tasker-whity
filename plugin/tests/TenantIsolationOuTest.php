@@ -7423,7 +7423,8 @@ final class TenantIsolationOuTest extends TestCase
      *
      * `::int` in the SQL rather than a `(bool)` cast in PHP, matching this
      * file's own established convention (see
-     * testTasksPinRejectsATaskInASiblingOu()'s own identical cast and comment):
+     * testTasksPinRejects404ForATaskInASiblingOu()'s own identical cast and
+     * comment):
      * pdo_pgsql can return a boolean column as the STRING "f", and
      * `(bool) 'f'` is `true` in PHP -- so a naive cast here would report every
      * unblessed task as blessed and make every assertFalse() below pass for
@@ -7540,6 +7541,32 @@ final class TenantIsolationOuTest extends TestCase
 
         self::assertFalse($this->blessedFor($p), 'the producer\'s blessing must not survive losing a consumer');
         self::assertFalse($this->blessedFor($c), 'the consumer\'s blessing must not survive losing an input');
+    }
+
+    /**
+     * set_task_output REPLACES wholesale; it never merges into what was there.
+     * Structurally true today (`SET output_contract = :contract::jsonb` is a
+     * plain assignment) and pinned anyway, because the nearest sibling in this
+     * codebase does the opposite by default: FlowsApiHandler::updateContext()
+     * merges with jsonb `||` unless a caller passes replace. Making the two
+     * "consistent" would silently keep a rule the human had deleted — and a
+     * deleted rule that stays in the quality bar is exactly the kind of drift
+     * nobody would notice until a gate failed on it. The original replaces too
+     * (`contract: { rules, confirmed: false }`, built from the new rules alone).
+     */
+    public function testSetOutputReplacesThePreviousContractRatherThanMergingIntoIt(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Replaced', 'RPC');
+        $p = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'Producer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'Old rule']], 'note' => 'a key the second write omits']);
+        $second = $edges->setOutput(7, null, $p, ['rules' => [['label' => 'New rule']]]);
+
+        self::assertSame(200, $second->getStatusCode());
+        $stored = json_decode($second->getBody(), true)['data']['outputContract'];
+        self::assertSame(['New rule'], array_column($stored['rules'], 'label'));
+        self::assertSame(['rules'], array_keys($stored), 'the omitted top-level key must be gone, not merged through');
     }
 
     public function testClearOutputDropsTheContractAndItsBlessing(): void

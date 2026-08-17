@@ -31,10 +31,13 @@ declare(strict_types=1);
  *               original's agent_ready gate entirely (WHOLE-BRANCH REVIEW
  *               I2 — see that entry below for why it carries no
  *               missing/extra property at all), and D5a Task 8 added TWO
- *               more of that same property-less kind: set_task_input and
- *               remove_task_input both reset the human contract blessing on
- *               BOTH ENDS of the edge they touch, where the original resets
- *               neither task's. move_task — the collision
+ *               more that are purely behavioural in the same way:
+ *               set_task_input and remove_task_input both reset the human
+ *               contract blessing on BOTH ENDS of the edge they touch, where
+ *               the original resets neither task's. set_task_input's entry is
+ *               property-less like get_ready_work's; remove_task_input's is
+ *               not, but only because it ALSO carries an unrelated, non-
+ *               semantic `required` waiver of its own. move_task — the collision
  *               between the original's cross-project move and D1's
  *               within-project one — was FIXED in D1b Task 12c (a real
  *               port, not a waiver; see TasksApiHandler::moveToProject()),
