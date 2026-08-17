@@ -7,6 +7,7 @@ namespace Tasker;
 use Tasker\Access\IdentifierResolver;
 use Tasker\Api\AttentionApiHandler;
 use Tasker\Api\BoardApiHandler;
+use Tasker\Api\FlowsApiHandler;
 use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\PingApiHandler;
@@ -1233,6 +1234,101 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         400 => ['description' => 'project_id looks like a short id but is malformed'],
                         403 => ['description' => 'Tenant context is required, caller membership could not be resolved, or caller identity could not be resolved'],
                         404 => ['description' => 'project_id was supplied but not found or outside the caller\'s OU scope'],
+                    ],
+                ],
+            ],
+            // ==================== Flows (D5a Task 5) ====================
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/flows/name',
+                'handler' => [$this, 'nameFlow'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'name_flow',
+                    'summary' => 'Create a flow: name it, stamp membership on its tasks, and compute their initial '
+                        . 'topological order from the I/O edges already wired between them. There is no separate '
+                        . 'create tool -- this call both creates the flow and assigns its members.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['name', 'task_ids'],
+                        'properties' => [
+                            'project_id' => ['type' => 'string', 'description' => 'Project prefix, slug, UUID or id. Omit to use your default project.'],
+                            'name' => ['type' => 'string', 'description' => 'Human name for the flow (e.g. "Blog Post Publication Flow").'],
+                            'task_ids' => [
+                                'type' => 'array',
+                                'items' => ['type' => 'string'],
+                                'description' => 'Every task in the flow (UUIDs or short IDs, e.g. TDE-31). All must already belong to the project.',
+                            ],
+                            'context' => [
+                                'type' => 'object',
+                                'description' => 'Optional shared context for the flow -- background, goals, constraints, or instructions that apply to all tasks in it.',
+                            ],
+                            'step_list_open' => [
+                                'type' => 'boolean',
+                                'description' => 'True when the flow\'s full step list is not yet known (research/investigation -- it discovers steps as it goes). Default false.',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        201 => ['description' => 'The created flow'],
+                        400 => ['description' => 'name, project_id, or a task_ids entry is missing, empty, or looks like a malformed short id'],
+                        404 => ['description' => 'Project not found, or a task_ids entry not found, in the caller\'s tenant or OU scope'],
+                        409 => ['description' => 'A flow with this name already exists in the project'],
+                        422 => ['description' => 'A task_ids entry does not belong to the project, or the tasks form a dependency cycle'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'GET',
+                'path' => '/api/tasker/flows',
+                'handler' => [$this, 'listFlows'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'list_flows',
+                    'summary' => 'List flows. project_id is optional: it falls back to your default project, and if '
+                        . 'you have none set, every flow across your whole OU scope is returned.',
+                    'tags' => ['tasker'],
+                    'parameters' => [
+                        [
+                            'name' => 'project_id',
+                            'in' => 'query',
+                            'required' => false,
+                            'schema' => ['type' => 'string'],
+                            'description' => 'Project prefix (e.g. TDE), slug, UUID or id. Omit for your default project, or every project in scope if you have none set.',
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The flow list'],
+                        400 => ['description' => 'project_id looks like a short id but is malformed'],
+                        404 => ['description' => 'project_id was supplied but not found or outside the caller\'s OU scope'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/flows',
+                'handler' => [$this, 'deleteFlow'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_structure:manage',
+                'schema' => [
+                    'operationId' => 'delete_flow',
+                    'summary' => 'Delete a flow. Its member tasks are NOT deleted -- they return to the board '
+                        . '(flow_id cleared) and keep every I/O edge they already had.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['flow_id'],
+                        'properties' => [
+                            'flow_id' => ['type' => 'string', 'description' => 'Flow UUID, id, or short ID (e.g. TDE-F1).'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'Deleted; reports how many tasks returned to the board'],
+                        400 => ['description' => 'flow_id is missing or looks like a short id but is malformed'],
+                        404 => ['description' => 'Flow not found in the caller\'s tenant or OU scope'],
                     ],
                 ],
             ],
@@ -3775,6 +3871,190 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new AttentionApiHandler($pdo))->attention($tenantId, $ou['ouId'], $projectId, $callerId);
+    }
+
+    /**
+     * POST /api/tasker/flows/name — the flow-CREATING call (D5a Task 5).
+     * There is no separate create tool: this both inserts the flow row and
+     * stamps membership/initial order on its tasks.
+     *
+     * project_id is optional (falls back to the caller's default project,
+     * like createSection()/createTask()). Each task_ids entry is resolved
+     * HERE via IdentifierResolver::resolveTask() (OU-scoped) — an entry
+     * outside the caller's tenant/OU scope 404s before FlowsApiHandler::name()
+     * is ever reached, which then ALSO re-checks every resolved id belongs to
+     * $projectId itself (see that method's own docblock) — the same
+     * defence-in-depth layering every other create route in this plugin
+     * applies to its own parent/member identifiers.
+     *
+     * @param array<string, string> $params
+     */
+    public function nameFlow(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default — see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'project_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawProject = $this->identifierFromRequest($request, 'project_id');
+        if (IdentifierResolver::classify($rawProject) === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $rawProject,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null) {
+            return Response::error('Project not found', 404);
+        }
+
+        $name = (string) ($decoded['name'] ?? '');
+
+        $rawTaskIds = $decoded['task_ids'] ?? null;
+        if (!is_array($rawTaskIds) || $rawTaskIds === []) {
+            return Response::error('task_ids must be a non-empty array', 400);
+        }
+
+        $taskIds = [];
+        foreach ($rawTaskIds as $rawTaskId) {
+            if (!is_string($rawTaskId) && !is_int($rawTaskId)) {
+                return Response::error('Each task_ids entry must be a string or integer identifier', 400);
+            }
+            if (IdentifierResolver::classify($rawTaskId) === 'malformed_short_id') {
+                return Response::error('A task_ids entry looks like a short id but is malformed', 400);
+            }
+            $resolvedTaskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+            if ($resolvedTaskId === null) {
+                return Response::error('Task not found', 404);
+            }
+            $taskIds[] = $resolvedTaskId;
+        }
+
+        $context = is_array($decoded['context'] ?? null) ? $decoded['context'] : null;
+        $stepListOpen = $this->paramBool($request, 'step_list_open', false);
+        $createdBy = $this->callerProfileId($request);
+
+        return (new FlowsApiHandler($pdo))
+            ->name($tenantId, $ou['ouId'], $projectId, $name, $taskIds, $context, $stepListOpen, $createdBy);
+    }
+
+    /**
+     * GET /api/tasker/flows?project_id= (D5a Task 5)
+     *
+     * project_id is optional, using the SAME defaultProjectIdFor() fallback
+     * mechanism as listSections() — but unlike listSections() (which 404s
+     * when the caller has no default project, since a section has no meaning
+     * outside one), an omitted project_id with no resolvable default falls
+     * through to null rather than 404ing, and FlowsApiHandler::list() treats
+     * null as "every flow across the caller's whole OU scope" — the same
+     * "search everywhere on omission" shape getMyAttention() already uses
+     * for its own optional project_id, just reached through
+     * resolveProject()'s existing 'empty' branch instead of a bespoke one.
+     * An EXPLICITLY supplied project_id that fails to resolve still 404s: a
+     * caller who named a specific project and got it wrong should be told,
+     * not silently shown every flow they can see.
+     *
+     * @param array<string, string> $params
+     */
+    public function listFlows(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $raw = $this->queryParam($request, 'project_id');
+        $form = IdentifierResolver::classify($raw);
+        if ($form === 'malformed_short_id') {
+            return Response::error('project_id looks like a short id but is malformed', 400);
+        }
+
+        $projectId = IdentifierResolver::resolveProject(
+            $pdo,
+            $tenantId,
+            $ou['ouId'],
+            $raw,
+            $this->defaultProjectIdFor($request, $tenantId)
+        );
+        if ($projectId === null && $form !== 'empty') {
+            return Response::error('Project not found', 404);
+        }
+
+        return (new FlowsApiHandler($pdo))->list($tenantId, $ou['ouId'], $projectId);
+    }
+
+    /**
+     * DELETE /api/tasker/flows (D5a Task 5)
+     *
+     * flow_id is REQUIRED and never falls back to a caller default — a
+     * mutating route never resolves its own target from a default (the same
+     * rule deleteProject()/moveTask() state and enforce for their own
+     * required identifiers). Read via identifierFromRequest(), which covers
+     * body-then-query, since core empties the DELETE body and flattens every
+     * MCP argument into the query string instead.
+     *
+     * @param array<string, string> $params
+     */
+    public function deleteFlow(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'flow_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawFlowId = $this->identifierFromRequest($request, 'flow_id');
+        $form = IdentifierResolver::classify($rawFlowId);
+        if ($form === 'empty') {
+            return Response::error('flow_id is required', 400);
+        }
+        if ($form === 'malformed_short_id') {
+            return Response::error('flow_id looks like a short id but is malformed', 400);
+        }
+
+        $flowId = IdentifierResolver::resolveFlow($pdo, $tenantId, $ou['ouId'], $rawFlowId);
+        if ($flowId === null) {
+            return Response::error('Flow not found', 404);
+        }
+
+        return (new FlowsApiHandler($pdo))->delete($tenantId, $ou['ouId'], $flowId);
     }
 
     /**

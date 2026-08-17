@@ -54,7 +54,13 @@ declare(strict_types=1);
  * property FAILS unless the behavioural test named in `dischargedBy` actually
  * exists in the suite. Behaviour first, schema second.
  *
- * 19 entries waiving 56 individual divergences across the 36 shared tools.
+ * 22 entries waiving 64 individual divergences across the 39 shared tools.
+ * D5a Task 5 ported name_flow/list_flows/delete_flow and added 3 new DEFERRED
+ * entries for them (8 more divergences: 3 for name_flow, 2 for list_flows, 2
+ * missing + 1 required for delete_flow) — 19 -> 22 entries, 56 -> 64
+ * divergences, 36 -> 39 shared tools, semantic count unchanged at 4 (none of
+ * the three are semantic).
+ *
  * D1b Task 12c closed move_task's SEMANTIC entry outright (a real port — see
  * moveTask()/moveToProject() — not a waiver) and opened one new ADDITIVE
  * entry for move_task_to_group's own sort_order (rehoming the reordering
@@ -431,5 +437,69 @@ return [
             . 'own REST layer, not MCP) -- sort_order is rehomed here from the now-fixed move_task (D1b Task 12c) '
             . 'because D2\'s own drag-and-drop frontend needs a reordering call somewhere on this surface. Optional '
             . 'and additive.',
+    ],
+
+    // ── DEFERRED (continued, D5a Task 5) ─────────────────────────────────────
+    //
+    // name_flow/list_flows/delete_flow are D5a's first user-facing flow
+    // tools. None of the three's divergences are semantic — every one is
+    // either a capability this task's own brief scopes out (pagination,
+    // custom short ids, alternate flow lookups) or a deliberately STRICTER
+    // requirement this plugin's own mutating-route rule demands.
+
+    'name_flow' => [
+        // DEFERRED, both plain no-ops on the original:
+        //  - short_id: a caller-chosen custom short id override. Not
+        //    implemented — every flow's short_id is auto-generated via
+        //    ShortIdAllocator, exactly like tasker_tasks already works, with
+        //    no tool anywhere in this plugin letting a caller pin one.
+        //  - bypass, bypass_reason: the original's OWN schema marks both
+        //    "DEPRECATED — ignored, kept so older callers do not error" /
+        //    "kept for backward compatibility". There is no behaviour to
+        //    port for a flag the original itself no longer honours.
+        'missing' => ['short_id', 'bypass', 'bypass_reason'],
+        'reason' => 'DEFERRED: short_id (custom short id override) has no equivalent -- every flow\'s short_id is '
+            . 'auto-generated via ShortIdAllocator, matching tasker_tasks. bypass/bypass_reason are DEPRECATED '
+            . 'no-ops on the original itself ("ignored, kept so older callers do not error"), so there is no live '
+            . 'behaviour to port.',
+    ],
+
+    'list_flows' => [
+        // DEFERRED: pagination. Nothing in this plugin paginates yet —
+        // list_tasks carries the identical gap (see its own DEFERRED entry
+        // above) despite core shipping PaginationParams.
+        'missing' => ['limit', 'cursor'],
+        'reason' => 'DEFERRED: pagination (limit/cursor) is not implemented -- list() returns every visible flow '
+            . 'unpaginated, the same gap list_tasks already carries despite core shipping PaginationParams. '
+            . 'project_id being OPTIONAL here rather than required is us being MORE permissive than the original, '
+            . 'which the parity test does not flag.',
+    ],
+
+    'delete_flow' => [
+        // DEFERRED (alternate lookup forms) + a DELIBERATE stricter
+        // requirement, not a gap:
+        //  - task_id, project_id: the original resolves the flow via
+        //    flow_id OR task_id (any member task), optionally narrowed by
+        //    project_id for a partial flow-NAME match. None of that
+        //    alternate-lookup machinery is ported — flow_id is the only
+        //    way to address a flow here.
+        //  - required: [flow_id]: the original marks flow_id optional
+        //    (required: []) because it is only ONE of two alternative ways
+        //    to identify the flow. We implement just the one, so it is
+        //    unconditionally required here — and that is intentional, not
+        //    an accident of narrower scope: this plugin's mutating-route
+        //    rule forbids a delete route from ever falling back to a
+        //    caller default for its OWN target (see
+        //    SectionsApiHandler::delete()/ProjectsApiHandler::delete() for
+        //    the same rule applied identically elsewhere), so an absent
+        //    flow_id must 400, never silently resolve through some other
+        //    field or a default.
+        'missing' => ['task_id', 'project_id'],
+        'required' => ['flow_id'],
+        'reason' => 'DEFERRED: the original resolves a flow via flow_id OR task_id (any member task), optionally '
+            . 'narrowed by project_id for a name-partial-match lookup -- none of that alternate-lookup machinery is '
+            . 'ported, so flow_id is the only way to address a flow here. Making it REQUIRED is deliberate: this '
+            . 'plugin\'s mutating-route rule (see delete_project/delete_section) forbids a delete route from ever '
+            . 'resolving its own target from a caller default, so an absent flow_id 400s rather than falling back.',
     ],
 ];

@@ -9,6 +9,7 @@ use PHPUnit\Framework\TestCase;
 use Tasker\Access\IdentifierResolver;
 use Tasker\Api\AttentionApiHandler;
 use Tasker\Api\BoardApiHandler;
+use Tasker\Api\FlowsApiHandler;
 use Tasker\Api\GroupsApiHandler;
 use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\ProjectsApiHandler;
@@ -639,6 +640,30 @@ final class TenantIsolationOuTest extends TestCase
             ':project_id' => $projectId,
             ':name' => $name,
             ':short_id' => $shortId,
+        ]);
+
+        return (int) $stmt->fetchColumn();
+    }
+
+    /**
+     * D5a Task 5: a raw tasker_task_edges fixture row -- source_task_id
+     * "produces" for target_task_id "consumes", matching CreateTaskerTaskEdgesTable's
+     * own column names exactly. Did not already exist (checked first, per this
+     * task's own brief instructions): the only prior direct INSERT into this
+     * table lives inline in testFlowAndEdgeSchemaEnforcesItsOwnInvariants()
+     * above, which deliberately exercises the raw self-edge CHECK/cascade
+     * behaviour rather than needing a reusable helper.
+     */
+    private function insertEdgeDirect(int $tenantId, int $sourceId, int $targetId): int
+    {
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO tasker_task_edges (public_id, tenant_id, source_task_id, target_task_id, created_at)
+             VALUES (gen_random_uuid(), :tenant_id, :source_id, :target_id, CURRENT_TIMESTAMP) RETURNING id'
+        );
+        $stmt->execute([
+            ':tenant_id' => $tenantId,
+            ':source_id' => $sourceId,
+            ':target_id' => $targetId,
         ]);
 
         return (int) $stmt->fetchColumn();
@@ -6241,5 +6266,83 @@ final class TenantIsolationOuTest extends TestCase
             $listResponse->getStatusCode(),
             'a default project outside the caller\'s OU scope must not be honoured for slug resolution'
         );
+    }
+
+    // ==================== FlowsApiHandler (D5a Task 5) ====================
+
+    public function testNameFlowStampsMembershipAndInitialOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Naming', 'NAM');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'First');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'Second');
+        $this->insertEdgeDirect(7, $a, $b);
+
+        $handler = new FlowsApiHandler($this->pdo);
+        $payload = json_decode($handler->name(7, null, $projectId, 'Build flow', [$a, $b], null, false, 2)->getBody(), true);
+
+        self::assertSame('Build flow', $payload['data']['name']);
+        self::assertSame('NAM-F1', $payload['data']['shortId']);
+
+        $rows = $this->pdo->query("SELECT id, flow_step FROM tasker_tasks WHERE flow_id IS NOT NULL ORDER BY flow_step")->fetchAll(\PDO::FETCH_ASSOC);
+        self::assertSame([$a, $b], array_map(static fn($r) => (int) $r['id'], $rows));
+        self::assertSame([1, 2], array_map(static fn($r) => (int) $r['flow_step'], $rows));
+    }
+
+    public function testNameFlowRefusesATaskFromAnotherProject(): void
+    {
+        $mine    = $this->makeProjectDirect(7, null, 'Mine', 'MI2');
+        $other   = $this->makeProjectDirect(7, null, 'Other', 'OT2');
+        $foreign = $this->makeTaskDirect(7, $other, $this->makeSectionDirect(7, $other), 'Foreign');
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        self::assertSame(422, $handler->name(7, null, $mine, 'Bad flow', [$foreign], null, false, 2)->getStatusCode());
+    }
+
+    public function testDeleteFlowReturnsTasksToTheBoardAndKeepsTheirEdges(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Dismantle', 'DIS');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $this->insertEdgeDirect(7, $a, $b);
+
+        $handler = new FlowsApiHandler($this->pdo);
+        $flowId  = (int) json_decode($handler->name(7, null, $projectId, 'Doomed', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+
+        self::assertSame(200, $handler->delete(7, null, $flowId)->getStatusCode());
+
+        self::assertSame(2, (int) $this->pdo->query("SELECT COUNT(*) FROM tasker_tasks WHERE flow_id IS NULL AND project_id = {$projectId}")->fetchColumn());
+        self::assertSame(1, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn(),
+            'dismantling a flow must NOT dismantle the I/O graph its tasks share');
+    }
+
+    public function testNameFlowRejectsACycle(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Cyclic', 'CYC');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $this->insertEdgeDirect(7, $a, $b);
+        $this->insertEdgeDirect(7, $b, $a);
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        self::assertSame(422, $handler->name(7, null, $projectId, 'Loop', [$a, $b], null, false, 2)->getStatusCode());
+    }
+
+    public function testFlowsDeleteRejects404ForASiblingOusFlowAndDeletesItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+        $sibling = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 3, 'Sib', 'SB2'), 'Sib flow', 1);
+        $mine    = $this->makeFlowDirect(7, $this->makeProjectDirect(7, 2, 'Own', 'OW2'), 'Own flow', 1);
+
+        $handler = new FlowsApiHandler($this->pdo);
+
+        self::assertSame(404, $handler->delete(7, 2, $sibling)->getStatusCode());
+        self::assertSame(200, $handler->delete(7, 2, $mine)->getStatusCode());
     }
 }
