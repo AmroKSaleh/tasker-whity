@@ -859,4 +859,39 @@ return [
             . 'path was real), because blessing the wrong contract is the wrong-row mutation class the milestone '
             . 'index trio was fixed for. Absent or empty still means "output", exactly as on the original.',
     ],
+
+    // ── D5a Task 9: deriving a producer contract from its consumers ───────────
+    //
+    // derive_output_contract's ARGUMENT SHAPE matches the original exactly --
+    // {task_id, apply}, required {task_id} -- so nothing here is waived on the
+    // property diff, and the entry exists purely to record a behavioural
+    // divergence the diff structurally cannot see. Same property-less shape
+    // set_task_input/remove_task_input/get_ready_work use above.
+    //
+    // NOT RECORDED, because they are strictly LESS lossy than the original
+    // rather than divergent in effect (see ContractDeriver's own docblock, which
+    // carries the full comparison): our dedupe key is the whole rule where the
+    // original's is `(r.rule || '').trim().toLowerCase()` -- a key that also
+    // discards, silently and without an assumption, every rule whose prose is
+    // still unwritten; and we emit no vagueness-lint assumptions, because
+    // nothing in this plugin ports that linter at any authoring site yet, and a
+    // second copy of its vocabulary applied ONLY to derived rules would be worse
+    // than none. Neither can silently mis-persist anything: every difference
+    // shows up in the draft the caller is handed for review.
+
+    'derive_output_contract' => [
+        'severity' => 'semantic',
+        // provenBy, not dischargedBy -- see set_task_input's own entry above for
+        // the two keys' opposite polarity. This divergence is deliberately
+        // shipped, and the named test is the proof it behaves as described.
+        'provenBy' => 'testDeriveOutputWithApplyRefuses422WhenThereIsNothingToDeriveAndChangesNothing',
+        'reason' => 'SEMANTIC: apply: true with NOTHING to derive is REFUSED with a 422 naming the assumptions that '
+            . 'explain why, where the original answers 200 with `applied: false` and no error at all (its own guard is '
+            . '`if (args.apply && derived.rules.length)`, so it too persists nothing -- the divergence is the STATUS, '
+            . 'not the write). Deliberate, and forced by this schema: the derived draft is stored as '
+            . '`{"rules": [...]}`, so an empty derivation would store `{"rules": []}` -- a NON-EMPTY json object that '
+            . 'sails past set_task_output\'s own 422 for an empty contract, leaving a bar that says nothing and which '
+            . 'confirm_contract would then bless as one a human agreed to. The same accepted call with apply omitted '
+            . 'still answers 200 with the empty draft and its assumptions, so nothing a READ could do is refused.',
+    ],
 ];

@@ -6,6 +6,7 @@ namespace Tasker\Api;
 
 use PDO;
 use Tasker\Access\OuScopeResolver;
+use Tasker\Domain\ContractDeriver;
 use Tasker\Domain\FlowCycleException;
 use Tasker\Domain\FlowStepSorter;
 use Whity\Sdk\Http\Response;
@@ -161,6 +162,21 @@ use Whity\Sdk\Http\Response;
  * demands is the precise failure the flag exists to prevent. Recorded as
  * SEMANTIC in `parity-allowlist.php` under both `set_task_input` and
  * `remove_task_input`, each naming its own behavioural test.
+ *
+ * ── D5a Task 9: deriving that contract from the consumers ─────────────────
+ *
+ * {@see self::deriveOutput()} builds a producer's contract FROM the demands its
+ * consumers already declared on their input edges, which is the direction of
+ * governance this whole I/O model assumes (see that method's own docblock, and
+ * {@see \Tasker\Domain\ContractDeriver}, which is where the actual merge lives
+ * — pure, and tested on the SQLite tier).
+ *
+ * IT ADDS NO FIFTH WRITER OF `output_contract_blessed`. The list above is still
+ * exactly four: `derive_output_contract(apply: true)` persists by CALLING
+ * {@see self::setOutput()}, so the contract write and the blessing reset stay in
+ * that one method's single UPDATE. Worth stating explicitly, because "a new
+ * mutation lands here" is precisely the moment the four-way enumeration above
+ * invites someone to hand-roll a fifth copy of the invariant.
  *
  * NONE of the three new methods opens a transaction or takes
  * {@see self::lockProject()}, and that is deliberate rather than an omission:
@@ -652,6 +668,210 @@ final class TaskEdgesApiHandler
         }
 
         return $this->outputContractResponse($tenantId, $taskId);
+    }
+
+    /**
+     * POST /api/tasker/tasks/output/derive — the derive half of the authoring
+     * loop Task 8 opened: build $taskId's output contract FROM its consumers'
+     * input-edge rules, rather than making a human hand-author what the
+     * downstream tasks already declared. Read-only unless $apply.
+     *
+     * The merge itself is {@see ContractDeriver}, which is pure. This method is
+     * everything that is not: resolve the producer OU-scoped, load its consumer
+     * edges, label each consumer, and — with $apply — persist.
+     *
+     * "CONSUMERS" ARE THE EDGES WHERE THIS TASK IS THE **SOURCE**. In this
+     * schema `tasker_task_edges.source_task_id` is the PRODUCER and
+     * `target_task_id` is the CONSUMER (see {@see self::setInput()}, whose
+     * $targetTaskId is the consumer), so a producer's consumers are found by
+     * matching source_task_id. Reading the other direction would derive this
+     * task's own definition-of-done from what it DEMANDS OF ITS INPUTS — rules
+     * about somebody else's artifact, persisted as this task's promise. Pinned
+     * by {@see \Tasker\Tests\TenantIsolationOuTest::testDeriveOutputReadsTheEdgesWhereTheTaskProducesNotTheOnesWhereItConsumes()}.
+     *
+     * APPLY REFUSES AN EMPTY DERIVATION WITH 422 rather than persisting it, and
+     * that is not the same check {@see self::setOutput()} already makes:
+     * `{"rules": []}` is a NON-EMPTY JSON object, so it sails straight past that
+     * guard and would land a contract that says nothing — which
+     * {@see self::confirmContract()} would then bless as a quality bar a human
+     * agreed to. The refusal carries the assumptions, because "there was nothing
+     * to derive" is only actionable if the caller is told which consumers said
+     * nothing. A derivation with no rules is still a perfectly good READ
+     * (`$apply === false` answers 200 with an empty draft and the assumptions
+     * explaining it), so the refusal is scoped to the write.
+     *
+     * THE APPLY PATH GOES THROUGH {@see self::setOutput()} rather than issuing
+     * its own UPDATE. That keeps this class at FOUR writers of
+     * `output_contract_blessed`, not five: setOutput() already writes the
+     * contract and resets the blessing in ONE statement, so there is no window
+     * in which new rules sit under an old blessing, and this method inherits its
+     * 404 and its non-empty-contract guard for free. Its 200 BODY is discarded
+     * on purpose, though: the response below echoes the DRAFT rather than the
+     * stored row, so `apply: true` and `apply: false` describe the same draft in
+     * the same shape — jsonb normalises the key order inside each rule object on
+     * the way in (verified live: `{label, rule, kind}` reads back as
+     * `{kind, rule, label}`), which would otherwise make the applied response
+     * gratuitously differ from the unapplied one. setOutput()'s own 200 is the
+     * proof the write landed. Routing the
+     * reset through {@see self::unblessContractsFor()} instead — the other
+     * obvious way to avoid a fifth hand-rolled copy of the invariant — would
+     * have been strictly worse HERE: that method deliberately touches only rows
+     * that are ALREADY blessed and does not write a contract at all, so it would
+     * still have needed a separate UPDATE beside it, splitting one atomic write
+     * into two.
+     *
+     * NOT SERIALISED against a concurrent edge write, deliberately: a
+     * `set_task_input` landing between the consumer-edge SELECT below and the
+     * apply would leave a draft derived from demands that have since moved. The
+     * blessing is what makes that safe rather than silent — that same edge write
+     * un-blesses this producer (see this class's own docblock's four resets), so
+     * the stored draft is unmistakably AI-QA'd and a human still has to look at
+     * it. No lock is taken and no flow order is touched (nothing here changes
+     * flow membership or any edge), so {@see self::recomputeFlowOrder()}'s
+     * caller contract does not apply.
+     */
+    public function deriveOutput(int $tenantId, ?int $callerOuId, int $taskId, bool $apply): Response
+    {
+        if ($this->taskInfo($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $derived = ContractDeriver::derive($this->consumerEdgesOf($tenantId, $callerOuId, $taskId));
+
+        if (!$apply) {
+            return self::derivationResponse($taskId, $derived, false);
+        }
+
+        if ($derived['rules'] === []) {
+            // $derived['assumptions'] is never empty when there are no rules:
+            // ContractDeriver reports either "no consumers at all" or, per
+            // consumer, "declares no input rules". The first sentence stands on
+            // its own anyway, so a future change there cannot leave this
+            // message a fragment.
+            return Response::error(
+                'Nothing could be derived as an output contract, so nothing was applied. '
+                . implode(' ', $derived['assumptions']),
+                422
+            );
+        }
+
+        $stored = $this->setOutput($tenantId, $callerOuId, $taskId, ['rules' => $derived['rules']]);
+        if ($stored->getStatusCode() !== 200) {
+            return $stored;
+        }
+
+        return self::derivationResponse($taskId, $derived, true);
+    }
+
+    /**
+     * The 200 both halves of {@see self::deriveOutput()} return: the draft, the
+     * assumptions it rests on, and whether it was persisted.
+     *
+     * `assumptions` is as much of the payload as `rules` is — a caller that
+     * shows a human the draft and not the assumptions has shown them a bar that
+     * looks authoritative and is not.
+     *
+     * @param array{rules: list<array<array-key, mixed>>, assumptions: list<string>} $derived
+     */
+    private static function derivationResponse(int $taskId, array $derived, bool $applied): Response
+    {
+        return Response::json(['data' => [
+            'taskId' => $taskId,
+            'rules' => $derived['rules'],
+            'assumptions' => $derived['assumptions'],
+            'applied' => $applied,
+        ]], 200);
+    }
+
+    /**
+     * Every edge on which $producerTaskId is the PRODUCER, as
+     * {@see ContractDeriver::derive()}'s own input: one entry per consumer, that
+     * consumer's human label, and the edge's own decoded contract (its demand on
+     * this producer, or null where it declares none).
+     *
+     * OU-SCOPED, on top of the {@see self::taskInfo()} check
+     * {@see self::deriveOutput()} already made on the PRODUCER. That is
+     * defence in depth rather than a second real filter: every edge this API
+     * writes has same-project endpoints ({@see self::setInput()}'s own 422), so
+     * a consumer is always in the producer's own project and the predicate can
+     * only ever be redundant — unless a row arrives by some other path (a direct
+     * database write, e.g. this suite's own insertEdgeDirect() helper), in which
+     * case dropping it is right: another OU's rule TEXT would otherwise be
+     * quoted straight back to this caller in the derived draft.
+     *
+     * ORDERED, so the draft's rule order and its assumption order are properties
+     * of the data and not of PostgreSQL's row-return order: by the consumer's
+     * short id (the label a human reads), unnumbered consumers last, ties broken
+     * by id. One static template, no runtime-branched ORDER BY.
+     *
+     * @return list<array{consumer_label: string, contract: array<array-key, mixed>|null}>
+     */
+    private function consumerEdgesOf(int $tenantId, ?int $callerOuId, int $producerTaskId): array
+    {
+        $scope = OuScopeResolver::scopeParams($this->db, $tenantId, $callerOuId);
+        $ouClause = OuScopeResolver::whereFragment('p.ou_id');
+
+        $stmt = $this->db->prepare(
+            "SELECT c.id, c.text, c.short_id, p.prefix, e.contract
+             FROM tasker_task_edges e
+             JOIN tasker_tasks c ON c.id = e.target_task_id AND c.tenant_id = :tenant_id_c
+             JOIN tasker_projects p ON p.id = c.project_id AND p.tenant_id = :tenant_id_p
+             WHERE e.tenant_id = :tenant_id AND e.source_task_id = :source_task_id AND {$ouClause}
+             ORDER BY c.short_id ASC NULLS LAST, c.id ASC"
+        );
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_c', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_p', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':source_task_id', $producerTaskId, PDO::PARAM_INT);
+        $stmt->bindValue(':unrestricted', $scope['unrestricted'], PDO::PARAM_BOOL);
+        $stmt->bindValue(':scope', '{' . implode(',', $scope['scope']) . '}');
+        $stmt->execute();
+
+        $edges = [];
+        /** @var array<string, mixed> $row */
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $contract = $row['contract'] !== null ? json_decode((string) $row['contract'], true) : null;
+            $edges[] = [
+                'consumer_label' => self::consumerLabel(
+                    $row['prefix'] !== null ? (string) $row['prefix'] : null,
+                    $row['short_id'] !== null ? (int) $row['short_id'] : null,
+                    (string) $row['text'],
+                    (int) $row['id']
+                ),
+                'contract' => is_array($contract) ? $contract : null,
+            ];
+        }
+
+        return $edges;
+    }
+
+    /**
+     * How a consumer is named in a derived draft's assumptions: its SHORT ID
+     * ("DRV-3", or the bare number when its project has no prefix), which is
+     * both unambiguous and directly usable in the follow-up call the assumption
+     * asks for (`set_task_input(task_id: "DRV-3", …)`).
+     *
+     * The original names consumers by their TEXT instead
+     * (`derived_from: sources.map(s => s.text)`); a short id is preferred here
+     * because task text is neither unique nor addressable. The text is still the
+     * FALLBACK for a task with no short id at all (nothing allocates one
+     * retroactively, and every pre-D1b row has none), with the id as a last
+     * resort so an assumption can never name a consumer as "".
+     *
+     * The short-id rendering mirrors {@see \Tasker\Api\TasksApiHandler::renderShortId()}
+     * exactly — duplicated per handler, as this codebase does with its small
+     * private helpers (see {@see \Tasker\Api\ProjectsApiHandler::isUniqueViolation()}'s
+     * own doc for why).
+     */
+    private static function consumerLabel(?string $prefix, ?int $shortId, string $text, int $taskId): string
+    {
+        if ($shortId !== null) {
+            return $prefix !== null ? "{$prefix}-{$shortId}" : (string) $shortId;
+        }
+
+        $trimmed = trim($text);
+
+        return $trimmed !== '' ? $trimmed : "task {$taskId}";
     }
 
     /**

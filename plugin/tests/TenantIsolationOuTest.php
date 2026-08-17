@@ -7917,4 +7917,277 @@ final class TenantIsolationOuTest extends TestCase
         $confirm->user = (object) ['profile_id' => self::CALLER_ID];
         self::assertSame(400, $plugin->confirmContract($confirm)->getStatusCode());
     }
+
+    // ── D5a Task 9: deriving a producer's contract from its consumers ────────
+    //
+    // {@see \Tasker\Domain\ContractDeriver} itself is pure and tested on the
+    // SQLite tier. Everything HERE is the part that is not: the route resolves
+    // and OU-scopes its producer, loads the consumer edges under a tenant AND
+    // an OU predicate, and (with apply) writes through
+    // TaskEdgesApiHandler::setOutput(). Per the plan's global constraint, an
+    // OU-aware method takes ALL of its coverage in this tier.
+
+    /**
+     * $taskId's stored output contract, decoded — the row itself, never the
+     * response echo, so a test cannot pass on what a handler CLAIMED to write.
+     *
+     * @return array<string, mixed>|null
+     */
+    private function storedContractFor(int $taskId): ?array
+    {
+        $stmt = $this->pdo->prepare('SELECT output_contract FROM tasker_tasks WHERE id = :id');
+        $stmt->execute([':id' => $taskId]);
+        $raw = $stmt->fetchColumn();
+        if (!is_string($raw)) {
+            return null;
+        }
+
+        /** @var array<string, mixed>|null $decoded */
+        $decoded = json_decode($raw, true);
+
+        return is_array($decoded) ? $decoded : null;
+    }
+
+    /**
+     * The happy path, and the thing the whole tool exists for: what the
+     * consumers demanded becomes the producer's draft, and the consumer that
+     * demanded NOTHING is named — by its SHORT ID, which is what a caller can
+     * act on (`set_task_input(task_id: "DRV-3", ...)`), unlike the task text the
+     * original names instead.
+     *
+     * short_id is set by raw UPDATE because makeTaskDirect() leaves it null:
+     * this file's own established convention for a column the shared fixture
+     * does not take (see the `status = 'done'` updates above).
+     */
+    public function testDeriveOutputMergesTheConsumersDemandsAndNamesTheOneThatDeclaredNothing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Derive', 'DRV');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c1 = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer with a bar');
+        $c2 = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer with none');
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 2 WHERE id = {$c1}");
+        $this->pdo->exec("UPDATE tasker_tasks SET short_id = 3 WHERE id = {$c2}");
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $c1, $p, null, ['rules' => [['label' => 'Has a summary', 'kind' => 'check']]], false);
+        $edges->setInput(7, null, $c2, $p, null, null, false);
+
+        $response = $edges->deriveOutput(7, null, $p, false);
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode($response->getBody(), true)['data'];
+
+        self::assertSame(['Has a summary'], array_column($data['rules'], 'label'));
+        self::assertFalse($data['applied']);
+        self::assertStringContainsString('DRV-3', implode(' ', $data['assumptions']),
+            'the consumer that declared nothing must be named by its short id, not left for the human to hunt for');
+        self::assertNull($this->storedContractFor($p),
+            'a derivation without apply is a READ -- it must persist nothing at all');
+    }
+
+    /**
+     * THE DIRECTION, pinned with a negative control, because it is the one thing
+     * in this tool that is easy to get backwards and impossible to notice: an
+     * edge's source_task_id is the PRODUCER and its target_task_id is the
+     * CONSUMER, so a producer's consumers are the edges where it is the SOURCE.
+     * Reading the other set would derive a task's definition-of-done from what
+     * it demands of its OWN inputs -- rules about somebody else's artifact,
+     * silently persisted as this task's promise.
+     */
+    public function testDeriveOutputReadsTheEdgesWhereTheTaskProducesNotTheOnesWhereItConsumes(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Direction', 'DIR');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $upstream = $this->makeTaskDirect(7, $projectId, $sectionId, 'Upstream');
+        $p        = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $consumer = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        // What THIS task demands of its own input -- must not appear in its own
+        // definition-of-done.
+        $edges->setInput(7, null, $p, $upstream, null, ['rules' => [['label' => 'What this task demands']]], false);
+        // What its consumer demands of THIS task -- the only thing that may.
+        $edges->setInput(7, null, $consumer, $p, null, ['rules' => [['label' => 'What the consumer demands']]], false);
+
+        $data = json_decode($edges->deriveOutput(7, null, $p, false)->getBody(), true)['data'];
+
+        self::assertSame(['What the consumer demands'], array_column($data['rules'], 'label'));
+    }
+
+    /**
+     * apply: true persists the draft through
+     * {@see \Tasker\Api\TaskEdgesApiHandler::setOutput()} — so the contract and
+     * the blessing reset land in that method's own single UPDATE, and the draft
+     * REPLACES whatever was there rather than merging into it.
+     *
+     * The edge is wired BEFORE the blessing on purpose: wiring it afterwards
+     * would itself have knocked the blessing off (Task 8's cascade), and the
+     * final assertion would then pass without this call having done anything.
+     */
+    public function testDeriveOutputWithApplyPersistsTheDraftAndResetsTheBlessing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'DeriveApply', 'DAP');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $c, $p, null, ['rules' => [['label' => 'Cites a source', 'kind' => 'judgment']]], false);
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'A hand-authored guess']]]);
+        $edges->confirmContract(7, null, $p);
+        self::assertTrue($this->blessedFor($p));
+
+        $response = $edges->deriveOutput(7, null, $p, true);
+        self::assertSame(200, $response->getStatusCode());
+        self::assertTrue(json_decode($response->getBody(), true)['data']['applied']);
+
+        $stored = $this->storedContractFor($p);
+        self::assertSame(['Cites a source'], array_column($stored['rules'], 'label'),
+            'the derived draft must REPLACE the hand-authored contract, not merge into it');
+        self::assertSame('judgment', $stored['rules'][0]['kind'], 'the consumer\'s own rule fields carry through');
+        self::assertFalse($this->blessedFor($p),
+            'a freshly derived contract is AI-QA d -- no human has seen these rules yet');
+    }
+
+    /**
+     * apply: true with NOTHING to derive is REFUSED, not persisted. Task 8's
+     * setOutput() refuses an empty contract with 422, and `{"rules": []}` would
+     * sail past that guard (it is a non-empty OBJECT with an empty list inside),
+     * leaving a contract that says nothing — and which confirm_contract would
+     * then happily bless as a quality bar a human agreed to.
+     *
+     * The refusal must also be INERT: the prior contract and its blessing are
+     * still standing afterwards. And the same state read WITHOUT apply is a
+     * plain 200 — an empty draft plus the assumptions explaining why is exactly
+     * what a read of "what would you derive here?" should say.
+     */
+    public function testDeriveOutputWithApplyRefuses422WhenThereIsNothingToDeriveAndChangesNothing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'DeriveEmpty', 'DEM');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer with nothing to say');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'Hand authored, and still valid']]]);
+        $edges->confirmContract(7, null, $p);
+
+        // (1) No consumers at all.
+        $noConsumers = $edges->deriveOutput(7, null, $p, true);
+        self::assertSame(422, $noConsumers->getStatusCode());
+        self::assertStringContainsString('set_task_input', $noConsumers->getBody(),
+            'the refusal must say WHY there was nothing to derive, or the caller cannot act on it');
+
+        // (2) A consumer that declares no rules -- the same empty draft by a
+        // different route, and the case a "does this task have consumers?"
+        // check would wrongly let through.
+        $edges->setInput(7, null, $c, $p, null, null, false);
+        $noRules = $edges->deriveOutput(7, null, $p, true);
+        self::assertSame(422, $noRules->getStatusCode());
+
+        self::assertSame(
+            ['Hand authored, and still valid'],
+            array_column($this->storedContractFor($p)['rules'], 'label'),
+            'a refused apply must leave the existing contract exactly as it was'
+        );
+        // The edge write in (2) un-blessed $p on its own (Task 8's cascade), so
+        // re-bless before asserting the REFUSAL itself preserves a blessing.
+        $edges->confirmContract(7, null, $p);
+        self::assertSame(422, $edges->deriveOutput(7, null, $p, true)->getStatusCode());
+        self::assertTrue($this->blessedFor($p), 'a refused apply must not reset the blessing either');
+
+        $read = $edges->deriveOutput(7, null, $p, false);
+        self::assertSame(200, $read->getStatusCode(), 'an empty draft plus assumptions is a perfectly good READ');
+        $data = json_decode($read->getBody(), true)['data'];
+        self::assertSame([], $data['rules']);
+        self::assertNotEmpty($data['assumptions']);
+    }
+
+    /**
+     * Global constraint: every OU-boundary test pairs a sibling-OU 404 with a
+     * same-OU positive control -- a 404-only test can pass merely because the
+     * fixture was never visible in the first place.
+     */
+    public function testDeriveOutputRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $demand = ['rules' => [['label' => 'Anything at all']]];
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibDrv', 'SD9');
+        $sibSection = $this->makeSectionDirect(7, $sibProject);
+        $sibProducer = $this->makeTaskDirect(7, $sibProject, $sibSection, 'Sib producer');
+        $sibConsumer = $this->makeTaskDirect(7, $sibProject, $sibSection, 'Sib consumer');
+        $edges->setInput(7, null, $sibConsumer, $sibProducer, null, $demand, false);
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnDrv', 'OD9');
+        $ownSection = $this->makeSectionDirect(7, $ownProject);
+        $ownProducer = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Own producer');
+        $ownConsumer = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Own consumer');
+        $edges->setInput(7, null, $ownConsumer, $ownProducer, null, $demand, false);
+
+        self::assertSame(404, $edges->deriveOutput(7, 2, $sibProducer, true)->getStatusCode());
+        self::assertNull($this->storedContractFor($sibProducer),
+            'a refused cross-OU derive must not have stored anything');
+
+        self::assertSame(200, $edges->deriveOutput(7, 2, $ownProducer, true)->getStatusCode());
+        self::assertSame(['Anything at all'], array_column($this->storedContractFor($ownProducer)['rules'], 'label'));
+    }
+
+    /**
+     * Route-level wiring, including `apply`'s default: omitting it must NOT
+     * persist. The tool is a POST precisely because apply: true mutates -- a GET
+     * that writes is the shape the plan's global constraints forbid.
+     */
+    public function testDeriveOutputContractRouteWiresThroughAndOnlyPersistsWhenAskedTo(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteDrv', 'RD9');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+        (new TaskEdgesApiHandler($this->pdo))
+            ->setInput(7, null, $c, $p, null, ['rules' => [['label' => 'Is at least 500 words', 'kind' => 'check']]], false);
+
+        $plugin = new TaskerPlugin();
+
+        $draftOnly = $this->hostRequest('POST', '/api/tasker/tasks/output/derive', (string) json_encode(['task_id' => $p]));
+        $draftOnly->user = (object) ['profile_id' => self::CALLER_ID];
+        $response = $plugin->deriveOutputContract($draftOnly);
+        self::assertSame(200, $response->getStatusCode());
+        $data = json_decode($response->getBody(), true)['data'];
+        self::assertSame(['Is at least 500 words'], array_column($data['rules'], 'label'));
+        self::assertFalse($data['applied']);
+        self::assertNull($this->storedContractFor($p), 'apply defaults to false -- nothing may be written');
+
+        $applied = $this->hostRequest('POST', '/api/tasker/tasks/output/derive', (string) json_encode([
+            'task_id' => $p, 'apply' => true,
+        ]));
+        $applied->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(200, $plugin->deriveOutputContract($applied)->getStatusCode());
+        self::assertSame(['Is at least 500 words'], array_column($this->storedContractFor($p)['rules'], 'label'));
+    }
+
+    /**
+     * Global constraint (the mutating-route rule): a mutation never resolves its
+     * own target from a caller default, and derive_output_contract mutates when
+     * apply is true -- so an absent task_id is a plain 400 even on the read-only
+     * form, rather than "derive against whatever my default project suggests".
+     */
+    public function testDeriveOutputContractRoute400sWhenTaskIdIsAbsent(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $plugin = new TaskerPlugin();
+
+        $request = $this->hostRequest('POST', '/api/tasker/tasks/output/derive', (string) json_encode(['apply' => true]));
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        self::assertSame(400, $plugin->deriveOutputContract($request)->getStatusCode());
+    }
 }

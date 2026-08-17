@@ -1594,6 +1594,46 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            // ========= Deriving a contract from the consumers (D5a Task 9) =========
+            //
+            // POST, not GET, even though apply defaults to false: apply: true
+            // WRITES the task's output contract, and the plan's global
+            // constraints forbid a mutating GET (core also empties a GET's body
+            // and flattens every argument into the query string, which this
+            // route's own `apply` would then have to be read out of).
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/output/derive',
+                'handler' => [$this, 'deriveOutputContract'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'derive_output_contract',
+                    'summary' => 'Derive a PRODUCER task\'s output contract (definition-of-done) from what its '
+                        . 'CONSUMERS already demand of it -- the input-edge rules of every task wired to consume its '
+                        . 'output. Author the consumers\' inputs first, then derive, rather than hand-authoring the '
+                        . 'producer\'s bar twice. Returns the draft plus the ASSUMPTIONS the merge rests on: SURFACE '
+                        . 'those to the human. Read-only unless apply is true.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'The PRODUCER task whose output contract to derive (UUID or short ID, e.g. TDE-31).'],
+                            'apply' => [
+                                'type' => 'boolean',
+                                'description' => 'If true, persist the derived draft as this task\'s output contract (resetting the human blessing, exactly as set_task_output does). Default false -- return the draft + assumptions only, for human review.',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The derived draft, its assumptions, and whether it was persisted'],
+                        400 => ['description' => 'task_id is missing or looks like a short id but is malformed'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
+                        422 => ['description' => 'apply was true but there was nothing to derive -- no consumer declared any input rules'],
+                    ],
+                ],
+            ],
             [
                 'method' => 'GET',
                 'path' => '/api/tasker/milestones',
@@ -4941,6 +4981,69 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new TaskEdgesApiHandler($pdo))->confirmContract($tenantId, $ou['ouId'], $taskId);
+    }
+
+    /**
+     * POST /api/tasker/tasks/output/derive — the original's
+     * derive_output_contract (D5a Task 9): a producer's definition-of-done,
+     * built from what its consumers already declared they need.
+     *
+     * task_id is required and never defaulted, on the same mutating-route rule
+     * every other write on this surface follows — and it binds here even though
+     * the DEFAULT form of this call is read-only, because the very same route
+     * mutates when `apply` is true. A route whose target depends on a caller
+     * default for one value of a flag and not the other is a route nobody can
+     * reason about.
+     *
+     * `apply` is read via {@see self::paramBool()} (body-then-query), not
+     * {@see self::queryParamBool()}: this is a POST, so the MCP transport puts
+     * every argument in the BODY, while a direct HTTP caller may put it on the
+     * query string. Defaults to FALSE — the safe direction, and the original's
+     * own default: a caller who mistypes the flag gets a draft to review, never
+     * a silently overwritten contract.
+     *
+     * The 422 for "nothing to derive" is
+     * {@see \Tasker\Api\TaskEdgesApiHandler::deriveOutput()}'s, not this
+     * method's — see its docblock for why an empty derivation is refused on the
+     * write path and answered 200 on the read path.
+     *
+     * @param array<string, string> $params
+     */
+    public function deriveOutputContract(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default -- see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        $taskForm = IdentifierResolver::classify($rawTaskId);
+        if ($taskForm === 'empty') {
+            return Response::error('task_id is required', 400);
+        }
+        if ($taskForm === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TaskEdgesApiHandler($pdo))
+            ->deriveOutput($tenantId, $ou['ouId'], $taskId, $this->paramBool($request, 'apply', false));
     }
 
     /**
