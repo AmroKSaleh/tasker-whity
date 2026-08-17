@@ -7482,6 +7482,18 @@ final class TenantIsolationOuTest extends TestCase
         $edges = new TaskEdgesApiHandler($this->pdo);
 
         self::assertSame(422, $edges->setOutput(7, null, $p, [])->getStatusCode());
+        // REVIEW ROUND 1 (Minor 1): the NON-EMPTY-list half of the same guard,
+        // pinned at the HANDLER level. The route test's 422 for the same shape
+        // comes from TaskerPlugin::isJsonObject() instead, so it does not cover
+        // this line -- and widening setOutput()'s PHPDoc to
+        // array<array-key, mixed> was done specifically to keep this half alive
+        // for a DIRECT caller, which Task 9's derive_output_contract(apply:true)
+        // may well be.
+        self::assertSame(422, $edges->setOutput(7, null, $p, ['a', 'b'])->getStatusCode());
+        self::assertNull(
+            $this->pdo->query("SELECT output_contract FROM tasker_tasks WHERE id = {$p}")->fetchColumn(),
+            'neither refused shape may have been stored'
+        );
     }
 
     /**
@@ -7508,6 +7520,55 @@ final class TenantIsolationOuTest extends TestCase
         $edges->setInput(7, null, $c, $p, null, null, false);
 
         self::assertFalse($this->blessedFor($c), 'the consumer\'s own blessing must not survive its input changing');
+    }
+
+    /**
+     * REVIEW ROUND 1 (Important finding): `replace: true` deletes every OTHER
+     * inbound edge of the target, and the producers on the far end of those
+     * deleted edges must be un-blessed too. They were not: the first version of
+     * unblessContractsFor() took exactly the edge's own two ends, so P2 --
+     * whose only declared demand had just been destroyed -- kept its blessing,
+     * while the byte-identical deletion through remove_task_input reset it.
+     * Invisible because all three existing cascade tests pass replaceAll =
+     * false.
+     *
+     * Carries a NEGATIVE CONTROL (the unrelated task): the reset must follow
+     * the deletions this call actually made, NOT sweep every task in the
+     * project, which is the obvious over-broad way to make the assertions above
+     * pass.
+     */
+    public function testReplaceAllUnblessesTheProducersItSilentlyUnwires(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'CascadeReplace', 'CSP');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $c  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+        $p1 = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer kept');
+        $p2 = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer displaced');
+        $unrelated = $this->makeTaskDirect(7, $projectId, $sectionId, 'No edges at all');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        // Wire P2 -> C FIRST: doing it after the blessings would itself have
+        // reset them, and every assertion below would then pass for free.
+        $edges->setInput(7, null, $c, $p2, null, null, false);
+
+        foreach ([$p1, $p2, $unrelated] as $taskId) {
+            $edges->setOutput(7, null, $taskId, ['rules' => [['label' => 'A bar a human agreed']]]);
+            $edges->confirmContract(7, null, $taskId);
+            self::assertTrue($this->blessedFor($taskId));
+        }
+
+        // Replace C's inputs with P1 alone -- which DELETES P2 -> C as
+        // collateral, without P2 ever being named in the call.
+        self::assertSame(200, $edges->setInput(7, null, $c, $p1, null, null, true)->getStatusCode());
+
+        $sources = $this->pdo->query("SELECT source_task_id FROM tasker_task_edges WHERE target_task_id = {$c}")->fetchAll(\PDO::FETCH_COLUMN);
+        self::assertSame([$p1], array_map('intval', $sources), 'P2 -> C must be gone');
+
+        self::assertFalse($this->blessedFor($p2),
+            'a producer whose only declared demand was deleted as collateral must lose its blessing too');
+        self::assertFalse($this->blessedFor($p1), 'the named source is still un-blessed as before');
+        self::assertTrue($this->blessedFor($unrelated),
+            'the reset must follow the deletions this call made, not sweep the whole project');
     }
 
     /**

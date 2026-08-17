@@ -130,10 +130,19 @@ use Whity\Sdk\Http\Response;
  *
  *   {@see self::setOutput()}   → that task's own blessing
  *   {@see self::clearOutput()} → that task's own blessing
- *   {@see self::setInput()}    → BOTH ends of the edge (consumer AND producer)
+ *   {@see self::setInput()}    → BOTH ends of the edge (consumer AND producer),
+ *                                PLUS every producer a `replace: true` call
+ *                                silently unwires (REVIEW ROUND 1 — see
+ *                                {@see self::unblessContractsFor()})
  *   {@see self::removeInput()} → BOTH ends of the edge (consumer AND producer)
  *
- * All four go through {@see self::unblessEdgeEndpoints()} or the contract
+ * The rule underneath that list, which is what to reason from when a new
+ * mutation lands here: THE RESET FOLLOWS THE DELETION (or the write), wherever
+ * it happens. The four-way enumeration above is a consequence, not the
+ * definition — enumerating per TOOL is exactly how the replace-all case got
+ * missed, because one of those tools deletes edges as a side effect.
+ *
+ * All four go through {@see self::unblessContractsFor()} or the contract
  * write's own UPDATE, and every one of them binds the boolean with
  * `PDO::PARAM_BOOL` — an array-`execute()` binds `false` as `''`, which
  * PostgreSQL's boolean parser rejects outright (the same trap this file's own
@@ -249,6 +258,12 @@ final class TaskEdgesApiHandler
             }
         }
 
+        // Filled in by the replace-all DELETE below, which RETURNs the
+        // producers it unwires so their blessings can be reset alongside this
+        // edge's own two ends.
+        /** @var list<int> $displacedProducerIds */
+        $displacedProducerIds = [];
+
         // ---- Write phase. Nothing above this line has written or is
         // capable of writing anything. The lock taken immediately below is
         // what makes the cycle check that follows it SAFE to trust -- see
@@ -265,15 +280,27 @@ final class TaskEdgesApiHandler
             // already open.
             $this->assertNoCycleAround($tenantId, $targetTaskId, $sourceTaskId);
 
+            // RETURNING source_task_id (REVIEW ROUND 1, the Important
+            // finding): every producer this DELETE silently unwires has had
+            // its demand destroyed just as surely as remove_task_input
+            // destroys one, so each must be un-blessed too -- see
+            // {@see self::unblessContractsFor()} for the invariant, and this
+            // class's own docblock for why this DELETE is the most
+            // defect-dense construct in the slice (Task 7's own Critical
+            // finding was this same collateral delete leaving flow_step
+            // stale).
             if ($replaceAll) {
                 $deleteOthers = $this->db->prepare(
                     'DELETE FROM tasker_task_edges
-                     WHERE tenant_id = :tenant_id AND target_task_id = :target_task_id AND source_task_id <> :source_task_id'
+                     WHERE tenant_id = :tenant_id AND target_task_id = :target_task_id AND source_task_id <> :source_task_id
+                     RETURNING source_task_id'
                 );
                 $deleteOthers->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
                 $deleteOthers->bindValue(':target_task_id', $targetTaskId, PDO::PARAM_INT);
                 $deleteOthers->bindValue(':source_task_id', $sourceTaskId, PDO::PARAM_INT);
                 $deleteOthers->execute();
+                /** @var list<int> $displacedProducerIds */
+                $displacedProducerIds = array_map('intval', $deleteOthers->fetchAll(PDO::FETCH_COLUMN));
             }
 
             $upsert = $this->db->prepare(
@@ -300,8 +327,14 @@ final class TaskEdgesApiHandler
             // D5a Task 8: the edge's rules just changed, so no human blessing
             // on EITHER end of it still describes rules a human actually saw.
             // Inside this transaction on purpose -- a rolled-back edge write
-            // must not leave a blessing destroyed behind it.
-            $this->unblessEdgeEndpoints($tenantId, $targetTaskId, $sourceTaskId);
+            // must not leave a blessing destroyed behind it. $displacedProducerIds
+            // carries the replace-all case (REVIEW ROUND 1): a producer whose
+            // edge was deleted as collateral above is in exactly the position
+            // remove_task_input's own source is, and gets the same treatment.
+            $this->unblessContractsFor(
+                $tenantId,
+                [$targetTaskId, $sourceTaskId, ...$displacedProducerIds]
+            );
 
             // REVIEW FIX: gated on $targetTaskId's OWN flow_id alone -- see
             // this class's own docblock for why $sourceTaskId's flow_id is
@@ -401,7 +434,9 @@ final class TaskEdgesApiHandler
             // that governed this handoff are gone, so neither end's blessing
             // describes anything a human agreed to any more. Placed AFTER the
             // rowCount() check above, so the 404 path un-blesses nothing.
-            $this->unblessEdgeEndpoints($tenantId, $targetTaskId, $sourceTaskId);
+            // Exactly two ids here, always: this method deletes ONE named edge
+            // and has no collateral of its own.
+            $this->unblessContractsFor($tenantId, [$targetTaskId, $sourceTaskId]);
 
             // REVIEW FIX: gated on $targetTaskId's OWN flow_id alone, same
             // predicate as setInput() -- see that method's own docblock for
@@ -620,36 +655,61 @@ final class TaskEdgesApiHandler
     }
 
     /**
-     * Resets the human blessing on BOTH ends of an edge this class just wrote
-     * or deleted — the consumer ($targetTaskId) and the producer
-     * ($sourceTaskId). See this class's own docblock for why both, and for what
-     * the original does instead.
+     * Resets the human blessing on EVERY task whose contract-relevant demands
+     * this call has just changed. See this class's own docblock for the
+     * invariant and for what the original does instead.
+     *
+     * TAKES A LIST, NOT A FIXED PAIR (REVIEW ROUND 1, the Important finding).
+     * The first version took exactly ($targetTaskId, $sourceTaskId) — the two
+     * ends of the edge being written or deleted — which was one case short.
+     * `set_task_input` with `replace: true` ALSO deletes every OTHER inbound
+     * edge of the target, and each of those deletions destroys some producer
+     * P2's only declared demand just as completely as `remove_task_input`
+     * destroys one. P2 kept `output_contract_blessed = TRUE`, so the
+     * byte-identical deletion un-blessed P2 through one tool and not through
+     * the other. The governing rule is the spec's, and it says nothing about
+     * WHICH gesture destroyed the demand: a producer contract is only as valid
+     * as the demands it came from. So the reset follows the DELETION, wherever
+     * the deletion happens, and the caller passes every id it touched.
+     *
+     * ONE STATIC SQL TEMPLATE regardless of how many ids arrive, per the
+     * plan's global constraint — `id = ANY(:task_ids::bigint[])`, with the ids
+     * bound as a single PostgreSQL array parameter. Same idiom
+     * {@see OuScopeResolver::whereFragment()} already uses for its own
+     * variable-length scope list, and deliberately NOT
+     * {@see self::inClause()}'s generated `IN (:t0, :t1, ...)` fragment, which
+     * would put a caller-influenced COUNT into the SQL text and re-prepare a
+     * different statement per call shape. An empty list is a valid empty array
+     * literal that matches nothing, so no caller needs a guard.
      *
      * MUST be called inside the caller's own transaction (both call sites are
-     * mid-transaction already), so a rolled-back edge write cannot leave a
-     * destroyed blessing behind it.
+     * mid-transaction already, holding {@see self::lockProject()}), so a
+     * rolled-back edge write cannot leave a destroyed blessing behind it.
      *
      * Only rows that are ACTUALLY blessed are touched, via
      * `AND output_contract_blessed = TRUE`. That is not an optimisation: the
      * UPDATE also bumps `updated_at`, which
      * {@see \Tasker\Api\AttentionApiHandler}'s own staleness buckets rank on —
-     * so touching every edge endpoint on every edge write, blessed or not,
-     * would silently make ordinary wiring look like fresh activity on tasks
-     * nothing about actually changed.
+     * so touching every id on every edge write, blessed or not, would silently
+     * make ordinary wiring look like fresh activity on tasks nothing about
+     * actually changed.
+     *
+     * @param list<int> $taskIds every task whose demands this call changed —
+     *        the edge's own two ends, plus any producer a replace-all delete
+     *        unwired.
      */
-    private function unblessEdgeEndpoints(int $tenantId, int $targetTaskId, int $sourceTaskId): void
+    private function unblessContractsFor(int $tenantId, array $taskIds): void
     {
         $stmt = $this->db->prepare(
             'UPDATE tasker_tasks
              SET output_contract_blessed = :blessed, updated_at = CURRENT_TIMESTAMP
              WHERE tenant_id = :tenant_id
-               AND id IN (:target_task_id, :source_task_id)
+               AND id = ANY(:task_ids::bigint[])
                AND output_contract_blessed = TRUE'
         );
         $stmt->bindValue(':blessed', false, PDO::PARAM_BOOL);
         $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
-        $stmt->bindValue(':target_task_id', $targetTaskId, PDO::PARAM_INT);
-        $stmt->bindValue(':source_task_id', $sourceTaskId, PDO::PARAM_INT);
+        $stmt->bindValue(':task_ids', '{' . implode(',', $taskIds) . '}', PDO::PARAM_STR);
         $stmt->execute();
     }
 

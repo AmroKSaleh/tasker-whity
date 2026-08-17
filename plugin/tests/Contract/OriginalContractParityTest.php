@@ -401,6 +401,31 @@ final class OriginalContractParityTest extends TestCase
      * deliberate edit next to the comment explaining the semantics, which is
      * the whole point.
      *
+     * TWO KINDS OF SEMANTIC ENTRY, AND THEY NAME THEIR TEST WITH OPPOSITE
+     * POLARITY (D5a Task 8, review round 1). The rule above is written for
+     * behaviour we have NOT ported — delete_environment, get_task, delete_group,
+     * get_ready_work — where `dischargedBy` names a test that by design does
+     * NOT exist yet: it is what has to land BEFORE the entry may be removed,
+     * so its absence is the normal, healthy state and enforcing its existence
+     * would fail the build on all four.
+     *
+     * D5a Task 8 introduced the other kind: a divergence deliberately SHIPPED
+     * and not going anywhere (set_task_input/remove_task_input resetting the
+     * contract blessing on both ends of an edge). There is nothing to discharge
+     * — the named test is the PROOF the divergence behaves as described, and it
+     * has to be real today. Conflating the two under one key means neither can
+     * be checked: existence must be required for one and forbidden for the
+     * other. Hence `provenBy`, checked for existence unconditionally just
+     * below, while `dischargedBy` keeps its original meaning untouched. An
+     * entry names one or the other, never both.
+     *
+     * NOT CLOSED HERE, and worth stating so it is not mistaken for covered: the
+     * reverse hole. If somebody implements one of the four unported behaviours
+     * and adds its `dischargedBy` test WITHOUT removing the entry, and the
+     * entry has no `missing` property to trip the loop below (get_ready_work),
+     * nothing fires and a dead waiver survives. Closing that means auditing
+     * four entries this task does not own; recorded as a deferred minor.
+     *
      * @param array<string, mixed>                  $allow
      * @param array<string, array<string, mixed>>   $original
      * @param array<string, array<string, mixed>>   $ours
@@ -421,10 +446,32 @@ final class OriginalContractParityTest extends TestCase
 
             $isSemantic = ($entry['severity'] ?? null) === 'semantic';
             $dischargedBy = is_string($entry['dischargedBy'] ?? null) ? trim($entry['dischargedBy']) : '';
-            if ($isSemantic && $dischargedBy === '') {
-                $failures[] = "allowlist[{$name}] is severity 'semantic' but names no dischargedBy test. A semantic "
-                    . 'divergence is a behaviour difference; it must name the behavioural test that has to exist '
-                    . 'before the entry may be removed, so it cannot be discharged by a schema declaration alone.';
+            $provenBy = is_string($entry['provenBy'] ?? null) ? trim($entry['provenBy']) : '';
+            if ($isSemantic && $dischargedBy === '' && $provenBy === '') {
+                $failures[] = "allowlist[{$name}] is severity 'semantic' but names neither a dischargedBy nor a "
+                    . 'provenBy test. A semantic divergence is a behaviour difference, so it must name a behavioural '
+                    . 'test either way: dischargedBy for behaviour we have NOT ported (the test that has to exist '
+                    . 'before the entry may be removed), provenBy for a divergence we deliberately SHIPPED (the test '
+                    . 'that demonstrates it today). Neither can be satisfied by a schema declaration alone.';
+            }
+
+            // REVIEW ROUND 1 (D5a Task 8, Minor 2 as amended — see this
+            // method's own docblock for the polarity trap this closes). Only
+            // provenBy is checked for existence, and it is checked ALWAYS
+            // rather than only when a waived property has appeared on our
+            // schema: a provenBy test is the sole evidence that a divergence we
+            // chose to keep still behaves the way the entry says, so renaming
+            // or deleting it must not silently orphan the entry.
+            if ($provenBy !== '' && !self::behaviourTestExists($provenBy)) {
+                $failures[] = sprintf(
+                    'allowlist[%s] names provenBy %s(), but no test method of that name containing a real assertion '
+                    . 'exists in the suite. Unlike dischargedBy — which names a test that must NOT exist yet, because '
+                    . 'it describes behaviour this backend has not ported — provenBy names the test that PROVES a '
+                    . 'divergence we deliberately shipped, so it has to be real today. Restore the test, or rename '
+                    . 'this key to match the test that replaced it.',
+                    $name,
+                    $provenBy,
+                );
             }
 
             if (!isset($original[$name])) {
@@ -450,8 +497,12 @@ final class OriginalContractParityTest extends TestCase
 
                 // We now declare it. For an ordinary waiver that is a discharge.
                 // For a SEMANTIC one it is only a discharge if the behaviour
-                // actually landed, which is what dischargedBy has to prove.
-                if (!$isSemantic || self::behaviourTestExists($dischargedBy)) {
+                // actually landed, which is what the entry's named behavioural
+                // test has to prove — provenBy when the entry has one (a
+                // divergence deliberately shipped and already proven),
+                // dischargedBy otherwise.
+                $namedTest = $provenBy !== '' ? $provenBy : $dischargedBy;
+                if (!$isSemantic || self::behaviourTestExists($namedTest)) {
                     $failures[] = "allowlist[{$name}].missing lists '{$property}', which is no longer missing";
                     continue;
                 }
@@ -464,8 +515,8 @@ final class OriginalContractParityTest extends TestCase
                     . 'Implement the behaviour and add %s(), or revert the schema declaration.',
                     $name,
                     $property,
-                    $dischargedBy === '' ? '<dischargedBy unset>' : $dischargedBy,
-                    $dischargedBy === '' ? '<dischargedBy unset>' : $dischargedBy,
+                    $namedTest === '' ? '<dischargedBy/provenBy unset>' : $namedTest,
+                    $namedTest === '' ? '<dischargedBy/provenBy unset>' : $namedTest,
                 );
             }
             foreach (self::listOf($entry, 'extra') as $property) {

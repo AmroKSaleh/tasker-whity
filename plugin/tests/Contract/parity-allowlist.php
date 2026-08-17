@@ -48,8 +48,23 @@ declare(strict_types=1);
  *               mutated the wrong milestone) — both FIXED in D1b Task 12b.
  *               See git history for every closed entry.
  *
- * EVERY SEMANTIC ENTRY MUST CARRY `severity => 'semantic'` AND `dischargedBy`,
- * and the test enforces both. The reason is an escape hatch found in review:
+ * EVERY SEMANTIC ENTRY MUST CARRY `severity => 'semantic'` AND ONE OF
+ * `dischargedBy` / `provenBy`, and the test enforces that. The two name a
+ * behavioural test with OPPOSITE polarity, and picking the wrong key silently
+ * disables the check (D5a Task 8, review round 1):
+ *
+ *   `dischargedBy` — for behaviour the original has and we have NOT ported.
+ *                    Names the test that must exist BEFORE the entry may be
+ *                    removed, so today it deliberately does NOT exist. All four
+ *                    of the pre-D5a semantic entries are this kind.
+ *   `provenBy`     — for a divergence we deliberately SHIPPED and intend to
+ *                    keep. Names the test that PROVES it behaves as described,
+ *                    so it must exist NOW — checked on every run, which is what
+ *                    stops a rename from silently orphaning the entry.
+ *                    set_task_input/remove_task_input's cascade entries are
+ *                    this kind.
+ *
+ * The reason is an escape hatch found in review:
  * every SEMANTIC divergence used to be expressed as a `missing` property
  * (get_ready_work, added by WHOLE-BRANCH REVIEW I2, is the one exception —
  * see its own entry for why it names no property at all), so declaring that
@@ -58,8 +73,8 @@ declare(strict_types=1);
  * MORE dangerous, because the caller believes the flag is honoured where today
  * it at least fails visibly as "not accepted" (core drops undeclared
  * arguments). So for a semantic entry the rule is inverted: declaring the
- * property FAILS unless the behavioural test named in `dischargedBy` actually
- * exists in the suite. Behaviour first, schema second.
+ * property FAILS unless the behavioural test the entry names actually exists in
+ * the suite. Behaviour first, schema second.
  *
  * 25 entries waiving 75 individual divergences across the 42 shared tools.
  * D5a Task 5 ported name_flow/list_flows/delete_flow and added 3 new DEFERRED
@@ -694,7 +709,17 @@ return [
 
     'set_task_input' => [
         'severity' => 'semantic',
-        'dischargedBy' => 'testAConsumerEdgeWriteUnblessesTheProducerToo',
+        // provenBy, NOT dischargedBy (review round 1, Minor 2): the two keys
+        // have opposite polarity. dischargedBy — what delete_environment,
+        // get_task, delete_group and get_ready_work above all use — names a
+        // test that must NOT exist yet, because it describes behaviour this
+        // backend has not ported and has to land before the entry may be
+        // removed. This divergence is the other kind: deliberately shipped, not
+        // going anywhere, and the named test is the PROOF it behaves as
+        // described. OriginalContractParityTest checks provenBy for existence
+        // on every run, so renaming that test cannot silently orphan this
+        // entry. See staleAllowlistEntries()'s own docblock.
+        'provenBy' => 'testAConsumerEdgeWriteUnblessesTheProducerToo',
         'reason' => 'SEMANTIC: wiring an input edge resets the human contract blessing (output_contract_blessed) on '
             . 'BOTH ends of it -- the consumer AND the producer -- where the original resets neither task\'s output '
             . 'blessing (it rewrites the consumer\'s edge object, resetting that EDGE\'s own `confirmed` flag, a field '
@@ -731,7 +756,9 @@ return [
         // something different).
         'required' => ['source_task_id'],
         'severity' => 'semantic',
-        'dischargedBy' => 'testRemoveInputUnblessesBothEndsOfTheEdgeItRemoves',
+        // provenBy for the same reason set_task_input's entry uses it -- see
+        // that entry's own comment on the two keys' opposite polarity.
+        'provenBy' => 'testRemoveInputUnblessesBothEndsOfTheEdgeItRemoves',
         'reason' => 'TWO divergences. (1) DEFERRED (deliberate, stricter requirement, not a silent gap): the original '
             . 'treats an absent source_task_id as "remove every input edge on task_id"; this plugin\'s mutating-route '
             . 'rule forbids a mutation from resolving its own target from a caller default, and "every edge" is itself '
@@ -758,10 +785,35 @@ return [
     // The blessing CASCADE those two tools trigger is not recorded here either:
     // it belongs to the tools that DO the cascading, set_task_input and
     // remove_task_input, whose entries are above. set_task_output/
-    // clear_task_output resetting their OWN task's blessing is exactly what the
-    // original does (it overwrites the whole contract object, `confirmed:
-    // false` and all -- see the original's own TDE-818 comment on that line),
-    // so that half of the reset is a faithful port, not a divergence.
+    // clear_task_output resetting their OWN task's blessing matches the
+    // original (it overwrites the whole contract object, `confirmed: false` and
+    // all -- see the original's own TDE-818 comment on that line), so that half
+    // of the reset is a faithful port, not a divergence.
+    //
+    // WITH ONE CARVE-OUT, RECORDED HERE SO IT IS INHERITED RATHER THAN LOST
+    // (review round 1, Minor 3 -- this comment used to claim the own-task reset
+    // was "exactly" what the original does, which overclaimed): the original
+    // does not destroy a human confirmation SILENTLY. Its set_task_output
+    // (index.ts:8442-8459) writes a `contract_set` task event carrying
+    // `erased_confirmation`, `prior_confirmed_by` and `prior_confirmed_at`
+    // alongside a before/after contract snapshot, and warns the caller in the
+    // response that "the blessing is now void ... preserved in the task's gate
+    // history (get_task_history)"; clear_task_output (8743-8751) records the
+    // same for the bar it clears. WE JUST FLIP THE BOOLEAN.
+    //
+    // Unimplementable in D5a for the identical reason confirm_contract's own
+    // `confirmed_by` is (see its entry below): this plugin has no task-event /
+    // activity / history table and no tool that reads one -- get_task_history,
+    // get_task_activity and append_session_activity are all unported, and are
+    // counted in the 96. It carries no `missing`/`extra` key because it is not
+    // an ARGUMENT on any of these three tools; it is a side effect their calls
+    // have on the original and do not have here, which is the same shape of
+    // invisible-to-parity divergence get_ready_work's entry exists to record.
+    // Deliberately NOT given its own semantic entry: the gap is one missing
+    // FACILITY, identical across all three tools, so three entries would say
+    // the same thing three times and none of them would be the place it gets
+    // fixed. Whichever slice ports task events owns this, and the audit of a
+    // voided human blessing is the highest-value event on the list.
 
     'confirm_contract' => [
         // DEFERRED, and all three are capability gaps fixed BY SCHEMA rather
