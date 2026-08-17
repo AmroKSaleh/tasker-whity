@@ -78,6 +78,8 @@ final class ContractDeriver
     {
         /** @var array<string, array<array-key, mixed>> $merged keyed by dedupe key, so insertion order is rule order */
         $merged = [];
+        /** @var array<string, string> $declaredBy dedupe key => the label that declared it FIRST */
+        $declaredBy = [];
         /** @var list<string> $contributors consumers that declared at least one real rule */
         $contributors = [];
         /** @var list<string> $lossNotes per-consumer losses, in edge order */
@@ -112,18 +114,38 @@ final class ContractDeriver
                 $rule = $candidate;
                 unset($rule['id']);
 
+                // Counted even when this rule dedupes into one already merged:
+                // the consumer DID declare a real demand, it just happens to
+                // coincide with another's. That is a merge to report, not a
+                // consumer with nothing to say -- so it must not fall through to
+                // the "declares no input rules" note below.
                 $key = self::dedupeKey($rule);
                 $contributed++;
                 if (array_key_exists($key, $merged)) {
-                    $lossNotes[] = sprintf(
-                        'Rule "%s" is demanded by more than one consumer and was merged into a single output rule '
-                        . '-- verify they really mean the same thing.',
-                        self::ruleName($rule)
-                    );
+                    // NAMES BOTH SIDES, and distinguishes the two ways a
+                    // duplicate arrives. "Demanded by more than one consumer" is
+                    // simply FALSE when one consumer listed the same rule twice
+                    // on its own edge, and a merge note a human cannot trust is
+                    // worse than none.
+                    $lossNotes[] = $declaredBy[$key] === $label
+                        ? sprintf(
+                            'Consumer %s declared rule "%s" more than once on its own edge; the duplicates were '
+                            . 'merged into a single output rule.',
+                            $label,
+                            self::ruleName($rule)
+                        )
+                        : sprintf(
+                            'Rule "%s" is demanded by more than one consumer (%s and %s) and was merged into a '
+                            . 'single output rule -- verify they really mean the same thing.',
+                            self::ruleName($rule),
+                            $declaredBy[$key],
+                            $label
+                        );
                     continue;
                 }
 
                 $merged[$key] = $rule;
+                $declaredBy[$key] = $label;
             }
 
             if ($unusable > 0) {

@@ -8024,6 +8024,8 @@ final class TenantIsolationOuTest extends TestCase
         self::assertFalse($data['applied']);
         self::assertStringContainsString('DRV-3', implode(' ', $data['assumptions']),
             'the consumer that declared nothing must be named by its short id, not left for the human to hunt for');
+        self::assertStringNotContainsString('DRV-2', implode(' ', $data['assumptions']),
+            'and only that one -- the consumer that DID declare a bar has nothing outstanding to report');
         self::assertNull($this->storedContractFor($p),
             'a derivation without apply is a READ -- it must persist nothing at all');
     }

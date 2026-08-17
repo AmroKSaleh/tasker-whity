@@ -84,6 +84,27 @@ final class ContractDeriverTest extends TestCase
 
         self::assertStringContainsString('Has a summary', implode(' ', $r['assumptions']),
             'the merged rule must be named, or a human cannot check the two consumers meant the same bar');
+        self::assertStringContainsString('TDE-2 and TDE-3', implode(' ', $r['assumptions']),
+            'and BOTH consumers must be named -- "somebody else also wants this" is not checkable');
+    }
+
+    /**
+     * ONE consumer listing the same rule twice on its own edge is also a merge,
+     * but it is NOT "demanded by more than one consumer" — and a merge note that
+     * says something false about who demanded what is worse than none, because
+     * the human would go looking for a second consumer that does not exist.
+     */
+    public function testADuplicateWithinOneConsumersOwnEdgeIsNotReportedAsATwoConsumerMerge(): void
+    {
+        $rule = ['label' => 'Has a summary', 'kind' => 'check'];
+        $r = ContractDeriver::derive([
+            ['consumer_label' => 'TDE-2', 'contract' => ['rules' => [$rule, $rule]]],
+        ]);
+
+        self::assertCount(1, $r['rules']);
+        self::assertCount(1, $r['assumptions']);
+        self::assertStringContainsString('more than once on its own edge', $r['assumptions'][0]);
+        self::assertStringNotContainsString('more than one consumer', $r['assumptions'][0]);
     }
 
     /**
