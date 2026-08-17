@@ -289,6 +289,40 @@ final class ContractDeriverTest extends TestCase
     }
 
     /**
+     * WHOLE-BRANCH REVIEW FIX (D5a): the SCALAR case, which used to be told the
+     * object story.
+     *
+     * readRules() refuses ANY non-list `rules` — a string, a number, a boolean,
+     * an empty string — and every one of them used to print the one fixed
+     * sentence above: that the consumer "declared its input rules as a JSON
+     * object" and that jsonb key normalisation is why nothing could be derived.
+     * For `{"rules": "check the summary"}` every clause of that diagnosis is
+     * false, and it sends the reader looking for an object that is not there.
+     *
+     * REACHABLE, not hypothetical: TaskEdgesApiHandler::setInput() validates
+     * only that `contract` is a JSON object and stores it as-is, so `rules`'
+     * VALUE is entirely unconstrained by the route.
+     */
+    public function testRulesDeclaredAsAScalarAreRefusedWithTheirOwnDiagnosisNotTheObjectOne(): void
+    {
+        foreach (['check the summary', 5, true, ''] as $scalar) {
+            $r = ContractDeriver::derive([
+                ['consumer_label' => 'TDE-2', 'contract' => ['rules' => $scalar]],
+            ]);
+
+            $note = $r['assumptions'][0];
+            self::assertSame([], $r['rules']);
+            self::assertCount(1, $r['assumptions']);
+            self::assertStringContainsString('TDE-2 declared its input rules as a single value', $note);
+            self::assertStringNotContainsString('as a JSON object', $note,
+                'a scalar is not an object, and a note this file promises is true may not say it is');
+            self::assertStringNotContainsString('jsonb', $note,
+                'key normalisation is the OBJECT case\'s reason and has nothing to do with a scalar');
+            self::assertStringContainsString('set_task_input', $note, 'and how to fix it');
+        }
+    }
+
+    /**
      * REVIEW ROUND 1, Minor (c). A truncated rule name must not read as a
      * complete one, inside a note whose whole job is to send a human to look at
      * one specific rule.

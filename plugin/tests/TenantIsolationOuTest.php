@@ -3301,7 +3301,14 @@ final class TenantIsolationOuTest extends TestCase
                               VALUES ('11111111-1111-4111-8111-111111111111', 7, {$a}, {$a})");
             self::fail('a self-edge must be refused');
         } catch (\PDOException $e) {
-            self::assertNotSame('', $e->getMessage());
+            // NAMES THE CONSTRAINT (whole-branch review fix). This used to be
+            // assertNotSame('', $e->getMessage()), which ANY PDOException
+            // satisfies -- a typo'd column name, a missing table, a NOT NULL
+            // violation on public_id would all have passed it, in the one test
+            // whose entire job is to prove a specific database-level CHECK is
+            // installed and enforced.
+            self::assertStringContainsString('tasker_task_edges_no_self', $e->getMessage(),
+                'the INSERT must be refused by the named CHECK constraint, not by some other error');
         }
 
         // Deleting the producer removes the edge by cascade -- no dangling source.
@@ -7147,10 +7154,21 @@ final class TenantIsolationOuTest extends TestCase
     }
 
     /**
-     * Stronger than "no row survives" (the test above): the cycle check
-     * itself must be READ-ONLY and run BEFORE any transaction opens, so a
-     * rejection never even attempts an INSERT -- not one that gets rolled
-     * back. Proven here by a signal a rollback CANNOT erase: PostgreSQL
+     * Stronger than "no row survives" (the test above): a rejection must never
+     * even ATTEMPT the INSERT -- not attempt it and roll it back.
+     *
+     * THE PROSE HERE USED TO SAY the cycle check "must be READ-ONLY and run
+     * BEFORE any transaction opens", which a later fix in this same slice made
+     * false and nobody updated (whole-branch review). setInput() now OPENS a
+     * transaction first, to take lockProject() -- because two concurrent calls
+     * that would TOGETHER close a cycle each see an acyclic graph in isolation
+     * under READ COMMITTED, and no check taken before a lock can close that.
+     * assertNoCycleAround() is still read-only and still runs before the upsert;
+     * what changed is that a transaction is already open when it runs. The
+     * property this test pins is unchanged and is the one that actually
+     * matters, so only the description of the mechanism was wrong.
+     *
+     * Proven by a signal a rollback CANNOT erase: PostgreSQL
      * never rewinds a BIGSERIAL's backing sequence on ROLLBACK (nextval()
      * advances are non-transactional by design), so if setInput() had
      * upserted first and validated afterward -- relying on ROLLBACK to undo
@@ -9211,6 +9229,20 @@ final class TenantIsolationOuTest extends TestCase
         // off the board rather than deleting them.
         $order = json_decode($flows->order(7, null, $flowId)->getBody(), true)['data'];
         self::assertSame([$step, $stepGrouped], array_column($order['steps'], 'id'), 'get_flow_order must still report both steps');
+
+        // AND THROUGH get_task, WHICH IS DELIBERATELY NOT FILTERED (whole-branch
+        // review fix). The retrofit added `flow_id IS NULL` to SEVEN query sites
+        // and left six alone on purpose: a LISTING answers "what loose work is
+        // there", while addressing ONE task by id answers "show me this task",
+        // and a flow step is still a task. Nothing pinned that distinction, so
+        // someone "completing" the retrofit by adding the predicate to
+        // findVisible() would make get_task 404 on every flow step -- silently,
+        // with the whole suite still green, since a 404 is exactly what every
+        // other test here asks findVisible() to produce.
+        $viaGetTask = (new TasksApiHandler($this->pdo))->getOne(7, null, $step);
+        self::assertSame(200, $viaGetTask->getStatusCode(),
+            'get_task is deliberately NOT flow-filtered: a flow step is still a task, addressable by id');
+        self::assertSame($step, json_decode($viaGetTask->getBody(), true)['data']['id']);
     }
 
     /**

@@ -55,6 +55,16 @@ namespace Tasker\Domain;
 final class ContractDeriver
 {
     /**
+     * The two reasons {@see self::readRules()} refuses a `rules` value outright,
+     * each with its own note in {@see self::derive()}. Named constants rather
+     * than bare strings so the producer and the consumer of the value cannot
+     * drift apart on a typo — the refusal exists to make a note TRUE, and a
+     * mistyped reason would silently pick the wrong one of two true sentences.
+     */
+    private const REFUSED_OBJECT = 'object';
+    private const REFUSED_SCALAR = 'scalar';
+
+    /**
      * Merges $consumerEdges into one draft contract plus the assumptions the
      * merge rests on.
      *
@@ -101,14 +111,29 @@ final class ContractDeriver
             $label = $edge['consumer_label'];
             $read = self::readRules($edge['contract']);
 
-            if ($read['refused']) {
-                $lossNotes[] = sprintf(
-                    'Consumer %s declared its input rules as a JSON object rather than an array, so nothing could be '
-                    . 'derived from it: a contract is an ORDERED list of rules, and an object has no order to carry '
-                    . 'over (jsonb normalises its keys, so even the order it was written in is already gone). '
-                    . 'Re-author that edge with set_task_input, passing rules as an array.',
-                    $label
-                );
+            // TWO DIAGNOSES, NOT ONE (whole-branch review fix, D5a). readRules()
+            // refuses ANY non-list `rules`, and this used to print one fixed
+            // sentence for all of them -- blaming a JSON object and jsonb key
+            // normalisation. For `{"rules": "check the summary"}` every clause of
+            // that was false. The refusal carries its own reason now, and the
+            // note follows it. Reachable, not defensive: setInput() validates
+            // only that `contract` is a JSON object, so `rules`' value is
+            // unconstrained by the route.
+            if ($read['refused'] !== null) {
+                $lossNotes[] = $read['refused'] === self::REFUSED_OBJECT
+                    ? sprintf(
+                        'Consumer %s declared its input rules as a JSON object rather than an array, so nothing could be '
+                        . 'derived from it: a contract is an ORDERED list of rules, and an object has no order to carry '
+                        . 'over (jsonb normalises its keys, so even the order it was written in is already gone). '
+                        . 'Re-author that edge with set_task_input, passing rules as an array.',
+                        $label
+                    )
+                    : sprintf(
+                        'Consumer %s declared its input rules as a single value rather than an array, so nothing could '
+                        . 'be derived from it: a contract is a LIST of rules, and each rule is an object -- even when '
+                        . 'there is only one. Re-author that edge with set_task_input, passing rules as an array.',
+                        $label
+                    );
                 continue;
             }
 
@@ -232,8 +257,8 @@ final class ContractDeriver
      *
      *   - `rules` absent or null → no rules, nothing refused. The edge declares
      *     a handoff and no bar, which is legitimate and common.
-     *   - `rules` not a LIST (a string, a number, or a JSON OBJECT such as
-     *     `{"a": {...}}`) → `refused`. Deliberately NOT read by taking the
+     *   - `rules` a JSON OBJECT such as `{"a": {...}}` → refused, reason
+     *     {@see self::REFUSED_OBJECT}. Deliberately NOT read by taking the
      *     object's values (REVIEW ROUND 1, Minor d — which is how it behaved
      *     before): a contract is an ORDERED list of rules, and an object's order
      *     is not the caller's. jsonb normalises object keys, so the authoring
@@ -241,6 +266,11 @@ final class ContractDeriver
      *     empirically, a `{"b": …, "a": …}` rules object came back b-then-a
      *     regardless of how it went in. Reading it would invent an order and
      *     present the invention as the human's own bar.
+     *   - `rules` a SCALAR (a string, a number, a boolean, `""`) → refused,
+     *     reason {@see self::REFUSED_SCALAR}. Refused for a DIFFERENT reason and
+     *     told so in a different sentence (whole-branch review fix): nothing
+     *     about a scalar involves an object or jsonb key order, and this class's
+     *     whole contract with its reader is that its notes are true.
      *   - a candidate that is not a JSON object (a scalar, or a non-empty list
      *     like `["a", "b"]`) → `unusable`.
      *   - a candidate that is an object with NOTHING IN IT once its own `id` is
@@ -258,16 +288,19 @@ final class ContractDeriver
      * true.
      *
      * @param array<array-key, mixed>|null $contract
-     * @return array{rules: list<array<array-key, mixed>>, unusable: int, contentless: int, refused: bool}
+     * @return array{rules: list<array<array-key, mixed>>, unusable: int, contentless: int, refused: 'object'|'scalar'|null}
      */
     private static function readRules(?array $contract): array
     {
         $declared = $contract !== null ? ($contract['rules'] ?? null) : null;
         if ($declared === null) {
-            return ['rules' => [], 'unusable' => 0, 'contentless' => 0, 'refused' => false];
+            return ['rules' => [], 'unusable' => 0, 'contentless' => 0, 'refused' => null];
         }
-        if (!is_array($declared) || !array_is_list($declared)) {
-            return ['rules' => [], 'unusable' => 0, 'contentless' => 0, 'refused' => true];
+        if (!is_array($declared)) {
+            return ['rules' => [], 'unusable' => 0, 'contentless' => 0, 'refused' => self::REFUSED_SCALAR];
+        }
+        if (!array_is_list($declared)) {
+            return ['rules' => [], 'unusable' => 0, 'contentless' => 0, 'refused' => self::REFUSED_OBJECT];
         }
 
         $rules = [];
@@ -301,7 +334,7 @@ final class ContractDeriver
             $rules[] = $rule;
         }
 
-        return ['rules' => $rules, 'unusable' => $unusable, 'contentless' => $contentless, 'refused' => false];
+        return ['rules' => $rules, 'unusable' => $unusable, 'contentless' => $contentless, 'refused' => null];
     }
 
     /**
