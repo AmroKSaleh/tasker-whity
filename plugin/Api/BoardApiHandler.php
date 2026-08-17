@@ -44,10 +44,22 @@ final class BoardApiHandler
             [':tenant_id' => $tenantId, ':tenant_id2' => $tenantId, ':project_id' => $projectId]
         );
 
+        // TDE-320: `flow_id IS NULL` excludes flow STEPS from the board. A
+        // task swallowed into a flow is read through the flow surface
+        // (get_flow_order/get_flow_context), not rendered as loose board work —
+        // deliberate contract behaviour, not a stray filter. A literal in this
+        // static template; nothing caller-derived, nothing runtime-branched.
+        //
+        // THIS IS ALSO THE BOARD'S TALLY. Everything the board response counts
+        // — each section's ungroupedTasks, each group's tasks, and the
+        // milestone fetch below (keyed on the ids this query returns) — is
+        // derived from THIS one query in PHP; BoardApiHandler runs no separate
+        // COUNT statement, so there is no second site here that could drift
+        // out of step with this listing.
         $tasks = $this->fetchAll(
             'SELECT id, public_id, tenant_id, project_id, section_id, group_id, text, detail, status, priority,
                     due_date, pinned, sort_order, completed_at, short_id
-             FROM tasker_tasks WHERE tenant_id = :tenant_id AND project_id = :project_id
+             FROM tasker_tasks WHERE tenant_id = :tenant_id AND project_id = :project_id AND flow_id IS NULL
              ORDER BY sort_order ASC, id ASC',
             [':tenant_id' => $tenantId, ':project_id' => $projectId]
         );

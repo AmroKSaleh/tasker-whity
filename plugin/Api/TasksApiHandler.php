@@ -178,11 +178,18 @@ final class TasksApiHandler
 
         try {
             $idCol = $this->idColumn();
+            // TDE-320: `flow_id IS NULL` excludes flow STEPS from the board.
+            // A task swallowed into a flow is read through the flow surface
+            // (get_flow_order/get_flow_context), not listed as loose work — so
+            // this is deliberate contract behaviour, not a stray filter. A
+            // LITERAL in this static template, deliberately outside the
+            // `{$extra}` fragment above: nothing caller-derived, nothing
+            // runtime-branched, present on every call.
             $stmt = $this->db->prepare(
                 "SELECT {$idCol} AS id, public_id, tenant_id, project_id, section_id, group_id, text, detail, status, priority,
                         due_date, pinned, pinned_at, sort_order, completed_at, short_id, created_by, created_at, updated_at
                  FROM tasker_tasks
-                 WHERE tenant_id = :tenant_id{$extra}
+                 WHERE tenant_id = :tenant_id AND flow_id IS NULL{$extra}
                  ORDER BY sort_order ASC, {$idCol} ASC"
             );
             $stmt->execute($params);
@@ -1258,12 +1265,18 @@ final class TasksApiHandler
 
         try {
             $idCol = $this->idColumn();
+            // TDE-320: `flow_id IS NULL` excludes flow STEPS from the work
+            // queue. A task swallowed into a flow is worked through the flow
+            // surface (get_flow_order/get_flow_context), not offered as the next loose
+            // thing to pick up — deliberate contract behaviour, not a stray
+            // filter. A literal in this static template; nothing
+            // caller-derived, nothing runtime-branched.
             $stmt = $this->db->prepare(
                 "SELECT {$idCol} AS id, public_id, tenant_id, project_id, section_id, group_id, text, detail,
                         status, priority, due_date, pinned, pinned_at, sort_order, completed_at,
                         short_id, created_by, created_at, updated_at
                  FROM tasker_tasks
-                 WHERE tenant_id = :tenant_id AND project_id = :project_id AND status != 'done'
+                 WHERE tenant_id = :tenant_id AND project_id = :project_id AND status != 'done' AND flow_id IS NULL
                  ORDER BY pinned DESC, " . self::priorityRankCase() . " ASC, due_date ASC NULLS LAST, sort_order ASC"
             );
             $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);

@@ -130,6 +130,23 @@ final class TasksApiHandlerTest extends TestCase
         $this->pdo->exec("INSERT INTO tasker_projects (id, tenant_id) VALUES (100, 7)");
         $this->pdo->exec("INSERT INTO tasker_sections (id, tenant_id, project_id) VALUES (1, 7, 100), (2, 9, 100)");
         (new CreateTaskerTasksTable())->up($this->pdo);
+        // D5a Task 11 (TDE-320): production's tasker_tasks carries flow_id via
+        // AddTaskerTaskFlowAndContractColumns, and listFiltered()/listForSection()
+        // now read it (`flow_id IS NULL` — a flowed task is a flow step, not
+        // loose board work). That migration cannot be run against this double:
+        // its statements are `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, and
+        // SQLite has no IF NOT EXISTS form of ADD COLUMN at all — so the column
+        // is replicated here by hand instead, the same way tasker_projects and
+        // tasker_sections above are hand-rolled minimal doubles rather than real
+        // migrations. Without it every listFiltered() call raised "no such
+        // column: flow_id", which this handler's own catch-all turns into a 500
+        // — five tests in this file failed on a null `data` key, with nothing
+        // naming the missing column.
+        //
+        // flow_id ONLY: the same migration also adds flow_step/output_contract/
+        // output_contract_blessed, and no SQLite-tier query reads any of them.
+        // Add them here the day one does.
+        $this->pdo->exec('ALTER TABLE tasker_tasks ADD COLUMN flow_id INTEGER');
 
         $this->handler = new TasksApiHandler($this->pdo);
     }

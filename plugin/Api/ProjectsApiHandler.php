@@ -539,14 +539,26 @@ final class ProjectsApiHandler
      * own docblock for why get_project does not apply list_tasks' default
      * "exclude done" filter. Ordered by sort_order then id.
      *
+     * EXCEPT flow steps (TDE-320) — see the predicate's own comment below.
+     * A section whose every task has been swallowed into a flow therefore
+     * still appears in the response, with an empty `tasks` array: sections
+     * come from their own query ({@see self::fetchSectionsForProject()}) and
+     * are never filtered by what their tasks are doing.
+     *
      * @return array<int, array<string, mixed>>
      */
     private function fetchTasksForProject(int $tenantId, int $projectId): array
     {
+        // TDE-320: `flow_id IS NULL` excludes flow STEPS from the board. A task
+        // swallowed into a flow is read through the flow surface
+        // (get_flow_order/get_flow_context), not listed under its section as
+        // loose work — deliberate contract behaviour, not a stray filter. A
+        // literal in this static template; nothing caller-derived, nothing
+        // runtime-branched.
         $stmt = $this->db->prepare(
             'SELECT id, public_id, section_id, group_id, text, detail, status, priority, due_date,
                     pinned, sort_order, completed_at, short_id
-             FROM tasker_tasks WHERE tenant_id = :tenant_id AND project_id = :project_id
+             FROM tasker_tasks WHERE tenant_id = :tenant_id AND project_id = :project_id AND flow_id IS NULL
              ORDER BY sort_order ASC, id ASC'
         );
         $stmt->execute([':tenant_id' => $tenantId, ':project_id' => $projectId]);

@@ -120,6 +120,17 @@ final class AttentionApiHandler
             // unlike readyWork()'s own single-table query: this JOINs
             // tasker_projects, which also has its own `id` column, so an
             // unqualified `id` would be ambiguous.
+            //
+            // TDE-320: `t.flow_id IS NULL` excludes flow STEPS from the work
+            // queue. A task swallowed into a flow is worked through the flow
+            // surface (get_flow_order/get_flow_context), not ranked as loose work —
+            // deliberate contract behaviour, not a stray filter. Table-QUALIFIED
+            // (`t.`) like every other predicate here, and placed AHEAD of
+            // `{$projectClause}` deliberately: it is a literal of this static
+            // template, present on every call, never part of that
+            // presence-controlled fragment. The join is an INNER JOIN with
+            // tasker_tasks on the left, so this cannot silently reinterpret an
+            // outer join the way the same predicate would against a LEFT JOIN.
             $stmt = $this->db->prepare(
                 "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
                         t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
@@ -127,7 +138,7 @@ final class AttentionApiHandler
                  FROM tasker_tasks t
                  JOIN tasker_projects p ON p.id = t.project_id
                  WHERE t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
-                   AND t.status != 'done'{$projectClause}
+                   AND t.status != 'done' AND t.flow_id IS NULL{$projectClause}
                  ORDER BY " . TasksApiHandler::priorityRankCase() . " ASC, t.due_date ASC NULLS LAST, t.id ASC"
             );
             $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
@@ -268,6 +279,14 @@ final class AttentionApiHandler
         $ouClause = OuScopeResolver::whereFragment('p.ou_id');
         $projectClause = $projectId !== null ? ' AND t.project_id = :project_id' : '';
 
+        // TDE-320: `t.flow_id IS NULL` excludes flow STEPS from this bucket. An
+        // overdue task that has been swallowed into a flow is read through the
+        // flow surface (get_flow_order/get_flow_context), not triaged as a
+        // loose item on the caller's own list — deliberate contract behaviour,
+        // not a stray filter. A literal of this static template, ahead of
+        // `{$projectClause}` so it can never become part of that
+        // presence-controlled fragment. INNER JOIN, tasker_tasks on the left,
+        // so no outer-join row can satisfy this by simply being absent.
         $stmt = $this->db->prepare(
             "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
                     t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
@@ -275,7 +294,7 @@ final class AttentionApiHandler
              FROM tasker_tasks t
              JOIN tasker_projects p ON p.id = t.project_id
              WHERE t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
-               AND t.created_by = :created_by AND t.status != 'done'
+               AND t.created_by = :created_by AND t.status != 'done' AND t.flow_id IS NULL
                AND t.due_date < CURRENT_DATE{$projectClause}
              ORDER BY t.pinned DESC, t.due_date ASC, t.id ASC"
         );
@@ -313,6 +332,14 @@ final class AttentionApiHandler
         $ouClause = OuScopeResolver::whereFragment('p.ou_id');
         $projectClause = $projectId !== null ? ' AND t.project_id = :project_id' : '';
 
+        // TDE-320: `t.flow_id IS NULL` excludes flow STEPS from this bucket —
+        // see {@see self::fetchOverdue()}'s own copy of this comment for the
+        // full reasoning, including why it sits ahead of `{$projectClause}`.
+        // Worth stating once more here, because it interacts with THIS
+        // bucket's own cutoff: naming a flow stamps `updated_at` on every task
+        // it swallows, so a freshly-swallowed step leaves `stale` for two days
+        // regardless of this predicate. It is this predicate alone that keeps
+        // it out once it goes quiet again.
         $stmt = $this->db->prepare(
             "SELECT t.id, t.public_id, t.tenant_id, t.project_id, t.section_id, t.group_id, t.text, t.detail,
                     t.status, t.priority, t.due_date, t.pinned, t.pinned_at, t.sort_order, t.completed_at,
@@ -320,7 +347,7 @@ final class AttentionApiHandler
              FROM tasker_tasks t
              JOIN tasker_projects p ON p.id = t.project_id
              WHERE t.tenant_id = :tenant_id AND p.tenant_id = :tenant_id_p AND {$ouClause}
-               AND t.created_by = :created_by AND t.status != 'done'
+               AND t.created_by = :created_by AND t.status != 'done' AND t.flow_id IS NULL
                AND t.status = 'in_progress' AND t.updated_at <= " . self::STALE_CUTOFF_SQL . "{$projectClause}
              ORDER BY t.pinned DESC, t.updated_at ASC, t.id ASC"
         );

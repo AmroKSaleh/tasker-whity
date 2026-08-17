@@ -8883,4 +8883,302 @@ final class TenantIsolationOuTest extends TestCase
             self::assertStringContainsString('malformed', (string) $response->getBody());
         }
     }
+
+    // ==================== D5a Task 11: the board-exclusion retrofit (TDE-320) ====================
+    //
+    // A task swallowed into a flow LEAVES THE BOARD. It is a step of a flow
+    // now, read through the flow surface (get_flow_order/get_flow_context),
+    // and every board-shaped read has to stop reporting it as loose work.
+    // Seven query sites carry the `flow_id IS NULL` predicate that makes that
+    // true: list_tasks, get_ready_work, get_project, get_board, rank_tasks,
+    // and get_my_attention's two bucket queries.
+    //
+    // These tests are the ONLY protection this behaviour will ever have. The
+    // contract-parity test structurally cannot catch a regression here,
+    // because no tool's SHAPE changes -- a dropped predicate re-lists a
+    // flowed task with byte-identical keys. Four of the previous slice's
+    // whole-branch-review blockers were exactly this class of regression.
+    //
+    // Every test below therefore carries a POSITIVE CONTROL: an unflowed task
+    // that must STILL be reported after the flow exists, plus a baseline
+    // assertion that the soon-to-be-step really was reported BEFORE it. A
+    // "the surface is empty now" assertion on its own would pass just as
+    // happily for a predicate that wrongly excluded everything, or for a
+    // query that had stopped returning rows at all.
+
+    /**
+     * list_tasks, get_board and get_project in one pass, plus the agreement
+     * BETWEEN them: each answers from its own separate query, so "patched one
+     * site, missed another" is precisely the drift this retrofit can
+     * introduce.
+     *
+     * The two soon-to-be steps are split across get_board's TWO nesting paths
+     * -- one ungrouped under its section, one inside a group -- because a
+     * board fix (or a test helper) that only walked `ungroupedTasks` would
+     * call a still-visible grouped step "excluded".
+     */
+    public function testFlowStepsLeaveEveryBoardSurfaceAndEveryTally(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Exclusion', 'EXC');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $groupId   = $this->makeGroupDirect(7, $sectionId);
+
+        $plain        = $this->makeTaskDirect(7, $projectId, $sectionId, 'Plain task');
+        $plainGrouped = $this->makeTaskDirect(7, $projectId, $sectionId, 'Plain grouped task', null, false, null, 0, $groupId);
+        $step         = $this->makeTaskDirect(7, $projectId, $sectionId, 'Will become a step');
+        $stepGrouped  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Will become a grouped step', null, false, null, 0, $groupId);
+
+        // BASELINE -- the positive control for all three surfaces: while
+        // nothing is flowed, every one of the four is loose work and all three
+        // surfaces say so.
+        self::assertSame(
+            [$plain, $plainGrouped, $step, $stepGrouped],
+            $this->listedTaskIds(7, $projectId),
+            'baseline: list_tasks reports all four before any flow exists'
+        );
+        $boardBefore = json_decode((new BoardApiHandler($this->pdo))->get(7, null, $projectId)->getBody(), true);
+        self::assertSame(4, $this->countTasksIn($boardBefore), 'baseline: get_board tallies all four');
+        $projectBefore = json_decode((new ProjectsApiHandler($this->pdo))->getOne(7, null, $projectId, false)->getBody(), true);
+        self::assertCount(4, $projectBefore['data']['sections'][0]['tasks'], 'baseline: get_project lists all four');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode(
+            $flows->name(7, null, $projectId, 'Swallows two tasks', [$step, $stepGrouped], null, false, 2)->getBody(),
+            true
+        )['data']['id'];
+
+        self::assertSame([$plain, $plainGrouped], $this->listedTaskIds(7, $projectId), 'list_tasks must exclude flow steps');
+
+        $board = json_decode((new BoardApiHandler($this->pdo))->get(7, null, $projectId)->getBody(), true);
+        self::assertSame(2, $this->countTasksIn($board), 'get_board must exclude flow steps from its tally too');
+        self::assertSame(
+            [$plain, $plainGrouped],
+            $this->boardTaskIds($board),
+            'get_board must drop a GROUPED step as well as an ungrouped one'
+        );
+
+        $project = json_decode((new ProjectsApiHandler($this->pdo))->getOne(7, null, $projectId, false)->getBody(), true);
+        self::assertSame(
+            [$plain, $plainGrouped],
+            array_column($project['data']['sections'][0]['tasks'], 'id'),
+            'get_project must exclude flow steps'
+        );
+
+        // A TALLY MUST AGREE WITH THE LISTING IT SUMMARISES. get_board's count
+        // and get_project's/list_tasks' listings come from three independent
+        // queries over the same tasks; a count that drifts from its own
+        // listing is the specific failure this retrofit can introduce, and no
+        // amount of per-surface assertion states it.
+        self::assertSame(
+            $this->countTasksIn($board),
+            count($project['data']['sections'][0]['tasks']),
+            "get_board's tally must agree with get_project's listing"
+        );
+        self::assertSame(
+            $this->countTasksIn($board),
+            count($this->listedTaskIds(7, $projectId)),
+            "get_board's tally must agree with list_tasks' listing"
+        );
+
+        // EXCLUDED, NOT DESTROYED: both steps are still there, still readable
+        // -- through the flow surface, which is the whole point of moving them
+        // off the board rather than deleting them.
+        $order = json_decode($flows->order(7, null, $flowId)->getBody(), true)['data'];
+        self::assertSame([$step, $stepGrouped], array_column($order['steps'], 'id'), 'get_flow_order must still report both steps');
+    }
+
+    /**
+     * The two work queues. The step is given the HIGHER priority of the two
+     * fixtures, so it leads both baseline lists on each queue's own priority
+     * ordering -- it cannot go missing off the tail of a list by accident, and
+     * the unflowed control task proves the queues did not simply go empty.
+     *
+     * rank_tasks is asserted BOTH ways round: project-scoped, and across
+     * every project (its `$projectId === null` case). rank() assembles its
+     * optional project predicate into the SQL text at runtime, so the
+     * across-all-projects call is what proves TDE-320's own predicate lives
+     * in the static template rather than having been appended to that
+     * presence-controlled fragment.
+     */
+    public function testFlowStepsLeaveTheWorkQueuesToo(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Queues', 'QUE');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $step  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Stepified');
+        $plain = $this->makeTaskDirect(7, $projectId, $sectionId, 'Stays loose');
+        $this->pdo->exec("UPDATE tasker_tasks SET priority = 'high' WHERE id = {$step}");
+
+        $attention = new AttentionApiHandler($this->pdo);
+        $tasks     = new TasksApiHandler($this->pdo);
+
+        // BASELINE: both queues rank the soon-to-be step FIRST.
+        self::assertSame(
+            [$step, $plain],
+            array_column(json_decode($attention->rank(7, null, $projectId)->getBody(), true)['data'], 'id'),
+            'baseline: rank_tasks ranks both, step first'
+        );
+        self::assertSame(
+            [$step, $plain],
+            array_column(json_decode($tasks->readyWork(7, null, $projectId)->getBody(), true)['data'], 'id'),
+            'baseline: get_ready_work queues both, step first'
+        );
+
+        (new FlowsApiHandler($this->pdo))->name(7, null, $projectId, 'Queue eater', [$step], null, false, 2);
+
+        self::assertSame(
+            [$plain],
+            array_column(json_decode($attention->rank(7, null, $projectId)->getBody(), true)['data'], 'id'),
+            'rank_tasks must exclude flow steps'
+        );
+        self::assertSame(
+            [$plain],
+            array_column(json_decode($attention->rank(7, null, null)->getBody(), true)['data'], 'id'),
+            'rank_tasks must exclude flow steps across every project too, not only the project-scoped call'
+        );
+        self::assertSame(
+            [$plain],
+            array_column(json_decode($tasks->readyWork(7, null, $projectId)->getBody(), true)['data'], 'id'),
+            'get_ready_work must exclude flow steps'
+        );
+    }
+
+    /**
+     * get_my_attention's two buckets. Both fixtures are in_progress, overdue,
+     * AND untouched for three days, so each qualifies for `overdue` and
+     * `stale` simultaneously -- one flow then has to evict one task from both
+     * buckets while the control task stays in both.
+     *
+     * THE `updated_at` REWIND AFTER name() IS LOAD-BEARING, not fixture
+     * noise: name() stamps `updated_at = CURRENT_TIMESTAMP` on every task it
+     * swallows, which would drop the step out of the `stale` bucket by itself
+     * -- for a reason that has nothing to do with flow membership. Without the
+     * rewind, the stale assertion would pass even with no predicate in
+     * fetchStale() at all. Rewinding models the real case anyway: a task
+     * swallowed into a flow three days ago and quiet ever since.
+     */
+    public function testFlowStepsLeaveBothAttentionBucketsToo(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Attention', 'ATT');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $yesterday = (new \DateTimeImmutable('yesterday'))->format('Y-m-d');
+        $threeDaysAgo = "CURRENT_TIMESTAMP - INTERVAL '3 days'";
+
+        $plain = $this->makeAttentionTaskDirect(
+            7, $projectId, $sectionId, 'Stays loose', self::CALLER_ID, 'in_progress', $yesterday, false, $threeDaysAgo
+        );
+        $step = $this->makeAttentionTaskDirect(
+            7, $projectId, $sectionId, 'Stepified', self::CALLER_ID, 'in_progress', $yesterday, false, $threeDaysAgo
+        );
+
+        $attention = new AttentionApiHandler($this->pdo);
+
+        // BASELINE: both tasks, in both buckets, on both the project-scoped
+        // and the across-every-project call.
+        $before = json_decode($attention->attention(7, null, $projectId, self::CALLER_ID)->getBody(), true)['data'];
+        self::assertSame([$plain, $step], array_column($before['overdue'], 'id'), 'baseline: both tasks are overdue');
+        self::assertSame([$plain, $step], array_column($before['stale'], 'id'), 'baseline: both tasks are stale');
+
+        (new FlowsApiHandler($this->pdo))->name(7, null, $projectId, 'Attention eater', [$step], null, false, 2);
+        $this->pdo->exec("UPDATE tasker_tasks SET updated_at = {$threeDaysAgo} WHERE id = {$step}");
+
+        $after = json_decode($attention->attention(7, null, $projectId, self::CALLER_ID)->getBody(), true)['data'];
+        self::assertSame([$plain], array_column($after['overdue'], 'id'), "get_my_attention's overdue bucket must exclude flow steps");
+        self::assertSame([$plain], array_column($after['stale'], 'id'), "get_my_attention's stale bucket must exclude flow steps");
+
+        // Both bucket queries assemble their optional project predicate into
+        // the SQL text at runtime, exactly as rank() does -- so the
+        // across-every-project call is what proves TDE-320's own predicate is
+        // in the static template and not stapled onto that fragment.
+        $across = json_decode($attention->attention(7, null, null, self::CALLER_ID)->getBody(), true)['data'];
+        self::assertSame([$plain], array_column($across['overdue'], 'id'), 'overdue must exclude flow steps across every project too');
+        self::assertSame([$plain], array_column($across['stale'], 'id'), 'stale must exclude flow steps across every project too');
+    }
+
+    /**
+     * The round trip. `flow_id` is `ON DELETE SET NULL`
+     * (AddTaskerTaskFlowAndContractColumns), and delete() clears `flow_step`
+     * explicitly alongside it, so deleting a flow RETURNS ITS TASKS TO THE
+     * BOARD rather than destroying them. TDE-320's read predicate is what
+     * makes that observable on the board surfaces, in both directions.
+     */
+    public function testDeletingAFlowReturnsItsStepsToTheBoard(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Round trip', 'RTR');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $plain = $this->makeTaskDirect(7, $projectId, $sectionId, 'Never flowed');
+        $step  = $this->makeTaskDirect(7, $projectId, $sectionId, 'There and back');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode(
+            $flows->name(7, null, $projectId, 'Temporary flow', [$step], null, false, 2)->getBody(),
+            true
+        )['data']['id'];
+
+        self::assertSame([$plain], $this->listedTaskIds(7, $projectId), 'the step left the board while the flow existed');
+
+        $deleted = $flows->delete(7, null, $flowId);
+        self::assertSame(200, $deleted->getStatusCode());
+        self::assertSame(1, json_decode($deleted->getBody(), true)['data']['tasksReturnedToBoard']);
+
+        self::assertSame([$plain, $step], $this->listedTaskIds(7, $projectId), 'delete_flow returns its steps to list_tasks');
+        $board = json_decode((new BoardApiHandler($this->pdo))->get(7, null, $projectId)->getBody(), true);
+        self::assertSame([$plain, $step], $this->boardTaskIds($board), 'delete_flow returns its steps to get_board');
+    }
+
+    /**
+     * Every task id get_board actually surfaces for a project, in the order it
+     * surfaces them: a section's own `ungroupedTasks` first, then each of its
+     * groups' `tasks`. BOTH paths, deliberately -- get_board is the one
+     * surface where a task can be nested either way, so a helper that only
+     * read `ungroupedTasks` would report a still-visible grouped task as
+     * excluded.
+     *
+     * @param array<string, mixed> $board a decoded get_board response body
+     * @return list<int>
+     */
+    private function boardTaskIds(array $board): array
+    {
+        $ids = [];
+        foreach ($board['data']['sections'] as $section) {
+            foreach ($section['ungroupedTasks'] as $task) {
+                $ids[] = (int) $task['id'];
+            }
+            foreach ($section['groups'] as $group) {
+                foreach ($group['tasks'] as $task) {
+                    $ids[] = (int) $task['id'];
+                }
+            }
+        }
+
+        return $ids;
+    }
+
+    /**
+     * get_board's task tally: how many tasks the board reports in total,
+     * across both nesting paths. The board composes its response from ONE
+     * task query (there is no separate COUNT statement in BoardApiHandler),
+     * so this is that query's own result as the caller sees it.
+     *
+     * @param array<string, mixed> $board a decoded get_board response body
+     */
+    private function countTasksIn(array $board): int
+    {
+        return count($this->boardTaskIds($board));
+    }
+
+    /**
+     * Every task id list_tasks reports for a project, status filter 'all', in
+     * the order it reports them.
+     *
+     * @return list<int>
+     */
+    private function listedTaskIds(int $tenantId, int $projectId): array
+    {
+        $payload = json_decode(
+            (new TasksApiHandler($this->pdo))->listFiltered($tenantId, $projectId, null, null, 'all')->getBody(),
+            true
+        );
+
+        return array_column($payload['data'], 'id');
+    }
 }
