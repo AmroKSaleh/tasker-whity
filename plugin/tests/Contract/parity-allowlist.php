@@ -845,18 +845,40 @@ return [
     // the re-stamp GATE. The original recomputes when EITHER endpoint is in a
     // flow (`task.flow_id || source.flow_id`, index.ts:8388) and then
     // force-adds the consumer into the member set it sorts
-    // (`memberMap.set(task.id, freshTask)`, 8396) — so an edge into an
+    // (`memberMap.set(task.id, freshTask)`, 8398) — so an edge into an
     // UNFLOWED consumer from a flowed producer stamps a flow_step onto a task
     // that belongs to no flow, and renumbers that flow's real members around
     // it. Ours gates on the consumer's own flow_id alone (see
     // TaskEdgesApiHandler's docblock for why that is the only flow a call
     // here can change the internal edge set of), so the same call stamps
-    // nothing. NOT given an entry: no test pins that case, and this task will
-    // not write one to justify a record — what the original does there
-    // writes a step number onto a non-member, which is a defect rather than a
+    // nothing. STILL NOT GIVEN AN ENTRY — what the original does there writes
+    // a step number onto a non-member, which is a defect rather than a
     // contract, and the entries in this file are for divergences we would
     // defend, not for bugs we declined to copy. Written down so the next
     // reader of these two gates does not have to re-derive it from index.ts.
+    //
+    // THE MIXED CASE NOW HAS A TEST, which it did not when this record was
+    // first written (that absence was the stated second half of the reasoning
+    // for not entering it, and the whole-branch review was right that a record
+    // whose case nothing pins is one refactor away from being quietly untrue):
+    //
+    //     TenantIsolationOuTest::testSetInputFromAFlowedProducerToAnUnflowedConsumerStampsNothingAtAll()
+    //
+    // Cited here, NOT promoted to a `provenBy` entry. The direction matters and
+    // it is the one two implementers in this slice already refused to reverse:
+    // the test exists because the behaviour deserves pinning, and the record
+    // then cites the test — never a test manufactured to justify a record. The
+    // test's own load-bearing assertion is `updated_at`, not flow_step: the
+    // sort is idempotent, so a wrongly-widened gate re-stamps the SAME numbers
+    // and only the needless UPDATE gives it away.
+    //
+    // BOTH index.ts CITATIONS ABOVE WERE RE-VERIFIED LINE BY LINE against
+    // c:\Projects\tasker\supabase\functions\mcp\index.ts during the D5a
+    // whole-branch fix wave, because the value of this file is that a reader
+    // can jump to the line. 8388 was correct. `memberMap.set(task.id,
+    // freshTask)` is at 8398, NOT the 8396 recorded here before (8396 is the
+    // `freshTask` select, 8397 the `new Map(...)`, 8399 `const memberArr`) --
+    // corrected above.
 
     'set_task_input' => [
         'severity' => 'semantic',

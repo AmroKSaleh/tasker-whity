@@ -7320,6 +7320,79 @@ final class TenantIsolationOuTest extends TestCase
         self::assertNull($this->pdo->query("SELECT flow_id FROM tasker_tasks WHERE id = {$b}")->fetchColumn());
     }
 
+    /**
+     * WHOLE-BRANCH REVIEW FIX (D5a): THE MIXED CASE — a FLOWED producer
+     * feeding an UNFLOWED consumer — which is the one the re-stamp gate
+     * actually decides, and the only one nothing pinned.
+     *
+     * The suite pinned both-flowed (testSetInputUpsertsTheEdgeAndRestampsFlowOrder)
+     * and both-unflowed (testSetInputAllowsAnEdgeBetweenTwoUnflowedTasksAndStampsNothing).
+     * Between them sits the case where we DELIBERATELY DIVERGE from the
+     * original: it recomputes when EITHER endpoint is flowed
+     * (`task.flow_id || source.flow_id`, index.ts:8388) and then force-adds
+     * the consumer into the sorted member set (index.ts:8398), stamping a
+     * flow_step onto a task that belongs to no flow. We gate on the CONSUMER's
+     * own flow_id alone, so this call stamps nothing at all. That divergence is
+     * recorded in prose in parity-allowlist.php, which now cites this test by
+     * name; it is the case a future reader is most likely to "fix" back.
+     *
+     * `updated_at` IS THE LOAD-BEARING ASSERTION, not the step numbers.
+     * recomputeFlowOrder() is IDEMPOTENT, so re-stamping this healthy flow
+     * would write the SAME 1 and 2 back and every flow_step assertion would
+     * still pass — the gate could be widened to the original's and nothing
+     * here would notice. What a needless re-stamp cannot hide is its own
+     * UPDATE: the stamp sets `updated_at = CURRENT_TIMESTAMP` on every member,
+     * and AttentionApiHandler's staleness buckets rank on that column, so a
+     * wrongly-recomputing gate would make wiring an unrelated task look like
+     * fresh activity on every member of the producer's flow. Neither `aa` nor
+     * `bb` has a blessed contract, so unblessContractsFor() (the only other
+     * writer in this path, and itself gated on `output_contract_blessed = TRUE`)
+     * touches neither -- which leaves the re-stamp as the ONLY thing that could
+     * move either timestamp.
+     */
+    public function testSetInputFromAFlowedProducerToAnUnflowedConsumerStampsNothingAtAll(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Mixed', 'MIX');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $aa = $this->makeTaskDirect(7, $projectId, $sectionId, 'aa');
+        $bb = $this->makeTaskDirect(7, $projectId, $sectionId, 'bb');
+        $loose = $this->makeTaskDirect(7, $projectId, $sectionId, 'never in a flow');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flows->name(7, null, $projectId, 'Mixed flow', [$aa, $bb], null, false, 2);
+        $memberSteps = fn (): array => array_map(
+            'intval',
+            $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id IN ({$aa}, {$bb}) ORDER BY id")
+                ->fetchAll(PDO::FETCH_COLUMN)
+        );
+        self::assertSame([1, 2], $memberSteps(), 'baseline: independent members, stamped in id order');
+
+        $before = $this->pdo
+            ->query("SELECT id, updated_at FROM tasker_tasks WHERE id IN ({$aa}, {$bb}) ORDER BY id")
+            ->fetchAll(PDO::FETCH_KEY_PAIR);
+
+        // bb (FLOWED) produces for loose (UNFLOWED). The original would
+        // recompute bb's flow here; we must not.
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $loose, $bb, null, null, false)->getStatusCode());
+
+        // The producer's flow is untouched, in both senses.
+        self::assertSame([1, 2], $memberSteps(), "the producer's flow keeps its existing step order");
+        $after = $this->pdo
+            ->query("SELECT id, updated_at FROM tasker_tasks WHERE id IN ({$aa}, {$bb}) ORDER BY id")
+            ->fetchAll(PDO::FETCH_KEY_PAIR);
+        self::assertSame(
+            $before,
+            $after,
+            'a needless re-stamp is invisible in flow_step (the sort is idempotent) but not in updated_at'
+        );
+
+        // And the unflowed consumer acquires NOTHING -- no flow, no step
+        // number. This is exactly what the original does do, and does wrong.
+        self::assertNull($this->pdo->query("SELECT flow_id FROM tasker_tasks WHERE id = {$loose}")->fetchColumn());
+        self::assertNull($this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$loose}")->fetchColumn());
+    }
+
     public function testSetInputRejects422WhenTaskIdAndSourceTaskIdAreTheSame(): void
     {
         $projectId = $this->makeProjectDirect(7, null, 'Self', 'SLF');
