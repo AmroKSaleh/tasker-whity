@@ -43,17 +43,27 @@ use Whity\Sdk\Http\Response;
  * correct, it is only the cycle CHECK that cannot be flow-scoped without
  * breaking the brief's own test.
  *
- * ATOMICITY: setInput()'s write phase — the optional replace-all delete, the
- * edge upsert, the cycle check, and the conditional flow re-stamp — is ONE
- * transaction. A cycle rolls the WHOLE thing back (the edge write included),
- * matching {@see \Tasker\Api\FlowsApiHandler}'s own "either everything
- * commits or nothing does" precedent. removeInput() is symmetric: its delete
- * and its conditional re-stamp share one transaction too, even though
- * removing an edge can never itself CREATE a cycle (removing a constraint
- * cannot close a loop that did not already exist) — kept transactional
- * anyway so a mid-flight failure never leaves the edge gone but flow_step
- * stale, and so {@see self::recomputeFlowOrder()} — shared by Tasks 7, 8 and
- * 10 — has exactly one contract regardless of caller.
+ * ATOMICITY mirrors {@see \Tasker\Api\FlowsApiHandler::name()}'s own bar
+ * exactly, not just its spirit: the cycle check ({@see self::assertNoCycleAround()})
+ * is READ-ONLY and runs ENTIRELY BEFORE setInput() ever opens a transaction
+ * — a rejected cycle leaves the database completely untouched, not even a
+ * consumed `tasker_task_edges_id_seq` value (Postgres sequence advances are
+ * never rolled back, so a design that upserted first and validated
+ * afterward — an earlier draft of this class did exactly that, relying on
+ * ROLLBACK to undo the row — would still leave that harmless-but-avoidable
+ * gap on every rejection). Only the actual WRITE phase — the optional
+ * replace-all delete, the edge upsert, and the conditional flow re-stamp —
+ * opens a transaction, and that transaction is one unit: a race that
+ * somehow slips a cycle past the pre-check still rolls the whole write back
+ * (belt-and-braces; see setInput()'s own docblock). removeInput() is
+ * simpler: it always needs to write (the delete itself), so it has no
+ * read-only phase to hoist anything into — its delete and its conditional
+ * re-stamp share one transaction, even though removing an edge can never
+ * itself CREATE a cycle (removing a constraint cannot close a loop that did
+ * not already exist), kept transactional so a mid-flight failure never
+ * leaves the edge gone but flow_step stale. {@see self::recomputeFlowOrder()}
+ * — shared by Tasks 7, 8 and 10 — has exactly one contract regardless of
+ * caller: always call it inside a transaction you already opened.
  */
 final class TaskEdgesApiHandler
 {
@@ -69,15 +79,19 @@ final class TaskEdgesApiHandler
      * (the consumer) from $sourceTaskId (the producer), then re-stamp the
      * owning flow's topological order in the SAME transaction.
      *
-     * ORDER (all inside one transaction, once both tasks are confirmed
-     * visible and same-project outside it):
-     *   1. if $replaceAll, delete the target's OTHER inbound edges;
-     *   2. upsert the (source_task_id, target_task_id) edge;
-     *   3. check the resulting graph for a cycle — see this class's own
-     *      docblock for why this is NOT scoped to a flow;
-     *   4. if $targetTaskId and $sourceTaskId share ONE non-null flow_id,
+     * ORDER:
+     *   1. confirm both tasks visible and same-project (read-only, no
+     *      transaction yet);
+     *   2. check whether the CANDIDATE edge would close a cycle — read-only,
+     *      still no transaction (see this class's own docblock for why the
+     *      check is not scoped to a flow, and for why this ordering avoids
+     *      even consuming a sequence value on a rejection);
+     *   3. only now open a transaction: if $replaceAll, delete the target's
+     *      OTHER inbound edges;
+     *   4. upsert the (source_task_id, target_task_id) edge;
+     *   5. if $targetTaskId and $sourceTaskId share ONE non-null flow_id,
      *      re-stamp that flow's flow_step for every member;
-     *   5. commit, or roll back the whole thing on a cycle.
+     *   6. commit, or roll back the whole write phase on any failure.
      *
      * BOTH TASKS MIGHT BE UNFLOWED. The original permits I/O edges outside a
      * flow, and name_flow reads pre-existing edges when it stamps a flow's
@@ -119,6 +133,29 @@ final class TaskEdgesApiHandler
             return Response::error('task_id and source_task_id must belong to the same project', 422);
         }
 
+        // READ-ONLY, entirely BEFORE any transaction opens -- mirrors
+        // FlowsApiHandler::name()'s own precedent exactly (see that class's
+        // own docblock): a cycle here leaves the database COMPLETELY
+        // untouched, not even a consumed tasker_task_edges_id_seq value.
+        // This is NOT the same check as an earlier draft of this method,
+        // which upserted the edge FIRST and re-queried the (now-written)
+        // graph, relying on ROLLBACK to undo it on a cycle -- that version
+        // worked (the row never survives a rollback) but left a harmless
+        // gap in the BIGSERIAL sequence on every rejection, unlike Task 5's
+        // bar. Fixed by building the hypothetical graph in PHP instead of
+        // the database: {@see self::assertNoCycleAround()} appends the
+        // CANDIDATE edge to the in-memory edge list itself, never writing
+        // it, so FlowStepSorter::sort() sees exactly the graph a commit
+        // would produce without a single row ever touching the database.
+        try {
+            $this->assertNoCycleAround($tenantId, $targetTaskId, $sourceTaskId);
+        } catch (FlowCycleException $e) {
+            return Response::error(
+                'Cannot set this input: it would close a dependency cycle: ' . implode(' -> ', $e->cycle()),
+                422
+            );
+        }
+
         // Guard `[] -> '{}'` -- json_encode([]) produces the JSON ARRAY "[]",
         // not "{}", and this column is read back as an OBJECT (see
         // FlowsApiHandler::updateContext()'s own identical guard/doc for the
@@ -131,6 +168,8 @@ final class TaskEdgesApiHandler
             }
         }
 
+        // ---- Write phase. Everything below is transactional; nothing
+        // above this line has written or is capable of writing anything. ----
         try {
             $this->db->beginTransaction();
 
@@ -166,17 +205,19 @@ final class TaskEdgesApiHandler
             $upsert->bindValue(':tenant_id_conflict', $tenantId, PDO::PARAM_INT);
             $upsert->execute();
 
-            // The edge is now written. Check the graph it produced BEFORE
-            // touching flow_step at all -- see this class's own docblock for
-            // why this is a global check, not one scoped to a flow.
-            $this->assertNoCycleAround($tenantId, $targetTaskId, $sourceTaskId);
-
             if ($target['flow_id'] !== null && $target['flow_id'] === $source['flow_id']) {
                 $this->recomputeFlowOrder($tenantId, $target['flow_id']);
             }
 
             $this->db->commit();
         } catch (FlowCycleException $e) {
+            // Not expected to be reachable: the read-only check above
+            // already confirmed this exact edge is safe. Kept anyway as a
+            // belt-and-braces guard against a race landing between that
+            // check and this write (see this class's own docblock's
+            // ATOMICITY note) -- rolling back here still leaves the
+            // database exactly as it was before this call, just via
+            // ROLLBACK rather than never having opened a transaction at all.
             if ($this->db->inTransaction()) {
                 $this->db->rollBack();
             }
@@ -354,27 +395,31 @@ final class TaskEdgesApiHandler
     }
 
     /**
-     * Checks the I/O graph around a just-written edge (source=$sourceTaskId,
-     * target=$targetTaskId, ALREADY committed to this transaction by the
-     * caller) for a cycle, throwing {@see FlowCycleException} if one exists.
+     * Checks whether the CANDIDATE edge (source=$sourceTaskId,
+     * target=$targetTaskId) — NOT YET WRITTEN anywhere — would close a
+     * cycle, throwing {@see FlowCycleException} if it would. Entirely
+     * read-only: this method never opens a transaction, writes a row, or
+     * requires one already open, which is what lets
+     * {@see self::setInput()} call it BEFORE ever starting its own write
+     * phase (see that method's own docblock for why that matters —
+     * matching {@see \Tasker\Api\FlowsApiHandler::name()}'s "nothing
+     * written until every check has passed" bar exactly).
      *
      * DELIBERATELY NOT SCOPED TO A FLOW -- see this class's own docblock for
      * why: the brief's own cycle-rejection test constructs two tasks with no
      * flow at all, so "the flow's members" cannot be the node set here.
      *
      * THE GRAPH-THEORY SHORTCUT this relies on: in a DAG, adding edge (S, T)
-     * closes a cycle if and only if T could already reach S BEFORE that edge
-     * existed -- the standard single-edge-insertion cycle test. Since every
-     * edge ever accepted by this method was itself checked the same way, the
-     * graph was acyclic immediately before this write, so it suffices to
-     * check whether $sourceTaskId is now reachable from $targetTaskId by
-     * following existing edges FORWARD (source -> target) starting at
-     * $targetTaskId -- {@see self::forwardReachable()}. The new edge itself
-     * (source=$sourceTaskId, target=$targetTaskId) does not change that
-     * computation: forwardReachable() only follows edges whose OWN
-     * source_task_id is the current node, and the new edge's source is
-     * $sourceTaskId, never $targetTaskId or any of ITS descendants, so it
-     * can never appear as an outgoing edge partway through that walk.
+     * closes a cycle if and only if T can already reach S — the standard
+     * single-edge-insertion cycle test. Since every edge this method has
+     * ever accepted was itself checked the same way, the EXISTING graph is
+     * guaranteed acyclic, so it suffices to check whether $sourceTaskId is
+     * reachable from $targetTaskId by following EXISTING edges FORWARD
+     * (source -> target) starting at $targetTaskId --
+     * {@see self::forwardReachable()} — and then asking whether appending
+     * the candidate edge ON TOP of that (never persisted; just appended to
+     * the in-memory list handed to {@see FlowStepSorter::sort()}) closes a
+     * loop.
      *
      * Bounding the node set to {$targetTaskId} ∪ forwardReachable($targetTaskId)
      * ∪ {$sourceTaskId} — rather than every task in the project — also avoids
@@ -384,7 +429,7 @@ final class TaskEdgesApiHandler
      * this edge (theoretically reachable only through direct, validation-
      * bypassing writes such as this test suite's own insertEdgeDirect()
      * helper) -- this bounded set can only ever contain a cycle that this
-     * specific edge is part of.
+     * specific candidate edge is part of.
      *
      * @throws FlowCycleException
      */
@@ -408,6 +453,10 @@ final class TaskEdgesApiHandler
             static fn (array $row): array => ['source' => (int) $row['source'], 'target' => (int) $row['target']],
             $edgeStmt->fetchAll(PDO::FETCH_ASSOC)
         );
+        // The CANDIDATE edge -- appended in memory only. It is never written
+        // here; this is what lets the whole check run before any transaction
+        // opens.
+        $edges[] = ['source' => $sourceTaskId, 'target' => $targetTaskId];
 
         $sorted = FlowStepSorter::sort($taskIds, $edges);
         if (!$sorted['ok']) {

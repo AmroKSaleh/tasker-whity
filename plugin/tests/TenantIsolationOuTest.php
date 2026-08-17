@@ -6950,6 +6950,38 @@ final class TenantIsolationOuTest extends TestCase
             'a refused edge must not be written');
     }
 
+    /**
+     * Stronger than "no row survives" (the test above): the cycle check
+     * itself must be READ-ONLY and run BEFORE any transaction opens, so a
+     * rejection never even attempts an INSERT -- not one that gets rolled
+     * back. Proven here by a signal a rollback CANNOT erase: PostgreSQL
+     * never rewinds a BIGSERIAL's backing sequence on ROLLBACK (nextval()
+     * advances are non-transactional by design), so if setInput() had
+     * upserted first and validated afterward -- relying on ROLLBACK to undo
+     * a caught cycle, as an earlier draft of TaskEdgesApiHandler did -- the
+     * sequence would visibly advance on every refusal even though the row
+     * itself vanished. Matches FlowsApiHandler::name()'s own "nothing
+     * written until every check has passed" bar exactly (see its own
+     * docblock).
+     */
+    public function testSetInputRefusesAnEdgeThatWouldCloseACycleWithoutEvenConsumingASequenceValue(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'LoopySeq', 'LPS');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $b, $a, null, null, false);
+
+        $before = (int) $this->pdo->query("SELECT last_value FROM tasker_task_edges_id_seq")->fetchColumn();
+        $refused = $edges->setInput(7, null, $a, $b, null, null, false);
+        $after = (int) $this->pdo->query("SELECT last_value FROM tasker_task_edges_id_seq")->fetchColumn();
+
+        self::assertSame(422, $refused->getStatusCode());
+        self::assertSame($before, $after, 'a rejected cycle must not consume an id sequence value at all');
+    }
+
     public function testSetInputRefusesACrossProjectEdge(): void
     {
         $mine  = $this->makeProjectDirect(7, null, 'Here', 'HER');
