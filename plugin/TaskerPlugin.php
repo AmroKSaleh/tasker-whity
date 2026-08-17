@@ -886,7 +886,16 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'requiredPermission' => 'tasker_task:edit',
                 'schema' => [
                     'operationId' => 'move_task',
-                    'summary' => 'Move a task to a DIFFERENT project',
+                    // THE FLOW REFUSAL BELONGS IN THE SUMMARY, not only in the
+                    // longer 'description' below: the derived MCP tool
+                    // description is built from `summary` (verified against
+                    // docs/mcp-tool-surface.json -- move_task's entry there was
+                    // this one line, and its rich 'description' never reached an
+                    // agent at all). A guard a caller cannot discover before
+                    // hitting it is only half a fix.
+                    'summary' => 'Move a task to a DIFFERENT project. A task that is a FLOW STEP is refused (422) '
+                        . 'naming its flow -- delete_flow that flow first (its tasks return to the board), then move '
+                        . 'the task.',
                     // D1b Task 12c: ported to the ORIGINAL's actual live contract
                     // (captured directly from its live MCP server -- the design
                     // repo's index.ts and docs page are both stale here). This
@@ -895,11 +904,21 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     // moves a task to a different PROJECT entirely. That
                     // within-project capability now lives on move_task_to_group
                     // (which gained sort_order for exactly this reason).
+                    // THE FLOW SENTENCE WAS FALSE AS OF D5a and had to change
+                    // with the guard behind it (whole-branch review fix): this
+                    // said "this backend has no flows ... at all, so unlike the
+                    // original there is nothing to unlink or drop", written when
+                    // that was true. D5a made flows real and moveToProject()
+                    // still moved a flow member without touching flow_id, so the
+                    // description was simultaneously stale AND the only place a
+                    // caller could have learned what happens to a flowed task.
                     'description' => 'Move a task to a DIFFERENT project. Reassigns the short ID into the target '
                         . 'project\'s own sequence; preserves text, detail, priority, status, pinned, due_date and '
                         . 'completed_at. group_id is always cleared -- a group belongs to a section in the SOURCE '
-                        . 'project, so nothing about it can travel. This backend has no flows or cross-project I/O '
-                        . 'edges at all, so unlike the original there is nothing to unlink or drop on that front. '
+                        . 'project, so nothing about it can travel. A task that is a FLOW STEP is REFUSED (422) '
+                        . 'naming its flow, rather than being unlinked from it silently the way the original does: a '
+                        . 'flow\'s members are always its own project\'s tasks. delete_flow that flow first (its '
+                        . 'tasks return to the board), then move the task. '
                         . 'target_project_id resolving to the task\'s OWN current project is rejected (422) rather '
                         . 'than silently renumbering/un-grouping it -- for a SAME-project move (section, group, or '
                         . 'board order) use update_task or move_task_to_group instead.',
@@ -923,7 +942,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         200 => ['description' => 'The moved task, plus previousShortId/newShortId, droppedGroup and landedInBacklog'],
                         400 => ['description' => 'task_id/target_project_id/target_section_id looks like a short id but is malformed, or target_project_id is missing'],
                         404 => ['description' => 'Task or target project not found in the caller\'s tenant or OU scope, or the target project has no Backlog section'],
-                        422 => ['description' => 'target_project_id resolves to the task\'s own current project -- use update_task or move_task_to_group for a same-project move'],
+                        422 => ['description' => 'target_project_id resolves to the task\'s own current project (use update_task or move_task_to_group for a same-project move), or the task is a step of a flow -- delete_flow that flow first'],
                     ],
                 ],
             ],

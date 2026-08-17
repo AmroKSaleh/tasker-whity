@@ -686,7 +686,7 @@
     },
     {
         "name":  "move_task",
-        "description":  "Move a task to a DIFFERENT project",
+        "description":  "Move a task to a DIFFERENT project. A task that is a FLOW STEP is refused (422) naming its flow -- delete_flow that flow first (its tasks return to the board), then move the task.",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
