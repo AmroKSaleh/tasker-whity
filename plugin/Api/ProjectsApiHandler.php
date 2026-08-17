@@ -871,6 +871,32 @@ final class ProjectsApiHandler
     }
 
     /**
+     * A project's stored `context` column (the Foundation), decoded for the
+     * WIRE: the object it was written as, or `{}` for an empty or unreadable
+     * one — NEVER `[]`.
+     *
+     * Whole-branch review fix (D5a). `json_decode('{}', true)` yields `[]` and
+     * `json_encode([])` emits `[]`, so `json_decode(...) ?? []` reported a
+     * project whose Foundation is empty — which every project is until someone
+     * writes one — as a JSON ARRAY, then switched to an object the moment a key
+     * appeared. {@see self::updateContext()} stores the literal `'{}'` rather
+     * than `json_encode([])` precisely so the column never holds the array
+     * form; this is the read side of that same decision. Predates Flows, fixed
+     * alongside the three D5a read paths with the identical defect (see
+     * {@see \Tasker\Api\FlowsApiHandler::decodedContext()} and
+     * {@see \Tasker\Api\TaskEdgesApiHandler::decodedContract()}) rather than
+     * left as the odd one out.
+     *
+     * @return \stdClass|array<array-key, mixed>
+     */
+    private static function decodedContext(mixed $raw): \stdClass|array
+    {
+        $decoded = $raw !== null ? json_decode((string) $raw, true) : [];
+
+        return is_array($decoded) && $decoded !== [] ? $decoded : new \stdClass();
+    }
+
+    /**
      * @param array<string, mixed> $row
      * @return array<string, mixed>
      */
@@ -883,7 +909,7 @@ final class ProjectsApiHandler
             'ouId' => $row['ou_id'] !== null ? (int) $row['ou_id'] : null,
             'name' => (string) $row['name'],
             'slug' => (string) $row['slug'],
-            'context' => json_decode((string) $row['context'], true) ?? [],
+            'context' => self::decodedContext($row['context']),
             'prefix' => $row['prefix'],
             'sortOrder' => (int) $row['sort_order'],
             'createdBy' => (int) $row['created_by'],

@@ -878,7 +878,6 @@ final class TaskEdgesApiHandler
         $neighbours = [];
         /** @var array<string, mixed> $row */
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $contract = $row['contract'] !== null ? json_decode((string) $row['contract'], true) : null;
             $neighbours[] = [
                 'id' => (int) $row['id'],
                 'publicId' => (string) $row['public_id'],
@@ -889,7 +888,11 @@ final class TaskEdgesApiHandler
                 'text' => (string) $row['text'],
                 'status' => (string) $row['status'],
                 'expectedType' => $row['expected_type'] !== null ? (string) $row['expected_type'] : null,
-                'contract' => is_array($contract) ? $contract : null,
+                // Through the shared decoder, so both directions of this method
+                // and toPublicEdge() answer with the same shape -- see
+                // self::decodedContract() for why an empty contract is an
+                // object here and not [].
+                'contract' => self::decodedContract($row['contract']),
             ];
         }
 
@@ -981,6 +984,13 @@ final class TaskEdgesApiHandler
         $edges = [];
         /** @var array<string, mixed> $row */
         foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            // DELIBERATELY NOT self::decodedContract(): this decode does NOT
+            // feed the wire. Its rows go to {@see \Tasker\Domain\ContractDeriver},
+            // which reads `$contract['rules']` as a PHP array and is typed for
+            // one — so the empty-object rewrite that is correct on every
+            // RESPONSE builder in this class would be a type error here, and an
+            // empty contract is already handled: readRules() reports it as a
+            // consumer that declared nothing.
             $contract = $row['contract'] !== null ? json_decode((string) $row['contract'], true) : null;
             $edges[] = [
                 'consumer_label' => self::consumerLabel(
@@ -1620,13 +1630,52 @@ final class TaskEdgesApiHandler
     }
 
     /**
+     * One edge's stored `contract` column, decoded for the WIRE: the object it
+     * was written as, `{}` when it was written empty, or null when the edge
+     * declares no contract at all.
+     *
+     * THE `new \stdClass()` IS THE WHOLE POINT (whole-branch review fix, D5a).
+     * `json_decode('{}', true)` yields `[]`, `is_array([])` is true, and
+     * `json_encode([])` emits `[]` — so the previous
+     * `is_array($contract) ? $contract : null` handed a caller a JSON ARRAY for
+     * a value {@see self::setInput()} had gone out of its way to store as the
+     * JSON OBJECT `'{}'`. That write carries a paragraph explaining it stores
+     * the literal because "a non-PHP consumer reading this column back over the
+     * wire does NOT treat `[]` and `{}` as interchangeable"; delivering `[]` on
+     * the read made that reasoning inert, and left this tool answering with an
+     * object for a non-empty contract and an array for an empty one.
+     *
+     * NULL IS PRESERVED, and is NOT the same answer as `{}`: an edge with no
+     * contract declares no bar, an edge with `{}` declares an empty one. Only
+     * the empty-ARRAY case is rewritten.
+     *
+     * NOT used by {@see self::consumerEdgesOf()}, deliberately — see that
+     * method's own note. Its rows feed {@see \Tasker\Domain\ContractDeriver},
+     * which reads them as PHP arrays and never serialises them, so an object
+     * there would be a type error dressed as a fix.
+     *
+     * @return \stdClass|array<array-key, mixed>|null
+     */
+    private static function decodedContract(mixed $raw): \stdClass|array|null
+    {
+        if ($raw === null) {
+            return null;
+        }
+
+        $decoded = json_decode((string) $raw, true);
+        if (!is_array($decoded)) {
+            return null;
+        }
+
+        return $decoded === [] ? new \stdClass() : $decoded;
+    }
+
+    /**
      * @param array<string, mixed> $row
      * @return array<string, mixed>
      */
     private function toPublicEdge(array $row): array
     {
-        $contract = $row['contract'] !== null ? json_decode((string) $row['contract'], true) : null;
-
         return [
             'id' => (int) $row['id'],
             'publicId' => (string) $row['public_id'],
@@ -1634,7 +1683,7 @@ final class TaskEdgesApiHandler
             'sourceTaskId' => (int) $row['source_task_id'],
             'targetTaskId' => (int) $row['target_task_id'],
             'expectedType' => $row['expected_type'] !== null ? (string) $row['expected_type'] : null,
-            'contract' => is_array($contract) ? $contract : null,
+            'contract' => self::decodedContract($row['contract']),
             'createdAt' => (string) $row['created_at'],
         ];
     }

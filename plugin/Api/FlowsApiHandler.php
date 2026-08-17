@@ -1053,6 +1053,36 @@ final class FlowsApiHandler
     }
 
     /**
+     * A flow's stored `context` column, decoded for the WIRE: the object it was
+     * written as, or `{}` for an empty or unreadable one.
+     *
+     * NEVER `[]` (whole-branch review fix, D5a). `json_decode('{}', true)`
+     * yields `[]`, `is_array([])` is true, and `json_encode([])` emits `[]` — so
+     * this builder used to hand a caller a JSON ARRAY for a column whose DEFAULT
+     * is `'{}'` and whose every writer ({@see self::name()},
+     * {@see self::updateContext()}) stores the literal `'{}'` on purpose, each
+     * carrying a paragraph about why: a non-PHP consumer reading this column
+     * back over the wire does NOT treat `[]` and `{}` as interchangeable. Since
+     * a flow named without a context stores exactly that, get_flow_context was
+     * reporting `context: []` for EVERY such flow, and `context: {...}` only
+     * once someone had written a key — an object for a non-empty value and an
+     * array for an empty one, on one field.
+     *
+     * NO NULL CASE, unlike an edge's contract: `tasker_flows.context` is
+     * NOT NULL DEFAULT '{}' ({@see \Tasker\Migrations\CreateTaskerFlowsTable}),
+     * so "no context" and "empty context" are the same state here and `{}` is
+     * the honest answer to both.
+     *
+     * @return \stdClass|array<array-key, mixed>
+     */
+    private static function decodedContext(mixed $raw): \stdClass|array
+    {
+        $decoded = $raw !== null ? json_decode((string) $raw, true) : [];
+
+        return is_array($decoded) && $decoded !== [] ? $decoded : new \stdClass();
+    }
+
+    /**
      * @param array<string, mixed> $row
      * @return array<string, mixed>
      */
@@ -1060,7 +1090,6 @@ final class FlowsApiHandler
     {
         $shortId = $row['short_id'] !== null ? (int) $row['short_id'] : null;
         $prefix  = isset($row['prefix']) && $row['prefix'] !== null ? (string) $row['prefix'] : null;
-        $context = $row['context'] !== null ? json_decode((string) $row['context'], true) : [];
 
         return [
             'id' => (int) $row['id'],
@@ -1068,7 +1097,7 @@ final class FlowsApiHandler
             'tenantId' => (int) $row['tenant_id'],
             'projectId' => (int) $row['project_id'],
             'name' => (string) $row['name'],
-            'context' => is_array($context) ? $context : [],
+            'context' => self::decodedContext($row['context']),
             'stepListOpen' => self::dbTruthy($row['step_list_open']),
             'shortId' => self::renderFlowShortId($prefix, $shortId),
             'createdBy' => $row['created_by'] !== null ? (int) $row['created_by'] : null,

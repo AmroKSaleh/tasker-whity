@@ -6838,6 +6838,88 @@ final class TenantIsolationOuTest extends TestCase
     }
 
     /**
+     * WHOLE-BRANCH REVIEW FIX (D5a, IMPORTANT): AN EMPTY JSON OBJECT MUST COME
+     * BACK AS `{}`, NOT `[]`, on every read path whose column's contract is
+     * "an object".
+     *
+     * `json_decode('{}', true)` yields `[]`, `is_array([])` is true, and
+     * `json_encode([])` emits `[]` — so a stored `{}` was delivered to the
+     * caller as a JSON ARRAY on four read paths, two of them new in this slice
+     * (get_task_connections' own edgeNeighbours and toPublicEdge). That makes
+     * inert the reasoning three separate WRITE paths in this slice each carry a
+     * paragraph about: they store the literal `'{}'` rather than `json_encode([])`
+     * SPECIFICALLY because "a non-PHP consumer reading this column back over the
+     * wire does NOT treat `[]` and `{}` as interchangeable". Delivering `[]` on
+     * the read spends that care and then throws the result away, and leaves each
+     * of these tools answering with an object for a non-empty value and an array
+     * for an empty one — the shape a typed client cannot model.
+     *
+     * DECODED WITH `false`, NOT `true` — the assertion only exists at all
+     * because of the difference between the two. `json_decode($body, true)` maps
+     * `{}` and `[]` onto the identical empty PHP array, so an assertion written
+     * the way every other test in this file writes it (`assertSame([], ...)`)
+     * passes just as happily against the defect as against the fix. Objects
+     * mode, plus a raw-body substring check, are the only ways to see it from
+     * PHP at all.
+     */
+    public function testAnEmptyStoredJsonObjectComesBackAsAnObjectNotAnArray(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Empty Objects', 'EMO');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $producer  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $consumer  = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+
+        // set_task_input stores the LITERAL '{}' for an empty contract (see
+        // TaskEdgesApiHandler::setInput()'s own guard) -- an edge with no rules
+        // is still a declared handoff, just an ungated one.
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $written = $edges->setInput(7, null, $consumer, $producer, 'markdown', [], false);
+        self::assertSame(200, $written->getStatusCode());
+
+        // 1. set_task_input's own response body (toPublicEdge).
+        $writtenEdge = json_decode($written->getBody(), false)->data;
+        self::assertInstanceOf(\stdClass::class, $writtenEdge->contract,
+            "set_task_input must echo an empty contract as the object it stored, not as []");
+        self::assertStringContainsString('"contract":{}', (string) $written->getBody());
+
+        // 2. get_task_connections, BOTH directions -- blockers and dependents
+        //    are two separate literals inside edgeNeighbours(), so a fix applied
+        //    to one builder and not the other would show up here.
+        $blockers = json_decode($edges->connections(7, null, $consumer)->getBody(), false)->data;
+        self::assertInstanceOf(\stdClass::class, $blockers->blockers[0]->contract,
+            'get_task_connections must report an empty edge contract as {} on the blocker side');
+        $dependents = json_decode($edges->connections(7, null, $producer)->getBody(), false)->data;
+        self::assertInstanceOf(\stdClass::class, $dependents->dependents[0]->contract,
+            'get_task_connections must report an empty edge contract as {} on the dependent side');
+
+        // NULL IS STILL NULL, not an empty object: an edge that declares NO
+        // contract is a different statement from one that declares an empty one,
+        // and this is the assertion that stops the fix from flattening them
+        // together.
+        $none = $edges->setInput(7, null, $producer, $this->makeTaskDirect(7, $projectId, $sectionId, 'Upstream'), null, null, false);
+        self::assertNull(json_decode($none->getBody(), false)->data->contract,
+            'an edge with no contract at all must still read back null, never {}');
+
+        // 3. get_flow_context. name_flow stores '{}' for an absent context, so
+        //    EVERY flow created without one was reporting `context: []`.
+        $flows  = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode(
+            $flows->name(7, null, $projectId, 'Contextless', [$consumer], null, false, 2)->getBody(),
+            true
+        )['data']['id'];
+        $context = $flows->getContext(7, null, $flowId);
+        self::assertInstanceOf(\stdClass::class, json_decode($context->getBody(), false)->data->context,
+            'get_flow_context must report an empty context as {}');
+        self::assertStringContainsString('"context":{}', (string) $context->getBody());
+
+        // 4. get_project's own context, same defect class, same column contract
+        //    -- older than Flows, fixed in the same edit.
+        $project = (new ProjectsApiHandler($this->pdo))->getOne(7, null, $projectId, false);
+        self::assertInstanceOf(\stdClass::class, json_decode($project->getBody(), false)->data->context,
+            'get_project must report an empty project context as {}');
+    }
+
+    /**
      * Global constraint (this slice's own rule): every OU-boundary test
      * pairs a sibling-OU 404 with a same-OU positive control. Neither of the
      * two brief-mandated tests above touches OU scope at all (both pass a
