@@ -43,27 +43,83 @@ use Whity\Sdk\Http\Response;
  * correct, it is only the cycle CHECK that cannot be flow-scoped without
  * breaking the brief's own test.
  *
- * ATOMICITY mirrors {@see \Tasker\Api\FlowsApiHandler::name()}'s own bar
- * exactly, not just its spirit: the cycle check ({@see self::assertNoCycleAround()})
- * is READ-ONLY and runs ENTIRELY BEFORE setInput() ever opens a transaction
- * — a rejected cycle leaves the database completely untouched, not even a
- * consumed `tasker_task_edges_id_seq` value (Postgres sequence advances are
- * never rolled back, so a design that upserted first and validated
- * afterward — an earlier draft of this class did exactly that, relying on
- * ROLLBACK to undo the row — would still leave that harmless-but-avoidable
- * gap on every rejection). Only the actual WRITE phase — the optional
- * replace-all delete, the edge upsert, and the conditional flow re-stamp —
- * opens a transaction, and that transaction is one unit: a race that
- * somehow slips a cycle past the pre-check still rolls the whole write back
- * (belt-and-braces; see setInput()'s own docblock). removeInput() is
- * simpler: it always needs to write (the delete itself), so it has no
- * read-only phase to hoist anything into — its delete and its conditional
- * re-stamp share one transaction, even though removing an edge can never
- * itself CREATE a cycle (removing a constraint cannot close a loop that did
- * not already exist), kept transactional so a mid-flight failure never
- * leaves the edge gone but flow_step stale. {@see self::recomputeFlowOrder()}
- * — shared by Tasks 7, 8 and 10 — has exactly one contract regardless of
- * caller: always call it inside a transaction you already opened.
+ * THE RE-STAMP GATE IS `$targetTaskId['flow_id'] !== null` ALONE (REVIEW FIX,
+ * round 2) — not "$targetTaskId and $sourceTaskId share one non-null
+ * flow_id", which is what the first draft shipped with. Every edge either
+ * public method mutates has $targetTaskId as ONE of its two endpoints: the
+ * upsert in setInput(), AND every replace-all collateral row it deletes in
+ * the SAME call, AND the single row removeInput() deletes. So $targetTaskId's
+ * OWN flow is the ONLY flow whose internal edge set (both endpoints members)
+ * this class can ever change in one call — $sourceTaskId's flow_id is
+ * irrelevant to that question, whether $sourceTaskId is unflowed, in the
+ * SAME flow, or in a DIFFERENT one. The old, narrower gate broke exactly on
+ * replace_all: reproduced live as flow={bb, aa} (aa -> bb, order stamped
+ * aa=1/bb=2), then `setInput(target=bb, source=outsider, replace_all=true)`
+ * where outsider is UNFLOWED — the replace-all delete removes aa -> bb (an
+ * edge INTERNAL to the flow), the call returns 200, but the old gate
+ * (`bb.flow_id === outsider.flow_id`) was false, so flow_step silently kept
+ * describing an edge that no longer existed. {@see self::recomputeFlowOrder()}
+ * is idempotent, so widening the gate to "target has ANY flow" costs
+ * nothing on every call where the narrower gate was already correct.
+ *
+ * ATOMICITY, taken together with LOCKING (REVIEW FIX, round 2): both
+ * methods' write phase — replace-all delete, upsert/delete, cycle check
+ * (setInput() only), conditional flow re-stamp — is ONE transaction that
+ * OPENS BY TAKING `SELECT id FROM tasker_projects WHERE id = :project_id
+ * AND tenant_id = :tenant_id FOR UPDATE` on the shared project row, via
+ * {@see self::lockProject()}. This is {@see \Tasker\Api\SectionsApiHandler}'s
+ * own established pattern, not a new one — see that class's own docblock
+ * for why: a predicate over SIBLING rows a write never touches (there, the
+ * last-section guard; here, "is there already a path back to this edge's
+ * source") cannot be folded into that write's own WHERE clause, and folding
+ * was tried and empirically failed there. The FIRST DRAFT of this class
+ * argued the cycle check could run entirely before any transaction opened,
+ * and that removeInput()'s own re-stamp needed no lock at all — WRONG on
+ * both counts, per review:
+ *
+ *   1. Two CONCURRENT setInput() calls that would TOGETHER close a cycle
+ *      (call A: source=X target=Y; call B: source=Y target=X, racing) each
+ *      see an acyclic graph in isolation under READ COMMITTED — neither
+ *      sees the other's uncommitted row — and both could commit, leaving a
+ *      real cycle in the table. A read-only check run before any lock is
+ *      taken cannot close this; only serialising the two calls can.
+ *   2. {@see self::recomputeFlowOrder()}'s own member SELECT and its stamp
+ *      UPDATEs are separated by the edge SELECT and the sort. A task
+ *      committed INTO the flow in that window is invisible to the SELECT,
+ *      never stamped, and nothing detects it — the exact class of race
+ *      {@see \Tasker\Api\FlowsApiHandler::name()}'s own stamp loop closes
+ *      with `flow_id IS NULL`, but there is no equivalent guard here.
+ *
+ * Locking the PROJECT row (not the flow, not the edge) closes both:
+ * membership changes and edge changes are both scoped to one project (an
+ * edge's endpoints are always same-project, per this class's own 422; a
+ * flow's members are always its project's tasks), so serialising on that
+ * one row serialises every writer this class or a future Task 8/10 mutator
+ * could race against. Same single row `SectionsApiHandler::delete()` already
+ * locks, so no conflicting lock order is introduced — see that class's own
+ * docblock, updated in this round to note it is no longer the plugin's only
+ * `FOR UPDATE`.
+ *
+ * The cycle check still runs BEFORE the edge upsert (now: after the lock,
+ * still before the write) — {@see self::assertNoCycleAround()} never writes
+ * anything itself, so a rejected cycle still consumes zero
+ * `tasker_task_edges_id_seq` values (Postgres sequence advances are never
+ * rolled back, so consuming one on every rejection — what an even earlier
+ * draft of this class did, by upserting FIRST and validating the written
+ * row afterward — would be a real, if harmless, regression from
+ * {@see \Tasker\Api\FlowsApiHandler::name()}'s own "nothing written until
+ * every check has passed" bar). The transaction itself IS still opened on
+ * every call now (to take the lock), unlike that bar's most literal reading
+ * — but nothing is ever WRITTEN by a call that gets refused, which is the
+ * property that actually matters and the one the test suite checks.
+ *
+ * removeInput() cannot itself create a cycle (removing a constraint cannot
+ * close a loop that did not already exist), but it locks the SAME row for
+ * the SAME reason as point 2 above: its own call to
+ * {@see self::recomputeFlowOrder()} has the identical member-SELECT/stamp-
+ * UPDATE window. {@see self::recomputeFlowOrder()} — shared by Tasks 7, 8
+ * and 10 — has exactly one contract regardless of caller: always call it
+ * inside a transaction that ALREADY holds this project's lock.
  */
 final class TaskEdgesApiHandler
 {
@@ -82,23 +138,31 @@ final class TaskEdgesApiHandler
      * ORDER:
      *   1. confirm both tasks visible and same-project (read-only, no
      *      transaction yet);
-     *   2. check whether the CANDIDATE edge would close a cycle — read-only,
-     *      still no transaction (see this class's own docblock for why the
-     *      check is not scoped to a flow, and for why this ordering avoids
-     *      even consuming a sequence value on a rejection);
-     *   3. only now open a transaction: if $replaceAll, delete the target's
-     *      OTHER inbound edges;
-     *   4. upsert the (source_task_id, target_task_id) edge;
-     *   5. if $targetTaskId and $sourceTaskId share ONE non-null flow_id,
-     *      re-stamp that flow's flow_step for every member;
-     *   6. commit, or roll back the whole write phase on any failure.
+     *   2. open a transaction and take {@see self::lockProject()} on the
+     *      shared project row — see this class's own docblock's LOCKING
+     *      section for why this has to happen before the cycle check, not
+     *      just before the write;
+     *   3. UNDER THAT LOCK, check whether the CANDIDATE edge would close a
+     *      cycle (see this class's own docblock for why the check is not
+     *      scoped to a flow) — still before any write, so a rejection still
+     *      consumes no sequence value even though a transaction is open;
+     *   4. if $replaceAll, delete the target's OTHER inbound edges;
+     *   5. upsert the (source_task_id, target_task_id) edge;
+     *   6. if $targetTaskId's OWN flow_id is non-null, re-stamp that flow's
+     *      flow_step for every member — gated on $targetTaskId alone, not
+     *      "both share a flow" (REVIEW FIX: every edge this method ever
+     *      writes, including a replace-all collateral DELETE, has
+     *      $targetTaskId as one endpoint, so $targetTaskId's flow is the
+     *      ONLY flow whose internal edge set this call can ever change; see
+     *      this class's own docblock for the reproduction the old
+     *      `target.flow_id === source.flow_id` gate missed);
+     *   7. commit, or roll back the whole write phase on any failure.
      *
      * BOTH TASKS MIGHT BE UNFLOWED. The original permits I/O edges outside a
      * flow, and name_flow reads pre-existing edges when it stamps a flow's
-     * initial order — so when $targetTaskId and $sourceTaskId do not share a
-     * single non-null flow_id (either is unflowed, or they belong to two
-     * DIFFERENT flows), there is no flow_step to re-stamp and step 4 above is
-     * skipped entirely. Tested explicitly (the brief's own instruction) by
+     * initial order — so when $targetTaskId itself is unflowed, there is no
+     * flow_step to re-stamp and step 6 above is skipped entirely. Tested
+     * explicitly (the brief's own instruction) by
      * {@see \Tasker\Tests\TenantIsolationOuTest::testSetInputAllowsAnEdgeBetweenTwoUnflowedTasksAndStampsNothing()}.
      *
      * @param array<string, mixed>|null $contract
@@ -133,29 +197,6 @@ final class TaskEdgesApiHandler
             return Response::error('task_id and source_task_id must belong to the same project', 422);
         }
 
-        // READ-ONLY, entirely BEFORE any transaction opens -- mirrors
-        // FlowsApiHandler::name()'s own precedent exactly (see that class's
-        // own docblock): a cycle here leaves the database COMPLETELY
-        // untouched, not even a consumed tasker_task_edges_id_seq value.
-        // This is NOT the same check as an earlier draft of this method,
-        // which upserted the edge FIRST and re-queried the (now-written)
-        // graph, relying on ROLLBACK to undo it on a cycle -- that version
-        // worked (the row never survives a rollback) but left a harmless
-        // gap in the BIGSERIAL sequence on every rejection, unlike Task 5's
-        // bar. Fixed by building the hypothetical graph in PHP instead of
-        // the database: {@see self::assertNoCycleAround()} appends the
-        // CANDIDATE edge to the in-memory edge list itself, never writing
-        // it, so FlowStepSorter::sort() sees exactly the graph a commit
-        // would produce without a single row ever touching the database.
-        try {
-            $this->assertNoCycleAround($tenantId, $targetTaskId, $sourceTaskId);
-        } catch (FlowCycleException $e) {
-            return Response::error(
-                'Cannot set this input: it would close a dependency cycle: ' . implode(' -> ', $e->cycle()),
-                422
-            );
-        }
-
         // Guard `[] -> '{}'` -- json_encode([]) produces the JSON ARRAY "[]",
         // not "{}", and this column is read back as an OBJECT (see
         // FlowsApiHandler::updateContext()'s own identical guard/doc for the
@@ -168,10 +209,21 @@ final class TaskEdgesApiHandler
             }
         }
 
-        // ---- Write phase. Everything below is transactional; nothing
-        // above this line has written or is capable of writing anything. ----
+        // ---- Write phase. Nothing above this line has written or is
+        // capable of writing anything. The lock taken immediately below is
+        // what makes the cycle check that follows it SAFE to trust -- see
+        // this class's own docblock's LOCKING section for the concurrent
+        // race this closes, which a read-only check taken before any lock
+        // (this method's own first draft) could not. ----
         try {
             $this->db->beginTransaction();
+            $this->lockProject($tenantId, $target['project_id']);
+
+            // Still runs BEFORE the upsert -- see this class's own docblock
+            // for why a rejection here still consumes no
+            // tasker_task_edges_id_seq value even though a transaction is
+            // already open.
+            $this->assertNoCycleAround($tenantId, $targetTaskId, $sourceTaskId);
 
             if ($replaceAll) {
                 $deleteOthers = $this->db->prepare(
@@ -205,7 +257,13 @@ final class TaskEdgesApiHandler
             $upsert->bindValue(':tenant_id_conflict', $tenantId, PDO::PARAM_INT);
             $upsert->execute();
 
-            if ($target['flow_id'] !== null && $target['flow_id'] === $source['flow_id']) {
+            // REVIEW FIX: gated on $targetTaskId's OWN flow_id alone -- see
+            // this class's own docblock for why $sourceTaskId's flow_id is
+            // irrelevant to whether THIS call could have changed $targetTaskId's
+            // flow's internal edge set (it always could, if $targetTaskId is
+            // flowed at all: the replace-all delete above touches ONLY edges
+            // targeting $targetTaskId).
+            if ($target['flow_id'] !== null) {
                 $this->recomputeFlowOrder($tenantId, $target['flow_id']);
             }
 
@@ -255,6 +313,13 @@ final class TaskEdgesApiHandler
      * never resolves its own target from a caller default), and
      * `parity-allowlist.php`'s own `remove_task_input` entry for the
      * resulting divergence.
+     *
+     * Takes {@see self::lockProject()} even though removing an edge can
+     * never itself create a cycle: {@see self::recomputeFlowOrder()}'s own
+     * member-SELECT/stamp-UPDATE window is reachable here too (a task
+     * committed into $targetTaskId's flow between this call's member SELECT
+     * and its stamps would otherwise go un-stamped) — see this class's own
+     * docblock's LOCKING section.
      */
     public function removeInput(int $tenantId, ?int $callerOuId, int $targetTaskId, int $sourceTaskId): Response
     {
@@ -269,6 +334,7 @@ final class TaskEdgesApiHandler
 
         try {
             $this->db->beginTransaction();
+            $this->lockProject($tenantId, $target['project_id']);
 
             $delete = $this->db->prepare(
                 'DELETE FROM tasker_task_edges
@@ -285,7 +351,10 @@ final class TaskEdgesApiHandler
                 return Response::error('Input edge not found', 404);
             }
 
-            if ($target['flow_id'] !== null && $target['flow_id'] === $source['flow_id']) {
+            // REVIEW FIX: gated on $targetTaskId's OWN flow_id alone, same
+            // predicate as setInput() -- see that method's own docblock for
+            // why. The removed edge's source flow_id is irrelevant here too.
+            if ($target['flow_id'] !== null) {
                 $this->recomputeFlowOrder($tenantId, $target['flow_id']);
             }
 
@@ -314,6 +383,34 @@ final class TaskEdgesApiHandler
     }
 
     /**
+     * `SELECT id FROM tasker_projects WHERE id = :project_id AND tenant_id
+     * = :tenant_id FOR UPDATE` — serialises every writer this class (or a
+     * future Task 8/10 membership mutator) could race against for the SAME
+     * project. See this class's own docblock's LOCKING section for why a
+     * project-row lock (not a flow- or edge-row lock) is both necessary and
+     * sufficient, and for why it is {@see \Tasker\Api\SectionsApiHandler::delete()}'s
+     * own established pattern, not a new one — same single row, so no
+     * conflicting lock order is introduced between the two call sites.
+     *
+     * MUST be called after {@see \PDO::beginTransaction()} and before any
+     * read this call's caller needs to trust (the cycle check in
+     * setInput(); the member SELECT inside {@see self::recomputeFlowOrder()}
+     * in both public methods) — PostgreSQL releases the lock at
+     * COMMIT/ROLLBACK, never sooner, so everything read after this call
+     * returns, for the remainder of the transaction, cannot be
+     * concurrently changed by another transaction taking the same lock.
+     */
+    private function lockProject(int $tenantId, int $projectId): void
+    {
+        $stmt = $this->db->prepare(
+            'SELECT id FROM tasker_projects WHERE id = :project_id AND tenant_id = :tenant_id FOR UPDATE'
+        );
+        $stmt->bindValue(':project_id', $projectId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->execute();
+    }
+
+    /**
      * Re-derives and re-stamps flow_step for every current member of
      * $flowId, from the edges among ITS OWN members only — mirroring
      * {@see \Tasker\Api\FlowsApiHandler::name()}'s own initial-stamp query
@@ -321,14 +418,24 @@ final class TaskEdgesApiHandler
      * by Tasks 7, 8 and 10's own edge/membership mutations — written once
      * here.
      *
-     * Must always run INSIDE a transaction the CALLER already opened: this
-     * method never begins or commits one of its own, so a thrown
-     * {@see FlowCycleException} can still be rolled back alongside whatever
-     * else that transaction wrote (the edge upsert/delete in this class's
-     * own two public methods).
+     * MUST run inside a transaction the CALLER already opened AND ALREADY
+     * HOLDS {@see self::lockProject()}'s lock on this flow's own project
+     * (REVIEW FIX, round 2): the member SELECT below and the stamp UPDATEs
+     * further down are separated by the edge SELECT and the sort, and under
+     * READ COMMITTED a task committed INTO this flow in that window is
+     * absent from $taskIds, never stamped, and nothing detects it — a
+     * duplicated or missing step number with no error. The project lock
+     * closes this by serialising any concurrent membership change against
+     * the SAME project; without it, this method has no equivalent of
+     * {@see \Tasker\Api\FlowsApiHandler::name()}'s own `flow_id IS NULL`
+     * stamp guard for a member arriving mid-window (only for one LEAVING,
+     * via the `rowCount() !== 1` check on the stamp UPDATE below).
      *
-     * A cycle here is NOT expected to be reachable from either of this
-     * class's own two callers: setInput() already ran
+     * A thrown {@see FlowCycleException} can still be rolled back alongside
+     * whatever else the caller's transaction wrote (the edge upsert/delete
+     * in this class's own two public methods) — this method never begins or
+     * commits a transaction of its own. NOT expected to be reachable from
+     * either of this class's own two callers: setInput() already ran
      * {@see self::assertNoCycleAround()} over the strictly larger graph
      * (target's full forward-reachable set, a superset of any one flow's
      * membership) before ever calling this; removeInput() only ever removes

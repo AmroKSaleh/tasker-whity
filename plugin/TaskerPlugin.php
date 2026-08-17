@@ -52,6 +52,23 @@ use Whity\Sdk\PluginRequirementsInterface;
  */
 final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
 {
+    // set_task_input's own expected_type enum (D5a Task 7, REVIEW FIX round
+    // 2). The original constrains this property to exactly these five
+    // values. The first draft of set_task_input declared no enum at all,
+    // reasoning that OriginalContractParityTest cannot see a property
+    // neither side declares an enum for and that a caller-facing superset
+    // is harmless -- true only up to a point: the MCP tool schema this
+    // route derives is what a caller (or an MCP-aware client SDK doing its
+    // own schema validation before ever sending the request) actually
+    // reads, and that surface silently widened from the original's five
+    // values to "any string" with no CHECK constraint backing it. Declaring
+    // the enum here AND enforcing it below (never one without the other --
+    // see TasksApiHandler::VALID_PRIORITIES for the identical precedent
+    // this mirrors) closes the divergence outright rather than merely
+    // recording it: set_task_input now needs no parity-allowlist entry at
+    // all for this property.
+    private const VALID_EXPECTED_TYPES = ['string', 'document', 'code', 'decision', 'other'];
+
     public function getName(): string
     {
         return 'Tasker';
@@ -1444,7 +1461,7 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                                 'type' => 'object',
                                 'description' => 'A quality contract for this input. Must be a JSON OBJECT (not a string or array).',
                             ],
-                            'expected_type' => ['type' => 'string', 'description' => 'Optional coarse type hint for this input.'],
+                            'expected_type' => ['type' => 'string', 'enum' => self::VALID_EXPECTED_TYPES, 'description' => 'Optional coarse type hint for this input.'],
                             'replace' => [
                                 'type' => 'boolean',
                                 'description' => 'If true, replace ALL of task_id\'s other inbound edges with just this one. Default false (upsert only this source\'s edge).',
@@ -4528,12 +4545,19 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
             $contract = $decoded['contract'];
         }
 
+        // REVIEW FIX (round 2): must enforce the SAME enum the route schema
+        // now declares (self::VALID_EXPECTED_TYPES) -- see that constant's
+        // own doc for why declaring one without the other would be worse
+        // than declaring neither.
         $expectedType = null;
         if (array_key_exists('expected_type', $decoded) && $decoded['expected_type'] !== null) {
             if (!is_string($decoded['expected_type'])) {
                 return Response::error('expected_type must be a string', 400);
             }
             $trimmedType = trim($decoded['expected_type']);
+            if ($trimmedType !== '' && !in_array($trimmedType, self::VALID_EXPECTED_TYPES, true)) {
+                return Response::error('expected_type must be one of: ' . implode(', ', self::VALID_EXPECTED_TYPES), 400);
+            }
             $expectedType = $trimmedType !== '' ? $trimmedType : null;
         }
 

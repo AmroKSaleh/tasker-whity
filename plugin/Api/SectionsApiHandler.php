@@ -82,8 +82,15 @@ use Whity\Sdk\Http\Response;
  * therefore takes a genuine SELECT ... FOR UPDATE on the PARENT PROJECT row
  * inside a transaction, which serialises concurrent deletes without locking the
  * siblings themselves. See delete()'s own comment for why that row is the right
- * one to lock. This is the only FOR UPDATE in the plugin, so no other path can
- * take the same locks in a conflicting order.
+ * one to lock.
+ *
+ * NO LONGER THE PLUGIN'S ONLY FOR UPDATE (D5a Task 7, REVIEW FIX round 2):
+ * {@see \Tasker\Api\TaskEdgesApiHandler} takes the SAME lock, on the SAME
+ * row (`tasker_projects`, by id), for the identical reason — a predicate
+ * (there: cycle detection; a flow's membership window) over rows the write
+ * never touches. Both classes lock ONLY that one row, in the SAME order (no
+ * other row is ever locked first), so the two paths cannot deadlock against
+ * each other or introduce a conflicting lock order.
  */
 final class SectionsApiHandler
 {

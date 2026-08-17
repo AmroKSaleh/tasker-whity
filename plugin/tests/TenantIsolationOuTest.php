@@ -7010,6 +7010,74 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame([$b], array_map('intval', $sources));
     }
 
+    /**
+     * REVIEW FIX (round 2): reproduces the exact live bug the review found.
+     * flow = {aa, bb}, aa -> bb, order stamped aa=1/bb=2. `outsider` is a
+     * THIRD task in the SAME project but never joins the flow. Replacing
+     * bb's input with outsider deletes the aa -> bb edge -- an edge
+     * INTERNAL to the flow -- while the OLD gate
+     * (`target.flow_id === source.flow_id`) was false (outsider is
+     * unflowed), so flow_step silently kept describing a removed edge. The
+     * fix gates on target.flow_id ALONE: aa must fall back to sorting
+     * before bb by plain id order once the edge between them is gone.
+     */
+    public function testReplaceAllRestampsTheFlowEvenWhenTheNewSourceIsUnflowed(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'ReplaceFlow', 'RPF');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $aa = $this->makeTaskDirect(7, $projectId, $sectionId, 'aa');
+        $bb = $this->makeTaskDirect(7, $projectId, $sectionId, 'bb');
+        $outsider = $this->makeTaskDirect(7, $projectId, $sectionId, 'outsider');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flows->name(7, null, $projectId, 'ReplaceFlow flow', [$aa, $bb], null, false, 2);
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $bb, $aa, null, null, false)->getStatusCode());
+        self::assertSame(1, (int) $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$aa}")->fetchColumn());
+        self::assertSame(2, (int) $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$bb}")->fetchColumn());
+
+        // outsider is NOT in the flow and never will be -- this is the case
+        // the old gate (target.flow_id === source.flow_id) got wrong.
+        $refused = $edges->setInput(7, null, $bb, $outsider, null, null, true);
+        self::assertSame(200, $refused->getStatusCode());
+
+        $sources = $this->pdo->query("SELECT source_task_id FROM tasker_task_edges WHERE target_task_id = {$bb}")->fetchAll(\PDO::FETCH_COLUMN);
+        self::assertSame([$outsider], array_map('intval', $sources), 'aa -> bb must be gone');
+
+        // aa is now unconstrained within the flow and must sort by plain id
+        // order again -- NOT the stale aa=1/bb=2 the old gate would have
+        // left behind.
+        self::assertSame(1, (int) $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$aa}")->fetchColumn());
+        self::assertSame(2, (int) $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$bb}")->fetchColumn());
+    }
+
+    /**
+     * REVIEW near-miss: re-setting an ALREADY-EXISTING edge (only its
+     * metadata changes) makes assertNoCycleAround() see the same
+     * source->target pair TWICE -- once read back from the database, once
+     * appended as the "candidate". This pins that FlowStepSorter tolerates
+     * the duplicate (in-degree is incremented and decremented the same
+     * number of times) rather than relying on it by luck.
+     */
+    public function testSetInputToleratesReSettingAnAlreadyExistingEdge(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Resettle', 'RST');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $b, $a, null, null, false)->getStatusCode());
+        // Re-set the SAME (source, target) pair, only changing its metadata.
+        $again = $edges->setInput(7, null, $b, $a, 'document', ['rules' => []], false);
+        self::assertSame(200, $again->getStatusCode());
+
+        self::assertSame(1, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn());
+        $data = json_decode($again->getBody(), true)['data'];
+        self::assertSame('document', $data['expectedType']);
+    }
+
     public function testSetInputRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
     {
         $this->makeOu(1, 7, null);
@@ -7219,10 +7287,44 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(422, $plugin->setTaskInput($badContract)->getStatusCode());
 
         $good = $this->hostRequest('POST', '/api/tasker/tasks/input', (string) json_encode([
-            'task_id' => $b, 'source_task_id' => $a, 'expected_type' => 'markdown',
+            'task_id' => $b, 'source_task_id' => $a, 'expected_type' => 'document',
         ]));
         $good->user = (object) ['profile_id' => self::CALLER_ID];
         self::assertSame(200, $plugin->setTaskInput($good)->getStatusCode());
+    }
+
+    /**
+     * REVIEW FIX (round 2): set_task_input's own schema now declares
+     * expected_type's enum (matching the original's five values) AND
+     * enforces it here -- declaring one without the other would let MCP
+     * advertise a constraint the server does not honour, exactly the
+     * "silent surface drift" OriginalContractParityTest exists to catch.
+     */
+    public function testSetTaskInputRouteRejects400ForAnExpectedTypeOutsideTheEnum(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteEnum', 'RTE');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $plugin = new TaskerPlugin();
+
+        $bad = $this->hostRequest('POST', '/api/tasker/tasks/input', (string) json_encode([
+            'task_id' => $b, 'source_task_id' => $a, 'expected_type' => 'markdown',
+        ]));
+        $bad->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->setTaskInput($bad)->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn());
+
+        foreach (['string', 'document', 'code', 'decision', 'other'] as $validType) {
+            $ok = $this->hostRequest('POST', '/api/tasker/tasks/input', (string) json_encode([
+                'task_id' => $b, 'source_task_id' => $a, 'expected_type' => $validType, 'replace' => true,
+            ]));
+            $ok->user = (object) ['profile_id' => self::CALLER_ID];
+            self::assertSame(200, $plugin->setTaskInput($ok)->getStatusCode(), "expected_type '{$validType}' must be accepted");
+        }
     }
 
     /**
