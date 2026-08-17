@@ -34,6 +34,35 @@
                         }
     },
     {
+        "name":  "build_new_flow",
+        "description":  "The interview playbook for building a new flow (task selection, I/O wiring, naming) grounded against a real project. Read-only -- this creates nothing; name_flow does the actual creating.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
+                                                              }
+                                           }
+                        }
+    },
+    {
+        "name":  "clear_task_output",
+        "description":  "Clear a task\u0027s output contract (its definition-of-done rules) -- the delete counterpart of set_task_output. The human blessing goes with it. Nothing else on the task is touched.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31) -- the PRODUCER."
+                                                           }
+                                           },
+                            "required":  [
+                                             "task_id"
+                                         ]
+                        }
+    },
+    {
         "name":  "complete_milestone",
         "description":  "Mark a milestone complete",
         "inputSchema":  {
@@ -66,6 +95,22 @@
                                                "task_id":  {
                                                                "type":  "string",
                                                                "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
+                                           },
+                            "required":  [
+                                             "task_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "confirm_contract",
+        "description":  "Human-bless a task\u0027s OUTPUT contract. Agent-authored contracts are AI-QA\u0027d (QA is performed by AI, not a meat sack) until a human has reviewed and approved the quality bar. Confirmation is non-destructive, but ANY subsequent set_task_output, clear_task_output, set_task_input or remove_task_input touching this task resets it to AI-QA\u0027d.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31) whose output contract a human has approved."
                                                            }
                                            },
                             "required":  [
@@ -247,6 +292,22 @@
                         }
     },
     {
+        "name":  "delete_flow",
+        "description":  "Delete a flow. Its member tasks are NOT deleted -- they return to the board (flow_id cleared) and keep every I/O edge they already had.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "flow_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Flow UUID, id, or short ID (e.g. TDE-F1)."
+                                                           }
+                                           },
+                            "required":  [
+                                             "flow_id"
+                                         ]
+                        }
+    },
+    {
         "name":  "delete_group",
         "description":  "Delete a group (its tasks are un-grouped, not deleted)",
         "inputSchema":  {
@@ -350,6 +411,26 @@
                         }
     },
     {
+        "name":  "derive_output_contract",
+        "description":  "Derive a PRODUCER task\u0027s output contract (definition-of-done) from what its CONSUMERS already demand of it -- the input-edge rules of every task wired to consume its output. Author the consumers\u0027 inputs first, then derive, rather than hand-authoring the producer\u0027s bar twice. Returns the draft plus the ASSUMPTIONS the merge rests on: SURFACE those to the human. Read-only unless apply is true.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "The PRODUCER task whose output contract to derive (UUID or short ID, e.g. TDE-31)."
+                                                           },
+                                               "apply":  {
+                                                             "type":  "boolean",
+                                                             "description":  "If true, persist the derived draft as this task\u0027s output contract (resetting the human blessing, exactly as set_task_output does). Default false -- return the draft + assumptions only, for human review."
+                                                         }
+                                           },
+                            "required":  [
+                                             "task_id"
+                                         ]
+                        }
+    },
+    {
         "name":  "get_board",
         "description":  "Get a project\u0027s full board: sections, groups, tasks, milestones",
         "inputSchema":  {
@@ -359,6 +440,39 @@
                                                                   "type":  "string",
                                                                   "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit to use your default project."
                                                               }
+                                           }
+                        }
+    },
+    {
+        "name":  "get_flow_context",
+        "description":  "Get a flow\u0027s shared context bag (plus its full record: name, members\u0027 step order is on get_flow_order, step_list_open, etc.)",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "flow_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Flow UUID, id, or short ID (e.g. TDE-F1)."
+                                                           }
+                                           },
+                            "required":  [
+                                             "flow_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "get_flow_order",
+        "description":  "A flow\u0027s members in the order they must run (topological, recomputed on every I/O edge change). Address it either by flow_id, or by task_id to get the order of whichever flow that task belongs to. One of the two is required -- there is no default flow.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "flow_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Flow UUID, id, or short ID (e.g. TDE-F1). Takes precedence when task_id is also supplied."
+                                                           },
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Any task in the flow (UUID or short ID, e.g. TDE-31) -- the flow is found from it. Use instead of flow_id."
+                                                           }
                                            }
                         }
     },
@@ -407,13 +521,29 @@
     },
     {
         "name":  "get_task",
-        "description":  "Get a single task, including its milestones",
+        "description":  "Get a single task, including its milestones and its output contract (the definition-of-done rules, and whether a human has blessed them)",
         "inputSchema":  {
                             "type":  "object",
                             "properties":  {
                                                "task_id":  {
                                                                "type":  "string",
                                                                "description":  "Task UUID or short ID (e.g. TDE-31)"
+                                                           }
+                                           },
+                            "required":  [
+                                             "task_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "get_task_connections",
+        "description":  "Both directions of a task\u0027s I/O wiring: BLOCKERS (the producers whose output it consumes) and DEPENDENTS (the consumers that consume its output), each with that edge\u0027s own expected_type and quality contract.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31)."
                                                            }
                                            },
                             "required":  [
@@ -442,6 +572,19 @@
         "description":  "List the tenant\u0027s Environments (organizational units) — alias of core\u0027s OU list",
         "inputSchema":  {
                             "type":  "object"
+                        }
+    },
+    {
+        "name":  "list_flows",
+        "description":  "List flows. project_id is optional: it falls back to your default project, and if you have none set, every flow across your whole OU scope is returned.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix (e.g. TDE), slug, UUID or id. Omit for your default project, or every project in scope if you have none set."
+                                                              }
+                                           }
                         }
     },
     {
@@ -598,6 +741,42 @@
                         }
     },
     {
+        "name":  "name_flow",
+        "description":  "Create a flow: name it, stamp membership on its tasks, and compute their initial topological order from the I/O edges already wired between them. There is no separate create tool -- this call both creates the flow and assigns its members.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "project_id":  {
+                                                                  "type":  "string",
+                                                                  "description":  "Project prefix, slug, UUID or id. Omit to use your default project."
+                                                              },
+                                               "name":  {
+                                                            "type":  "string",
+                                                            "description":  "Human name for the flow (e.g. \"Blog Post Publication Flow\")."
+                                                        },
+                                               "task_ids":  {
+                                                                "type":  "array",
+                                                                "items":  {
+                                                                              "type":  "string"
+                                                                          },
+                                                                "description":  "Every task in the flow (UUIDs or short IDs, e.g. TDE-31). All must already belong to the project."
+                                                            },
+                                               "context":  {
+                                                               "type":  "object",
+                                                               "description":  "Optional shared context for the flow -- background, goals, constraints, or instructions that apply to all tasks in it. Must be a JSON OBJECT (not a string or array) -- see parity-allowlist.php for why this differs from the original."
+                                                           },
+                                               "step_list_open":  {
+                                                                      "type":  "boolean",
+                                                                      "description":  "True when the flow\u0027s full step list is not yet known (research/investigation -- it discovers steps as it goes). Default false."
+                                                                  }
+                                           },
+                            "required":  [
+                                             "name",
+                                             "task_ids"
+                                         ]
+                        }
+    },
+    {
         "name":  "pin_task",
         "description":  "Pin a task",
         "inputSchema":  {
@@ -628,6 +807,43 @@
                                                                  "description":  "Only needed when project_id is omitted AND you have no default project set. Pass true to rank tasks across ALL projects in your scope."
                                                              }
                                            }
+                        }
+    },
+    {
+        "name":  "recompute_flow_steps",
+        "description":  "Repair hatch: re-derive a flow\u0027s step order from its tasks\u0027 I/O edges and re-stamp it. Rarely needed -- set_task_input and remove_task_input already re-stamp the order in the same transaction as the edge write -- so a healthy flow comes back unchanged.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "flow_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Flow UUID, id, or short ID (e.g. TDE-F1). Always required -- there is no default flow to fall back to."
+                                                           }
+                                           },
+                            "required":  [
+                                             "flow_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "remove_task_input",
+        "description":  "Remove the I/O edge feeding task_id (the CONSUMER) from source_task_id (the PRODUCER), and re-stamp the owning flow\u0027s step order in the same transaction. source_task_id is REQUIRED here -- see parity-allowlist.php for why this differs from the original\u0027s \"omit to remove every input edge\" form.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31) -- the CONSUMER."
+                                                           },
+                                               "source_task_id":  {
+                                                                      "type":  "string",
+                                                                      "description":  "The upstream source whose edge to remove."
+                                                                  }
+                                           },
+                            "required":  [
+                                             "task_id",
+                                             "source_task_id"
+                                         ]
                         }
     },
     {
@@ -753,6 +969,67 @@
                         }
     },
     {
+        "name":  "set_task_input",
+        "description":  "Wire an I/O edge: task_id (the CONSUMER) receives source_task_id\u0027s (the PRODUCER) output as input. Upserts on the (source_task_id, task_id) pair, and re-stamps the owning flow\u0027s step order in the same transaction. Refused if it would close a dependency cycle.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31) -- the CONSUMER."
+                                                           },
+                                               "source_task_id":  {
+                                                                      "type":  "string",
+                                                                      "description":  "Upstream task whose output this task consumes (the PRODUCER for this edge)."
+                                                                  },
+                                               "contract":  {
+                                                                "type":  "object",
+                                                                "description":  "A quality contract for this input. Must be a JSON OBJECT (not a string or array)."
+                                                            },
+                                               "expected_type":  {
+                                                                     "type":  "string",
+                                                                     "enum":  [
+                                                                                  "string",
+                                                                                  "document",
+                                                                                  "code",
+                                                                                  "decision",
+                                                                                  "other"
+                                                                              ],
+                                                                     "description":  "Optional coarse type hint for this input."
+                                                                 },
+                                               "replace":  {
+                                                               "type":  "boolean",
+                                                               "description":  "If true, replace ALL of task_id\u0027s other inbound edges with just this one. Default false (upsert only this source\u0027s edge)."
+                                                           }
+                                           },
+                            "required":  [
+                                             "task_id",
+                                             "source_task_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "set_task_output",
+        "description":  "This task\u0027s OUTPUT CONTRACT -- the PRODUCER\u0027s single definition-of-done for the one artifact it produces. Consumers are DERIVED (any task wired to it with set_task_input), so this takes no target. Replaces any existing contract, and RESETS the human blessing: the new rules are AI-QA\u0027d until confirm_contract.",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "task_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Task UUID or short ID (e.g. TDE-31) -- the PRODUCER."
+                                                           },
+                                               "contract":  {
+                                                                "type":  "object",
+                                                                "description":  "A quality contract: an ordered list of rules the artifact must satisfy, e.g. {\"rules\": [{\"label\": \"Cites enough sources\", \"rule\": \"at least 3 primary sources\", \"kind\": \"check\"}]}. Context-free / portable -- describe the SHAPE of acceptable output, never this run\u0027s subject. Must be a NON-EMPTY JSON object."
+                                                            }
+                                           },
+                            "required":  [
+                                             "task_id",
+                                             "contract"
+                                         ]
+                        }
+    },
+    {
         "name":  "tag_ping",
         "description":  "Attach an existing tag to a ping",
         "inputSchema":  {
@@ -845,6 +1122,34 @@
                                            },
                             "required":  [
                                              "task_id"
+                                         ]
+                        }
+    },
+    {
+        "name":  "update_flow_context",
+        "description":  "Merge or replace a flow\u0027s shared context, and/or flip step_list_open",
+        "inputSchema":  {
+                            "type":  "object",
+                            "properties":  {
+                                               "flow_id":  {
+                                                               "type":  "string",
+                                                               "description":  "Flow UUID, id, or short ID (e.g. TDE-F1). Always required -- there is no default flow to fall back to."
+                                                           },
+                                               "context":  {
+                                                               "type":  "object",
+                                                               "description":  "The keys to write. Must be a JSON OBJECT (not a string or array) -- see parity-allowlist.php for why this differs from the original. Merged into the existing context by default (a shallow merge). Omit entirely to leave the context untouched (e.g. when you only want to flip step_list_open). Pass replace: true to discard the existing context wholesale instead."
+                                                           },
+                                               "replace":  {
+                                                               "type":  "boolean",
+                                                               "description":  "When true, context replaces the whole document instead of merging into it. Defaults to false (merge). Ignored (treated as a no-op on context) when context itself is omitted."
+                                                           },
+                                               "step_list_open":  {
+                                                                      "type":  "boolean",
+                                                                      "description":  "True = the full step list is not yet known (research/investigation discovering its next step as it goes). Set false once the extent is known -- changeable either way mid-run. Omit to leave unchanged."
+                                                                  }
+                                           },
+                            "required":  [
+                                             "flow_id"
                                          ]
                         }
     },

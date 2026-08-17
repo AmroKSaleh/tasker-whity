@@ -218,10 +218,11 @@ whity-core derives MCP tools automatically from schema-bearing routes, but
    toggle from `/admin/settings` (General tab).
 
 Once both gates are open, `npm run mcp:tools` mints a short-lived MCP token
-and dumps Tasker's derived tools (`tools/list`, filtered to the plugin's full
-49-tool D1b surface — every `list_pings`/`create_ping`/`tag_ping` plus
-project/section/group/task/milestone/environment/board/discussion tool by
-exact name) as JSON.
+and dumps Tasker's derived tools (`tools/list`, filtered to Tasker's own
+64-tool surface) as JSON. The filter is not hand-maintained: it is derived at
+runtime from the `operationId`s declared in `TaskerPlugin.php`'s
+`getRoutes()`, so a newly added route shows up in the live dump — and
+therefore diffs against the committed snapshot — automatically.
 `npm run mcp:check` compares that live output against the committed
 `docs/mcp-tool-surface.json` snapshot and fails loudly on drift — e.g. if a
 route's `operationId` is renamed without updating the snapshot — with a
@@ -248,10 +249,14 @@ images against the newly checked-out ref — no separate rebuild step needed.
 - `npm run plugin:test` — PHPUnit incl. tenant-isolation conformance
 - `npm run plugin:stan` — PHPStan level 6
 - `npm run app:test` — Vitest over the API client
-- `npm run mcp:check` — derived MCP tool surface matches `docs/mcp-tool-surface.json` (needs a running host)
-- `npm run mcp:check` — covers D1b's full, flattened board tool surface (49 tools: the D1
-  set plus environments, `get_project`/`get_task`, `rank_tasks`, `get_my_attention` and the
-  session/default-project pair), not just Plan A's ping proof
+- `npm run mcp:check` — derived MCP tool surface matches `docs/mcp-tool-surface.json` (needs a running host).
+  Covers Tasker's whole flattened surface (64 tools), not just Plan A's ping proof: D1b's
+  board set (pings, project/section/group/task/milestone, environments, `rank_tasks`,
+  `get_my_attention`, the session/default-project pair) plus D5a's 15 flow and I/O-contract
+  tools (`name_flow`/`list_flows`/`delete_flow`, `get_flow_order`, `recompute_flow_steps`,
+  `get_flow_context`/`update_flow_context`, `build_new_flow`, `set_task_input`/`remove_task_input`,
+  `get_task_connections`, `set_task_output`/`clear_task_output`, `derive_output_contract`,
+  `confirm_contract`)
 - <http://localhost:5174/dev/ping> — full round trip through the dev proxy
 - <http://localhost:8010/dev/ping> — same round trip through Caddy, production topology
 - <http://localhost:3010> — whity's admin UI; one login is shared with the SPA
