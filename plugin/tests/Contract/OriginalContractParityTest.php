@@ -55,7 +55,7 @@ use Whity\Mcp\Tools\ToolDeriver;
  * accumulating dead entries that hide the next regression.
  *
  * NOT COVERED HERE: tools in OUR surface that the original has no tool for at
- * all (13 of our 55 — the ping scaffolding, `get_board`, `pin_task`/`unpin_task`,
+ * all (13 of our 60 — the ping scaffolding, `get_board`, `pin_task`/`unpin_task`,
  * `set_default_project`, the `update_*` siblings of the original's `rename_*`,
  * and the task-discussion pair). Those are additions rather than divergences and
  * this test says nothing about them.
@@ -67,15 +67,23 @@ final class OriginalContractParityTest extends TestCase
      * the gap cannot drift unnoticed in either direction — porting a tool must
      * come with a deliberate edit here, and so must losing one.
      *
-     * 143 tools live on the original; 44 of them exist here; 99 do not.
+     * 143 tools live on the original; 47 of them exist here; 96 do not.
      * D5a Task 5 ported name_flow/list_flows/delete_flow (107 -> 104). D5a
      * Task 6 ported get_flow_context/update_flow_context/build_new_flow
      * (104 -> 101). D5a Task 7 ported set_task_input/remove_task_input
-     * (101 -> 99).
+     * (101 -> 99). D5a Task 8 ported set_task_output/clear_task_output/
+     * confirm_contract (99 -> 96).
      */
-    private const EXPECTED_UNPORTED_COUNT = 99;
+    private const EXPECTED_UNPORTED_COUNT = 96;
 
-    /** The original's full live surface: 131 snapshotted + 12 known live-only names. */
+    /**
+     * The original's full live surface: 143 snapshotted, all with real
+     * schemas, and `liveOnlyToolNames` now EMPTY. (This said "131 snapshotted
+     * + 12 known live-only names" until D5a Task 8 corrected it — the
+     * 131+12 split was retired when the snapshot was re-synced in 5e2289f,
+     * which captured real shapes for all 143. The total it guards was right
+     * either way, which is exactly why the stale split survived.)
+     */
     private const EXPECTED_ORIGINAL_SURFACE_SIZE = 143;
 
     public function testEverySharedToolMatchesTheOriginalsArgumentShape(): void

@@ -120,6 +120,46 @@ use Whity\Sdk\Http\Response;
  * UPDATE window. {@see self::recomputeFlowOrder()} — shared by Tasks 7, 8
  * and 10 — has exactly one contract regardless of caller: always call it
  * inside a transaction that ALREADY holds this project's lock.
+ *
+ * ── D5a Task 8: the producer's own contract, and the blessing ──────────────
+ *
+ * THE BLESSING IS ONE BOOLEAN PER TASK (`tasker_tasks.output_contract_blessed`,
+ * Task 2), and FOUR distinct writes reset it — the spec's own "blast radius"
+ * decision, restated here because it is the whole point of the flag and it is
+ * spread across four call sites:
+ *
+ *   {@see self::setOutput()}   → that task's own blessing
+ *   {@see self::clearOutput()} → that task's own blessing
+ *   {@see self::setInput()}    → BOTH ends of the edge (consumer AND producer)
+ *   {@see self::removeInput()} → BOTH ends of the edge (consumer AND producer)
+ *
+ * All four go through {@see self::unblessEdgeEndpoints()} or the contract
+ * write's own UPDATE, and every one of them binds the boolean with
+ * `PDO::PARAM_BOOL` — an array-`execute()` binds `false` as `''`, which
+ * PostgreSQL's boolean parser rejects outright (the same trap this file's own
+ * test fixtures document for `pinned`).
+ *
+ * THE EDGE-WRITE PAIR IS A DELIBERATE DIVERGENCE, VERIFIED AGAINST THE
+ * ORIGINAL (Task 8's Step 3, and the answer is recorded here so nobody has to
+ * re-derive it): the original's `set_task_input` writes the CONSUMER's own
+ * `tasks.input` JSON column and nothing else, resetting that EDGE's own
+ * `contract.confirmed` flag — never either task's `output.contract.confirmed`.
+ * `remove_task_input` likewise rewrites only the consumer's `input`. So the
+ * original cascades to NEITHER end; we reset BOTH, per the spec: a producer
+ * contract derived from its consumers' demands (Task 9's
+ * `derive_output_contract` is exactly that) is only as valid as the demands it
+ * came from, and a human blessing that silently outlives a change to those
+ * demands is the precise failure the flag exists to prevent. Recorded as
+ * SEMANTIC in `parity-allowlist.php` under both `set_task_input` and
+ * `remove_task_input`, each naming its own behavioural test.
+ *
+ * NONE of the three new methods opens a transaction or takes
+ * {@see self::lockProject()}, and that is deliberate rather than an omission:
+ * each is a SINGLE-ROW `UPDATE tasker_tasks` with no cross-row predicate to
+ * protect, none of them touches `flow_id` or any edge, so none can change a
+ * flow's membership or its internal edge set, and therefore none has any
+ * reason to call {@see self::recomputeFlowOrder()} — whose docblock requires
+ * that lock of every caller.
  */
 final class TaskEdgesApiHandler
 {
@@ -257,6 +297,12 @@ final class TaskEdgesApiHandler
             $upsert->bindValue(':tenant_id_conflict', $tenantId, PDO::PARAM_INT);
             $upsert->execute();
 
+            // D5a Task 8: the edge's rules just changed, so no human blessing
+            // on EITHER end of it still describes rules a human actually saw.
+            // Inside this transaction on purpose -- a rolled-back edge write
+            // must not leave a blessing destroyed behind it.
+            $this->unblessEdgeEndpoints($tenantId, $targetTaskId, $sourceTaskId);
+
             // REVIEW FIX: gated on $targetTaskId's OWN flow_id alone -- see
             // this class's own docblock for why $sourceTaskId's flow_id is
             // irrelevant to whether THIS call could have changed $targetTaskId's
@@ -351,6 +397,12 @@ final class TaskEdgesApiHandler
                 return Response::error('Input edge not found', 404);
             }
 
+            // D5a Task 8, same reasoning as setInput()'s own call: the rules
+            // that governed this handoff are gone, so neither end's blessing
+            // describes anything a human agreed to any more. Placed AFTER the
+            // rowCount() check above, so the 404 path un-blesses nothing.
+            $this->unblessEdgeEndpoints($tenantId, $targetTaskId, $sourceTaskId);
+
             // REVIEW FIX: gated on $targetTaskId's OWN flow_id alone, same
             // predicate as setInput() -- see that method's own docblock for
             // why. The removed edge's source flow_id is irrelevant here too.
@@ -380,6 +432,284 @@ final class TaskEdgesApiHandler
             ['data' => ['targetTaskId' => $targetTaskId, 'sourceTaskId' => $sourceTaskId, 'removed' => true]],
             200
         );
+    }
+
+    /**
+     * POST /api/tasker/tasks/output — replace $taskId's OWN output contract:
+     * the producer's single definition-of-done for the one artifact it
+     * produces. Takes no target, by design — consumers are DERIVED (any task
+     * listing this one as an edge source), never named here.
+     *
+     * A CONTRACT MUST BE A NON-EMPTY JSON OBJECT. That is one check more than
+     * {@see \Tasker\TaskerPlugin::isJsonObject()} performs, and deliberately
+     * so: that helper ACCEPTS `[]`, because `json_decode('{}', true)` and
+     * `json_decode('[]', true)` produce the identical empty PHP array and it
+     * refuses to guess which the caller sent (see its own docblock). An EDGE
+     * contract may legitimately be empty — {@see self::setInput()} stores `[]`
+     * as `'{}'`, since an edge with no rules is still a declared handoff, just
+     * an ungated one. A PRODUCER contract is the payload of its own call:
+     * `set_task_output` with nothing in it says nothing at all, and would
+     * store a `{}` that {@see self::confirmContract()} could then bless as
+     * though a human had agreed a quality bar. Refused with 422 instead.
+     *
+     * WRITING THE CONTRACT RESETS THE BLESSING — unconditionally, in the same
+     * UPDATE, so there is no window in which the new rules are stored under
+     * the old rules' blessing. See this class's own docblock for all four
+     * resets and why the two edge ones diverge from the original.
+     *
+     * $contract is typed `array<array-key, mixed>` and NOT
+     * `array<string, mixed>` like {@see self::setInput()}'s own — deliberately,
+     * and PHPStan is what forced the question: with string keys promised in the
+     * PHPDoc it reported the `array_is_list()` guard below as "will always
+     * evaluate to false", i.e. dead code. It was right about the promise and
+     * wrong about the value. Every caller's contract arrives from
+     * `json_decode($body, true)`, which happily produces a LIST for a JSON
+     * array, so the guard is the only thing standing between such a value and
+     * `output_contract` — and refusing it is this method's own stated job, not
+     * something it may assume its callers already did. Widening the declared
+     * type to what the data really is makes the check honest instead of
+     * silencing it.
+     *
+     * @param array<array-key, mixed> $contract
+     */
+    public function setOutput(int $tenantId, ?int $callerOuId, int $taskId, array $contract): Response
+    {
+        // `array_is_list([])` is TRUE, so this ONE check refuses BOTH shapes a
+        // producer contract must refuse: a genuine JSON array (`[1, 2]` — a
+        // non-empty list), and an empty object/array (`{}` / `[]`, which are
+        // the same value by the time json_decode() has run). Spelt out because
+        // that is easy to misread as covering only the first.
+        if (array_is_list($contract)) {
+            return Response::error('contract must be a non-empty JSON object', 422);
+        }
+
+        if ($this->taskInfo($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $encoded = json_encode($contract);
+        if ($encoded === false) {
+            return Response::error('contract could not be encoded as JSON', 400);
+        }
+
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE tasker_tasks
+                 SET output_contract = :contract::jsonb,
+                     output_contract_blessed = :blessed,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = :id AND tenant_id = :tenant_id'
+            );
+            $stmt->bindValue(':contract', $encoded, PDO::PARAM_STR);
+            $stmt->bindValue(':blessed', false, PDO::PARAM_BOOL);
+            $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->execute();
+        } catch (\Throwable) {
+            return Response::error('Failed to set task output contract', 500);
+        }
+
+        return $this->outputContractResponse($tenantId, $taskId);
+    }
+
+    /**
+     * DELETE /api/tasker/tasks/output — drop $taskId's output contract, and
+     * the blessing with it. The delete counterpart of {@see self::setOutput()};
+     * nothing else on the task is touched (a stored artifact and validation
+     * status are D5b's, and survive by construction — this UPDATE names two
+     * columns).
+     *
+     * "NOTHING TO CLEAR" IS A 404, not a 200 that did nothing: the original
+     * refuses the same call (`"…" has no output contract to clear.`), and this
+     * class's own {@see self::removeInput()} already answers 404 for the
+     * identical "no such thing to remove" shape. Detected from the UPDATE's own
+     * `rowCount()` under an `output_contract IS NOT NULL` predicate rather than
+     * a separate SELECT first, so there is no read-then-write race to lose.
+     *
+     * A BLESSING CAN NEVER OUTLIVE ITS CONTRACT, which is what makes that one
+     * predicate sufficient: every writer of the flag is in this class or is
+     * {@see self::confirmContract()}, which refuses to bless a task with no
+     * contract at all — so `output_contract IS NULL AND output_contract_blessed`
+     * is unreachable, and a row this predicate skips has nothing to reset.
+     */
+    public function clearOutput(int $tenantId, ?int $callerOuId, int $taskId): Response
+    {
+        if ($this->taskInfo($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE tasker_tasks
+                 SET output_contract = NULL,
+                     output_contract_blessed = :blessed,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = :id AND tenant_id = :tenant_id AND output_contract IS NOT NULL'
+            );
+            $stmt->bindValue(':blessed', false, PDO::PARAM_BOOL);
+            $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->execute();
+        } catch (\Throwable) {
+            return Response::error('Failed to clear task output contract', 500);
+        }
+
+        if ($stmt->rowCount() === 0) {
+            return Response::error('Task has no output contract to clear', 404);
+        }
+
+        return $this->outputContractResponse($tenantId, $taskId);
+    }
+
+    /**
+     * POST /api/tasker/tasks/contract/confirm — the human blessing: flip
+     * $taskId's output contract from AI-QA'd to human-blessed. The
+     * highest-trust act on this surface, and the only write in this class that
+     * sets the flag TRUE.
+     *
+     * OUTPUT-ONLY, unlike the original, which also confirms the contract on ONE
+     * INPUT EDGE (`contract_type: "input"`, narrowed by `source_task_id`) and
+     * records WHO confirmed it (`confirmed_by`, default `"human"`). Neither is
+     * implementable in D5a BY SCHEMA rather than by choice: `tasker_task_edges`
+     * has no blessing column (Task 2's columns are exactly id, public_id,
+     * tenant_id, source_task_id, target_task_id, expected_type, contract,
+     * created_at) and `tasker_tasks` has no confirmed_by/confirmed_at. Both are
+     * recorded as genuine capability gaps in `parity-allowlist.php`, and
+     * {@see \Tasker\TaskerPlugin::confirmContract()} REFUSES a
+     * `contract_type` it cannot honour rather than silently blessing the output
+     * contract instead — see that method's own docblock.
+     *
+     * REFUSES A TASK WITH NO CONTRACT (422, mirroring the original's own
+     * `"…" has no output contract to confirm. Set one via set_task_output
+     * first.`). That refusal is what keeps `output_contract_blessed = TRUE`
+     * meaningful: it can only ever describe a contract that exists, which is
+     * the invariant {@see self::clearOutput()}'s single-predicate UPDATE relies
+     * on. 422 rather than 404 deliberately — the task WAS found, and a 404 here
+     * would be indistinguishable from this plugin's out-of-scope answer.
+     *
+     * IDEMPOTENT: confirming an already-blessed contract matches its row and
+     * answers 200 again, since a PostgreSQL UPDATE counts a row it re-writes
+     * with the same value.
+     */
+    public function confirmContract(int $tenantId, ?int $callerOuId, int $taskId): Response
+    {
+        if ($this->taskInfo($tenantId, $callerOuId, $taskId) === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        try {
+            $stmt = $this->db->prepare(
+                'UPDATE tasker_tasks
+                 SET output_contract_blessed = :blessed,
+                     updated_at = CURRENT_TIMESTAMP
+                 WHERE id = :id AND tenant_id = :tenant_id AND output_contract IS NOT NULL'
+            );
+            $stmt->bindValue(':blessed', true, PDO::PARAM_BOOL);
+            $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+            $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+            $stmt->execute();
+        } catch (\Throwable) {
+            return Response::error('Failed to confirm the output contract', 500);
+        }
+
+        if ($stmt->rowCount() === 0) {
+            return Response::error('Task has no output contract to confirm — set one first', 422);
+        }
+
+        return $this->outputContractResponse($tenantId, $taskId);
+    }
+
+    /**
+     * Resets the human blessing on BOTH ends of an edge this class just wrote
+     * or deleted — the consumer ($targetTaskId) and the producer
+     * ($sourceTaskId). See this class's own docblock for why both, and for what
+     * the original does instead.
+     *
+     * MUST be called inside the caller's own transaction (both call sites are
+     * mid-transaction already), so a rolled-back edge write cannot leave a
+     * destroyed blessing behind it.
+     *
+     * Only rows that are ACTUALLY blessed are touched, via
+     * `AND output_contract_blessed = TRUE`. That is not an optimisation: the
+     * UPDATE also bumps `updated_at`, which
+     * {@see \Tasker\Api\AttentionApiHandler}'s own staleness buckets rank on —
+     * so touching every edge endpoint on every edge write, blessed or not,
+     * would silently make ordinary wiring look like fresh activity on tasks
+     * nothing about actually changed.
+     */
+    private function unblessEdgeEndpoints(int $tenantId, int $targetTaskId, int $sourceTaskId): void
+    {
+        $stmt = $this->db->prepare(
+            'UPDATE tasker_tasks
+             SET output_contract_blessed = :blessed, updated_at = CURRENT_TIMESTAMP
+             WHERE tenant_id = :tenant_id
+               AND id IN (:target_task_id, :source_task_id)
+               AND output_contract_blessed = TRUE'
+        );
+        $stmt->bindValue(':blessed', false, PDO::PARAM_BOOL);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':target_task_id', $targetTaskId, PDO::PARAM_INT);
+        $stmt->bindValue(':source_task_id', $sourceTaskId, PDO::PARAM_INT);
+        $stmt->execute();
+    }
+
+    /**
+     * The 200 all three output-contract methods return: the task's contract as
+     * a decoded JSON OBJECT plus its blessing, read back from the row rather
+     * than echoed from the request — the same "read back what was actually
+     * stored" shape {@see self::setInput()} uses via
+     * {@see self::findEdge()}/{@see self::toPublicEdge()}.
+     *
+     * Tenant-scoped only, with no second OU check: every caller has already
+     * passed {@see self::taskInfo()} for this exact
+     * $tenantId/$callerOuId/$taskId triple and nothing has changed since —
+     * {@see \Tasker\Api\FlowsApiHandler::updateContext()}'s own read-back after
+     * its write applies the identical reasoning.
+     */
+    private function outputContractResponse(int $tenantId, int $taskId): Response
+    {
+        $stmt = $this->db->prepare(
+            'SELECT id, public_id, tenant_id, output_contract, output_contract_blessed
+             FROM tasker_tasks
+             WHERE id = :id AND tenant_id = :tenant_id'
+        );
+        $stmt->execute([':id' => $taskId, ':tenant_id' => $tenantId]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($row)) {
+            return Response::error('Task not found', 404);
+        }
+
+        $contract = $row['output_contract'] !== null ? json_decode((string) $row['output_contract'], true) : null;
+
+        return Response::json(['data' => [
+            'taskId' => (int) $row['id'],
+            'publicId' => (string) $row['public_id'],
+            'tenantId' => (int) $row['tenant_id'],
+            'outputContract' => is_array($contract) ? $contract : null,
+            'outputContractBlessed' => self::dbTruthy($row['output_contract_blessed']),
+        ]], 200);
+    }
+
+    /**
+     * Interprets a driver-returned boolean column value. Duplicated per
+     * handler rather than shared — see
+     * {@see \Tasker\Api\TasksApiHandler::dbTruthy()}'s own doc for why. NOT a
+     * `(bool)` cast: pdo_pgsql can return a boolean column as the STRING "f",
+     * and `(bool) 'f'` is `true` in PHP, so a naive cast would report every
+     * unblessed contract as human-blessed — the single worst direction for
+     * this particular flag to be wrong in.
+     */
+    private static function dbTruthy(mixed $value): bool
+    {
+        if (is_bool($value)) {
+            return $value;
+        }
+        if (is_int($value)) {
+            return $value !== 0;
+        }
+        $normalised = strtolower(trim((string) $value));
+
+        return !in_array($normalised, ['', '0', 'f', 'false', 'no'], true);
     }
 
     /**

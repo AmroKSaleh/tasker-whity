@@ -7402,4 +7402,431 @@ final class TenantIsolationOuTest extends TestCase
         $noTask->user = (object) ['profile_id' => self::CALLER_ID];
         self::assertSame(400, $plugin->removeTaskInput($noTask)->getStatusCode());
     }
+
+    // ── D5a Task 8: the producer's own contract, and the human blessing ──────
+    //
+    // FOUR RESETS, NOT TWO. The spec (§2, "Decision on the reset's blast
+    // radius") fixes exactly four: set_task_output and clear_task_output each
+    // reset THEIR OWN task's blessing, and set_task_input and remove_task_input
+    // each reset BOTH ENDS of the edge they touch -- the consumer's and the
+    // producer's. The brief's own Step 1 code covers only two of them
+    // (set_task_output's own, and set_task_input's cascade to the producer), so
+    // testSetInputAlsoUnblessesTheConsumersOwnContract(),
+    // testRemoveInputUnblessesBothEndsOfTheEdgeItRemoves() and
+    // testClearOutputDropsTheContractAndItsBlessing() below supply the missing
+    // three. A reset with no test is a reset that quietly stops happening --
+    // and this flag exists precisely so a human blessing cannot silently
+    // survive a change to the rules it was given for.
+
+    /**
+     * output_contract_blessed, read straight off the row.
+     *
+     * `::int` in the SQL rather than a `(bool)` cast in PHP, matching this
+     * file's own established convention (see
+     * testTasksPinRejectsATaskInASiblingOu()'s own identical cast and comment):
+     * pdo_pgsql can return a boolean column as the STRING "f", and
+     * `(bool) 'f'` is `true` in PHP -- so a naive cast here would report every
+     * unblessed task as blessed and make every assertFalse() below pass for
+     * the wrong reason.
+     */
+    private function blessedFor(int $taskId): bool
+    {
+        $stmt = $this->pdo->prepare('SELECT output_contract_blessed::int FROM tasker_tasks WHERE id = :id');
+        $stmt->execute([':id' => $taskId]);
+
+        return ((int) $stmt->fetchColumn()) === 1;
+    }
+
+    public function testConfirmBlessesAndAnyContractWriteUnblessesAgain(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Bless', 'BLS');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'Has a summary']]]);
+
+        self::assertFalse($this->blessedFor($p), 'an agent-authored contract starts AI-QA d');
+
+        $edges->confirmContract(7, null, $p);
+        self::assertTrue($this->blessedFor($p));
+
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'Changed']]]);
+        self::assertFalse($this->blessedFor($p), 'rewriting the contract must reset the blessing');
+    }
+
+    public function testAConsumerEdgeWriteUnblessesTheProducerToo(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Cascade', 'CAS');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'Derived from consumers']]]);
+        $edges->confirmContract(7, null, $p);
+        self::assertTrue($this->blessedFor($p));
+
+        $edges->setInput(7, null, $c, $p, null, ['rules' => [['label' => 'Stricter demand']]], false);
+
+        self::assertFalse($this->blessedFor($p),
+            'a derived contract is only as valid as the consumer rules it came from');
+    }
+
+    public function testANonObjectContractIsRefused(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'BadShape', 'BAD');
+        $p = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'P');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        self::assertSame(422, $edges->setOutput(7, null, $p, [])->getStatusCode());
+    }
+
+    /**
+     * The half of set_task_input's reset the brief's own
+     * testAConsumerEdgeWriteUnblessesTheProducerToo() leaves untested: the
+     * CONSUMER's blessing goes too. The original resets neither task's output
+     * blessing on an edge write -- it resets the EDGE's own `confirmed` flag,
+     * which has no column in this schema at all -- so this direction is as much
+     * a deliberate divergence as the producer cascade is, and is recorded on
+     * the same allowlist entry (`set_task_input`, severity semantic).
+     */
+    public function testSetInputAlsoUnblessesTheConsumersOwnContract(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'CascadeC', 'CSC');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $c, ['rules' => [['label' => 'The consumer promises something too']]]);
+        $edges->confirmContract(7, null, $c);
+        self::assertTrue($this->blessedFor($c));
+
+        $edges->setInput(7, null, $c, $p, null, null, false);
+
+        self::assertFalse($this->blessedFor($c), 'the consumer\'s own blessing must not survive its input changing');
+    }
+
+    /**
+     * remove_task_input is the fourth reset, and the one furthest from the
+     * original: there, removing an edge deletes the edge (and with it the
+     * edge's own blessing) and leaves BOTH tasks' output blessings standing.
+     * Here it un-blesses both ends, for the same reason set_task_input does --
+     * the rules a blessing was given for have changed.
+     */
+    public function testRemoveInputUnblessesBothEndsOfTheEdgeItRemoves(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'CascadeRm', 'CSR');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $c, $p, null, null, false);
+
+        // Bless BOTH ends only AFTER the edge exists -- wiring it first would
+        // itself have knocked the blessings off, and the assertions below would
+        // then pass without removeInput() having done anything at all.
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'Producer promise']]]);
+        $edges->setOutput(7, null, $c, ['rules' => [['label' => 'Consumer promise']]]);
+        $edges->confirmContract(7, null, $p);
+        $edges->confirmContract(7, null, $c);
+        self::assertTrue($this->blessedFor($p));
+        self::assertTrue($this->blessedFor($c));
+
+        self::assertSame(200, $edges->removeInput(7, null, $c, $p)->getStatusCode());
+
+        self::assertFalse($this->blessedFor($p), 'the producer\'s blessing must not survive losing a consumer');
+        self::assertFalse($this->blessedFor($c), 'the consumer\'s blessing must not survive losing an input');
+    }
+
+    public function testClearOutputDropsTheContractAndItsBlessing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'ClearBless', 'CLB');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $p, ['rules' => [['label' => 'Will be cleared']]]);
+        $edges->confirmContract(7, null, $p);
+        self::assertTrue($this->blessedFor($p));
+
+        self::assertSame(200, $edges->clearOutput(7, null, $p)->getStatusCode());
+
+        self::assertNull($this->pdo->query("SELECT output_contract FROM tasker_tasks WHERE id = {$p}")->fetchColumn());
+        self::assertFalse($this->blessedFor($p), 'clearing the contract must clear its blessing with it');
+    }
+
+    /**
+     * The "nothing to clear" case, refused rather than reported as a success
+     * that did nothing -- matching both the original (which answers
+     * `"…" has no output contract to clear.`) and this handler's own
+     * removeInput(), which 404s the identical "no such thing to remove" shape.
+     */
+    public function testClearOutputReturns404WhenThereIsNoContractToClear(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'NothingToClear', 'NTC');
+        $p = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'P');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        self::assertSame(404, $edges->clearOutput(7, null, $p)->getStatusCode());
+    }
+
+    /**
+     * A blessing must always be a blessing OF something: confirming a task
+     * with no contract is refused, so `output_contract_blessed = TRUE` can
+     * never describe a contract that does not exist. Mirrors the original,
+     * which answers `"…" has no output contract to confirm. Set one via
+     * set_task_output first.`
+     */
+    public function testConfirmContractRefuses422WhenThereIsNoContractToConfirm(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'NothingToBless', 'NTB');
+        $p = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'P');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        self::assertSame(422, $edges->confirmContract(7, null, $p)->getStatusCode());
+        self::assertFalse($this->blessedFor($p), 'a refused confirmation must not bless anything');
+    }
+
+    /**
+     * Global constraint: every OU-boundary test pairs a sibling-OU 404 with a
+     * same-OU positive control -- a 404-only test can pass merely because the
+     * fixture was never visible in the first place.
+     */
+    public function testSetOutputRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibOut', 'SO8');
+        $sibTask = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sib');
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnOut', 'OO8');
+        $ownTask = $this->makeTaskDirect(7, $ownProject, $this->makeSectionDirect(7, $ownProject), 'Own');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $contract = ['rules' => [['label' => 'Anything']]];
+
+        self::assertSame(404, $edges->setOutput(7, 2, $sibTask, $contract)->getStatusCode());
+        self::assertNull(
+            $this->pdo->query("SELECT output_contract FROM tasker_tasks WHERE id = {$sibTask}")->fetchColumn(),
+            'a refused cross-OU write must not have stored anything'
+        );
+        self::assertSame(200, $edges->setOutput(7, 2, $ownTask, $contract)->getStatusCode());
+    }
+
+    public function testClearOutputRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibClr', 'SC8');
+        $sibTask = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sib');
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnClr', 'OC8');
+        $ownTask = $this->makeTaskDirect(7, $ownProject, $this->makeSectionDirect(7, $ownProject), 'Own');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        // BOTH tasks get a real contract first, through an unrestricted caller:
+        // the sibling 404 below must be about SCOPE, not about there being
+        // nothing to clear (which is its own, indistinguishable 404).
+        $edges->setOutput(7, null, $sibTask, ['rules' => [['label' => 'Sibling bar']]]);
+        $edges->setOutput(7, null, $ownTask, ['rules' => [['label' => 'Own bar']]]);
+
+        self::assertSame(404, $edges->clearOutput(7, 2, $sibTask)->getStatusCode());
+        self::assertNotNull(
+            $this->pdo->query("SELECT output_contract FROM tasker_tasks WHERE id = {$sibTask}")->fetchColumn(),
+            'a refused cross-OU clear must have left the contract standing'
+        );
+        self::assertSame(200, $edges->clearOutput(7, 2, $ownTask)->getStatusCode());
+    }
+
+    public function testConfirmContractRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibCnf', 'SF8');
+        $sibTask = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sib');
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnCnf', 'OF8');
+        $ownTask = $this->makeTaskDirect(7, $ownProject, $this->makeSectionDirect(7, $ownProject), 'Own');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        // Same reasoning as the clear test above: both tasks carry a real,
+        // confirmable contract, so the sibling's 404 can only be about scope.
+        $edges->setOutput(7, null, $sibTask, ['rules' => [['label' => 'Sibling bar']]]);
+        $edges->setOutput(7, null, $ownTask, ['rules' => [['label' => 'Own bar']]]);
+
+        self::assertSame(404, $edges->confirmContract(7, 2, $sibTask)->getStatusCode());
+        self::assertFalse($this->blessedFor($sibTask), 'a refused cross-OU confirm must not have blessed anything');
+        self::assertSame(200, $edges->confirmContract(7, 2, $ownTask)->getStatusCode());
+        self::assertTrue($this->blessedFor($ownTask));
+    }
+
+    // ── D5a Task 8: route-level wiring, including the DELETE hazard ──────────
+
+    public function testSetTaskOutputRouteWiresThroughAndRefusesEveryNonObjectContract(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteOut', 'RO8');
+        $taskId = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'T');
+
+        $plugin = new TaskerPlugin();
+
+        // A genuine JSON ARRAY -- caught by isJsonObject() at the route.
+        $list = $this->hostRequest('POST', '/api/tasker/tasks/output', (string) json_encode([
+            'task_id' => $taskId, 'contract' => ['not', 'an', 'object'],
+        ]));
+        $list->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(422, $plugin->setTaskOutput($list)->getStatusCode());
+
+        // An EMPTY object -- isJsonObject() accepts this one (see its own
+        // docblock: `{}` and `[]` are the same value after json_decode), so the
+        // handler's own non-emptiness check is the only thing that refuses it.
+        $empty = $this->hostRequest('POST', '/api/tasker/tasks/output', (string) json_encode([
+            'task_id' => $taskId, 'contract' => new \stdClass(),
+        ]));
+        $empty->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(422, $plugin->setTaskOutput($empty)->getStatusCode());
+
+        // A missing contract is a plain 400 -- the field is required, and this
+        // route never invents one.
+        $absent = $this->hostRequest('POST', '/api/tasker/tasks/output', (string) json_encode(['task_id' => $taskId]));
+        $absent->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->setTaskOutput($absent)->getStatusCode());
+
+        $good = $this->hostRequest('POST', '/api/tasker/tasks/output', (string) json_encode([
+            'task_id' => $taskId,
+            'contract' => ['rules' => [
+                ['label' => 'Cites its sources', 'kind' => 'judgment'],
+                ['label' => 'Is at least 500 words', 'kind' => 'check'],
+            ]],
+        ]));
+        $good->user = (object) ['profile_id' => self::CALLER_ID];
+        $response = $plugin->setTaskOutput($good);
+        self::assertSame(200, $response->getStatusCode());
+
+        // Round-tripped as a real, decoded JSON OBJECT -- not re-echoed from the
+        // request, and not handed back as a JSON string. The RULE ORDER is the
+        // part that matters ("an ordered list of rules the artifact must
+        // satisfy"), and jsonb preserves array order; it normalises only the key
+        // order WITHIN an object, which is why each rule is asserted per key
+        // rather than compared whole (found empirically -- the first draft of
+        // this test compared the rule array identically and failed on
+        // {label, kind} coming back as {kind, label}).
+        $data = json_decode($response->getBody(), true)['data'];
+        self::assertSame(
+            ['Cites its sources', 'Is at least 500 words'],
+            array_column($data['outputContract']['rules'], 'label'),
+            'the stored contract must round-trip as a JSON object with its rule order intact'
+        );
+        self::assertSame(['judgment', 'check'], array_column($data['outputContract']['rules'], 'kind'));
+        self::assertFalse($data['outputContractBlessed']);
+    }
+
+    /**
+     * THE hazard the plan's global constraints call out by name, and the reason
+     * clear_task_output reads its identifier through identifierFromRequest():
+     * core empties a DELETE request's body and flattens every MCP argument into
+     * the query string instead, so a body-only read would 400 on every real
+     * MCP call. Built the way the MCP transport builds it -- empty body,
+     * task_id on the query string.
+     */
+    public function testClearTaskOutputRouteReadsTaskIdFromTheQueryStringLikeARealMcpDeleteCall(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteClr', 'RC8');
+        $taskId = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'T');
+        (new TaskEdgesApiHandler($this->pdo))->setOutput(7, null, $taskId, ['rules' => [['label' => 'Gone soon']]]);
+
+        $plugin = new TaskerPlugin();
+        $request = $this->hostRequest('DELETE', "/api/tasker/tasks/output?task_id={$taskId}", '');
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        self::assertSame(200, $plugin->clearTaskOutput($request)->getStatusCode(), 'a body-only read would wrongly 400 here');
+        self::assertNull($this->pdo->query("SELECT output_contract FROM tasker_tasks WHERE id = {$taskId}")->fetchColumn());
+    }
+
+    /**
+     * confirm_contract is OUTPUT-ONLY here: the original also confirms the
+     * contract on ONE INPUT EDGE (contract_type: "input", narrowed by
+     * source_task_id), and tasker_task_edges has no blessing column at all for
+     * that to write to. An undeclared argument still reaches the handler (core
+     * forwards every tool argument into the request; only `required` is
+     * enforced against the schema), so a caller asking to bless an INPUT
+     * contract must be REFUSED rather than silently given an OUTPUT blessing
+     * instead -- that would be the same wrong-row mutation the milestone
+     * `index` trio was fixed for in D1b Task 12b, and confirming is the
+     * highest-trust act on this surface.
+     */
+    public function testConfirmContractRoute400sOnAContractTypeItCannotHonour(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteCnf', 'RF8');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $p = $this->makeTaskDirect(7, $projectId, $sectionId, 'Producer');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'Consumer');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setOutput(7, null, $c, ['rules' => [['label' => 'Consumer output bar']]]);
+        $edges->setInput(7, null, $c, $p, null, ['rules' => [['label' => 'Gate rule']]], false);
+
+        $plugin = new TaskerPlugin();
+
+        $inputType = $this->hostRequest('POST', '/api/tasker/tasks/contract/confirm', (string) json_encode([
+            'task_id' => $c, 'contract_type' => 'input', 'source_task_id' => $p,
+        ]));
+        $inputType->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->confirmContract($inputType)->getStatusCode());
+        self::assertFalse($this->blessedFor($c), 'the OUTPUT contract must not be blessed by a call about an INPUT one');
+
+        // The original's own default, spelt out explicitly, is honoured.
+        $outputType = $this->hostRequest('POST', '/api/tasker/tasks/contract/confirm', (string) json_encode([
+            'task_id' => $c, 'contract_type' => 'output',
+        ]));
+        $outputType->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(200, $plugin->confirmContract($outputType)->getStatusCode());
+        self::assertTrue($this->blessedFor($c));
+    }
+
+    /**
+     * Global constraint (the mutating-route rule): a mutation never resolves
+     * its own target from a caller default, so an absent task_id is a plain
+     * 400 on all three of this task's routes -- including confirm_contract,
+     * where "confirming a request only means something if the caller also
+     * named what they confirmed" is the rule's own stated rationale.
+     */
+    public function testTheThreeContractRoutes400WhenTaskIdIsAbsent(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+
+        $plugin = new TaskerPlugin();
+
+        $setOutput = $this->hostRequest('POST', '/api/tasker/tasks/output', (string) json_encode([
+            'contract' => ['rules' => [['label' => 'Orphaned']]],
+        ]));
+        $setOutput->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->setTaskOutput($setOutput)->getStatusCode());
+
+        $clearOutput = $this->hostRequest('DELETE', '/api/tasker/tasks/output', '');
+        $clearOutput->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->clearTaskOutput($clearOutput)->getStatusCode());
+
+        $confirm = $this->hostRequest('POST', '/api/tasker/tasks/contract/confirm', (string) json_encode([]));
+        $confirm->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->confirmContract($confirm)->getStatusCode());
+    }
 }

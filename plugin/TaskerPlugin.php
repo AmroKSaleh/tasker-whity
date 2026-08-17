@@ -1504,6 +1504,96 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                     ],
                 ],
             ],
+            // ============ Producer contracts and the blessing (D5a Task 8) ============
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/output',
+                'handler' => [$this, 'setTaskOutput'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'set_task_output',
+                    'summary' => 'This task\'s OUTPUT CONTRACT -- the PRODUCER\'s single definition-of-done for the '
+                        . 'one artifact it produces. Consumers are DERIVED (any task wired to it with set_task_input), '
+                        . 'so this takes no target. Replaces any existing contract, and RESETS the human blessing: '
+                        . 'the new rules are AI-QA\'d until confirm_contract.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id', 'contract'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31) -- the PRODUCER.'],
+                            'contract' => [
+                                'type' => 'object',
+                                'description' => 'A quality contract: an ordered list of rules the artifact must satisfy, e.g. '
+                                    . '{"rules": [{"label": "Cites enough sources", "rule": "at least 3 primary sources", '
+                                    . '"kind": "check"}]}. Context-free / portable -- describe the SHAPE of acceptable output, '
+                                    . 'never this run\'s subject. Must be a NON-EMPTY JSON object.',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The stored contract, with its blessing reset to AI-QA\'d'],
+                        400 => ['description' => 'task_id or contract is missing, or task_id looks like a short id but is malformed'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
+                        422 => ['description' => 'contract is not a non-empty JSON object'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/tasks/output',
+                'handler' => [$this, 'clearTaskOutput'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'clear_task_output',
+                    'summary' => 'Clear a task\'s output contract (its definition-of-done rules) -- the delete '
+                        . 'counterpart of set_task_output. The human blessing goes with it. Nothing else on the task '
+                        . 'is touched.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31) -- the PRODUCER.'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'Cleared'],
+                        400 => ['description' => 'task_id is missing or looks like a short id but is malformed'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope, or it has no output contract to clear'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/contract/confirm',
+                'handler' => [$this, 'confirmContract'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'confirm_contract',
+                    'summary' => 'Human-bless a task\'s OUTPUT contract. Agent-authored contracts are AI-QA\'d (QA is '
+                        . 'performed by AI, not a meat sack) until a human has reviewed and approved the quality bar. '
+                        . 'Confirmation is non-destructive, but ANY subsequent set_task_output, clear_task_output, '
+                        . 'set_task_input or remove_task_input touching this task resets it to AI-QA\'d.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31) whose output contract a human has approved.'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The contract, now human-blessed'],
+                        400 => ['description' => 'task_id is missing, looks like a short id but is malformed, or contract_type names a contract this backend cannot bless'],
+                        404 => ['description' => 'Task not found in the caller\'s tenant or OU scope'],
+                        422 => ['description' => 'The task has no output contract to confirm'],
+                    ],
+                ],
+            ],
             [
                 'method' => 'GET',
                 'path' => '/api/tasker/milestones',
@@ -4636,6 +4726,221 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
         }
 
         return (new TaskEdgesApiHandler($pdo))->removeInput($tenantId, $ou['ouId'], $targetTaskId, $sourceTaskId);
+    }
+
+    /**
+     * POST /api/tasker/tasks/output — the original's set_task_output (D5a Task
+     * 8): the producer's own definition-of-done for the artifact it produces.
+     *
+     * task_id is resolved HERE via the OU-scoped {@see IdentifierResolver}, and
+     * re-checked inside {@see \Tasker\Api\TaskEdgesApiHandler::setOutput()} by
+     * its own taskInfo() — the same defence-in-depth layering
+     * {@see self::setTaskInput()} applies. It never falls back to a caller
+     * default: this plugin's mutating-route rule forbids a mutation from
+     * guessing its own target, so an absent task_id is a plain 400.
+     *
+     * `contract` IS REQUIRED — the original requires it too — and is validated
+     * in TWO places, which is not redundancy but two different questions:
+     * {@see self::isJsonObject()} here answers "is this a JSON object at all?"
+     * (a string, a scalar or a non-empty array is a 422, exactly as on
+     * set_task_input/update_project_context), and setOutput() itself answers
+     * "is it non-EMPTY?" — a question isJsonObject() deliberately cannot answer,
+     * because `{}` and `[]` are indistinguishable after json_decode() (see its
+     * own docblock). An empty producer contract is refused; see setOutput()'s
+     * docblock for why an empty EDGE contract is not.
+     *
+     * @param array<string, string> $params
+     */
+    public function setTaskOutput(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default -- see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        $taskForm = IdentifierResolver::classify($rawTaskId);
+        if ($taskForm === 'empty') {
+            return Response::error('task_id is required', 400);
+        }
+        if ($taskForm === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        if (!array_key_exists('contract', $decoded) || $decoded['contract'] === null) {
+            return Response::error('contract is required', 400);
+        }
+        if (!self::isJsonObject($decoded['contract'])) {
+            return Response::error('contract must be a JSON object', 422);
+        }
+        /** @var array<string, mixed> $contract */
+        $contract = $decoded['contract'];
+
+        return (new TaskEdgesApiHandler($pdo))->setOutput($tenantId, $ou['ouId'], $taskId, $contract);
+    }
+
+    /**
+     * DELETE /api/tasker/tasks/output — the original's clear_task_output (D5a
+     * Task 8).
+     *
+     * MUST read task_id via {@see self::identifierFromRequest()}
+     * (body-then-query), never the body alone — core empties a DELETE request's
+     * body and flattens every MCP argument into the query string instead (see
+     * that method's own docblock, and {@see self::removeTaskInput()}, which
+     * carries the identical hazard). A body-only read here would 400 on every
+     * real MCP call; that exact mistake shipped once in an earlier slice.
+     *
+     * There is deliberately no `json_decode($request->getBody())` guard at the
+     * top of this method the way {@see self::setTaskOutput()} has one: an empty
+     * body is the NORMAL shape for this verb, so refusing it would refuse every
+     * MCP call.
+     *
+     * @param array<string, string> $params
+     */
+    public function clearTaskOutput(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default -- see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        $taskForm = IdentifierResolver::classify($rawTaskId);
+        if ($taskForm === 'empty') {
+            return Response::error('task_id is required', 400);
+        }
+        if ($taskForm === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        return (new TaskEdgesApiHandler($pdo))->clearOutput($tenantId, $ou['ouId'], $taskId);
+    }
+
+    /**
+     * POST /api/tasker/tasks/contract/confirm — the original's confirm_contract
+     * (D5a Task 8), narrowed to the OUTPUT contract.
+     *
+     * task_id is required and never defaulted, and here that rule earns its
+     * keep more than anywhere else on this surface: confirming a request only
+     * means something if the caller also NAMED what they confirmed.
+     *
+     * THE contract_type GUARD IS NOT DECORATION. The original takes
+     * `contract_type: "output" | "input"` (default "output"), and its "input"
+     * branch confirms the contract on ONE INPUT EDGE — a different row and a
+     * different field. `tasker_task_edges` has no blessing column at all (D5a
+     * Task 2's columns are exactly id, public_id, tenant_id, source_task_id,
+     * target_task_id, expected_type, contract, created_at), so that branch is
+     * unimplementable here BY SCHEMA and the property is recorded as a
+     * capability gap in `parity-allowlist.php`.
+     *
+     * But "not declared" does NOT mean "not received": core forwards EVERY tool
+     * argument into the synthesized request (its InputSchemaValidator enforces
+     * `required` only — undeclared arguments are passed through and then ignored
+     * by whatever handler receives them). So without this guard, a caller asking
+     * to bless an INPUT contract would silently get the task's OUTPUT contract
+     * blessed instead — the same wrong-row mutation the milestone `index` trio
+     * was FIXED for in D1b Task 12b rather than waived, and blessing is the
+     * highest-trust act on this surface. It is refused with a 400 naming the
+     * gap. `confirmed_by` needs no such guard: ignoring it loses only the
+     * attribution of a confirmation that did happen, never the identity of what
+     * was confirmed. `source_task_id` needs none either — the original itself
+     * ignores it entirely when contract_type is "output".
+     *
+     * Read body-then-query for the same reason every identifier is: an MCP POST
+     * carries its arguments in the body, a direct HTTP caller may put them on
+     * the query string.
+     *
+     * @param array<string, string> $params
+     */
+    public function confirmContract(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default -- see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        $taskForm = IdentifierResolver::classify($rawTaskId);
+        if ($taskForm === 'empty') {
+            return Response::error('task_id is required', 400);
+        }
+        if ($taskForm === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+        $taskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($taskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        // Fail CLOSED on anything that is not the original's own "output"
+        // default: an absent/empty contract_type means output (as on the
+        // original), and every other value -- "input", a typo, a non-string --
+        // is refused rather than silently treated as output.
+        $decoded = json_decode($request->getBody(), true);
+        $rawContractType = is_array($decoded) && array_key_exists('contract_type', $decoded)
+            ? $decoded['contract_type']
+            : $this->queryParam($request, 'contract_type');
+        if ($rawContractType !== null && $rawContractType !== '' && $rawContractType !== 'output') {
+            return Response::error(
+                'Only contract_type "output" can be confirmed here: a task\'s own output contract carries the '
+                . 'blessing, and an input edge has no blessing to set',
+                400
+            );
+        }
+
+        return (new TaskEdgesApiHandler($pdo))->confirmContract($tenantId, $ou['ouId'], $taskId);
     }
 
     /**

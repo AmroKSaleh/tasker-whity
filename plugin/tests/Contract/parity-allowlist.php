@@ -23,14 +23,18 @@ declare(strict_types=1);
  *               core's InputSchemaValidator only enforces `required`, so
  *               undeclared arguments pass straight through and vanish.
  *   SEMANTIC  — the same call does something DIFFERENT here. These are the
- *               dangerous ones. There are FOUR left: delete_environment
+ *               dangerous ones. There are SIX left: delete_environment
  *               reassigns behind a gate that 409s instead of moving anything,
  *               get_task no longer auto-starts a task, delete_group fails
  *               SAFE (un-groups instead of the destructive delete_tasks:true
- *               the original also offers), and get_ready_work ignores the
+ *               the original also offers), get_ready_work ignores the
  *               original's agent_ready gate entirely (WHOLE-BRANCH REVIEW
  *               I2 — see that entry below for why it carries no
- *               missing/extra property at all). move_task — the collision
+ *               missing/extra property at all), and D5a Task 8 added TWO
+ *               more of that same property-less kind: set_task_input and
+ *               remove_task_input both reset the human contract blessing on
+ *               BOTH ENDS of the edge they touch, where the original resets
+ *               neither task's. move_task — the collision
  *               between the original's cross-project move and D1's
  *               within-project one — was FIXED in D1b Task 12c (a real
  *               port, not a waiver; see TasksApiHandler::moveToProject()),
@@ -79,6 +83,22 @@ declare(strict_types=1);
  * for why: the old shape 400s cleanly rather than silently doing something
  * different, the same reasoning delete_flow's own `required` entry above
  * already carries).
+ * D5a Task 8 ported set_task_output/clear_task_output/confirm_contract (the
+ * producer's own contract and the human blessing) and moved three numbers:
+ * 26 -> 28 entries, 76 -> 79 divergences, 44 -> 47 shared tools, semantic 4
+ * -> 6. (The Task 7 paragraph above says 43 shared tools; that figure was one
+ * short — counted mechanically at this commit, our 60 operationIds intersect
+ * the original's 143 in exactly 47 names, 13 of ours being additions the
+ * original has no tool for at all. The three counts that the build actually
+ * enforces — entries, divergences and semantic — were all correct.)
+ * set_task_output and clear_task_output needed NO entry at all — both
+ * property sets and both required lists match the original byte-for-byte.
+ * confirm_contract is the ONE new shape divergence (3 missing properties, a
+ * genuine capability gap fixed by the schema — see its own entry), and the
+ * blessing CASCADE is the semantic pair: entries on set_task_input (new) and
+ * remove_task_input (its existing entry, which gains severity/dischargedBy),
+ * neither of which waives any additional individual divergence, since both
+ * tools' argument shapes still match the original exactly.
  *
  * D1b Task 12c closed move_task's SEMANTIC entry outright (a real port — see
  * moveTask()/moveToProject() — not a waiver) and opened one new ADDITIVE
@@ -631,13 +651,56 @@ return [
             . 'which the parity test does not flag.',
     ],
 
-    // ── DEFERRED (continued, D5a Task 7) ─────────────────────────────────────
+    // ── D5a Task 7 + Task 8: the edges, and the blessing they invalidate ─────
     //
     // set_task_input/remove_task_input wire and unwire the I/O edges
-    // themselves. set_task_input needs NO entry -- its property set and
-    // required list both match the original exactly. remove_task_input
-    // carries exactly one divergence, and it is a deliberate, stricter
-    // requirement rather than a capability gap silently ignored.
+    // themselves. NEITHER diverges in SHAPE -- both property sets and both
+    // required lists match the original, except remove_task_input's one
+    // deliberate stricter requirement below. What they diverge in is
+    // BEHAVIOUR, and D5a Task 8 is what added it: each of them now resets the
+    // human contract blessing on BOTH ENDS of the edge it touches.
+    //
+    // VERIFIED AGAINST THE ORIGINAL rather than assumed (D5a Task 8's own
+    // Step 3 required it, because the spec chose the cascade on reasoning and
+    // not on evidence). The original's set_task_input writes the CONSUMER's
+    // `tasks.input` JSON column and nothing else — resetting that EDGE's own
+    // `contract.confirmed` flag, since it rewrites the whole edge object —
+    // and never touches either task's `output.contract.confirmed`. Its
+    // remove_task_input likewise rewrites only the consumer's `input`. So the
+    // original cascades to NEITHER end, and the spec's decision is a real
+    // divergence in both directions:
+    //
+    //   - the PRODUCER (source) is un-blessed here, and is not there. A
+    //     producer contract derived from its consumers' demands (which is
+    //     exactly what derive_output_contract builds) is only as valid as the
+    //     demands it came from.
+    //   - the CONSUMER (target) is un-blessed here too, and is not there. The
+    //     original does reset something on this side — the edge's own
+    //     `confirmed` — but tasker_task_edges has NO blessing column (see
+    //     confirm_contract's entry below), so the nearest thing this schema
+    //     can reset is the consumer task's own flag, which is not the same
+    //     field.
+    //
+    // Recorded as SEMANTIC on both tools, in the property-less shape
+    // get_ready_work established above: there is no `missing`/`extra`/
+    // `required` key to hang either on, because neither tool's ARGUMENT SHAPE
+    // moved at all — the divergence is entirely in what an accepted call
+    // DOES, which is the one class of divergence
+    // testEverySharedToolMatchesTheOriginalsArgumentShape() structurally
+    // cannot see, and therefore the one class most worth writing down.
+
+    'set_task_input' => [
+        'severity' => 'semantic',
+        'dischargedBy' => 'testAConsumerEdgeWriteUnblessesTheProducerToo',
+        'reason' => 'SEMANTIC: wiring an input edge resets the human contract blessing (output_contract_blessed) on '
+            . 'BOTH ends of it -- the consumer AND the producer -- where the original resets neither task\'s output '
+            . 'blessing (it rewrites the consumer\'s edge object, resetting that EDGE\'s own `confirmed` flag, a field '
+            . 'this schema has no column for). Deliberate, per the spec\'s blast-radius decision: a producer contract '
+            . 'derived from its consumers\' demands is only as valid as those demands, and a blessing that silently '
+            . 'outlives a change to them is the exact failure the flag exists to prevent. No missing/extra property is '
+            . 'waived -- set_task_input\'s argument shape still matches the original exactly, which is why this entry '
+            . 'has to exist: the property-name diff cannot see a purely behavioural divergence.',
+    ],
 
     'remove_task_input' => [
         // The original treats an ABSENT source_task_id as "remove every
@@ -653,11 +716,92 @@ return [
         // target from a caller default, and "every input edge" is itself
         // such a default -- there is no way to honour the original's absent-
         // source_task_id form without guessing which edges the caller meant.
+        //
+        // ALSO SEMANTIC (D5a Task 8), on top of that `required` divergence and
+        // independent of it: removing an edge un-blesses BOTH of its ends, the
+        // same cascade set_task_input's entry above describes in full. This is
+        // the further of the two from the original, which deletes the edge (and
+        // with it the edge's own blessing) and leaves both tasks' output
+        // blessings standing. severity/dischargedBy are set for the cascade;
+        // the `required` waiver above is NOT semantic and keeps its own
+        // reasoning (an old-shaped call 400s cleanly rather than silently doing
+        // something different).
         'required' => ['source_task_id'],
-        'reason' => 'DEFERRED (deliberate, stricter requirement, not a silent gap): the original treats an absent '
-            . 'source_task_id as "remove every input edge on task_id"; this plugin\'s mutating-route rule forbids a '
-            . 'mutation from resolving its own target from a caller default, and "every edge" is itself such a '
-            . 'default, so source_task_id is required here and an old-shaped call 400s cleanly instead of silently '
-            . 'doing something different. Bulk removal (omit source_task_id) is not implemented.',
+        'severity' => 'semantic',
+        'dischargedBy' => 'testRemoveInputUnblessesBothEndsOfTheEdgeItRemoves',
+        'reason' => 'TWO divergences. (1) DEFERRED (deliberate, stricter requirement, not a silent gap): the original '
+            . 'treats an absent source_task_id as "remove every input edge on task_id"; this plugin\'s mutating-route '
+            . 'rule forbids a mutation from resolving its own target from a caller default, and "every edge" is itself '
+            . 'such a default, so source_task_id is required here and an old-shaped call 400s cleanly instead of '
+            . 'silently doing something different. Bulk removal (omit source_task_id) is not implemented. (2) SEMANTIC '
+            . '(D5a Task 8): removing an edge resets the human contract blessing on BOTH ends of it, where the '
+            . 'original leaves both tasks\' output blessings standing and only discards the edge\'s own confirmed flag '
+            . 'along with the edge -- see set_task_input\'s entry above for the full reasoning and the verification '
+            . 'against the original\'s source.',
+    ],
+
+    // ── D5a Task 8: the producer's contract and the human blessing ───────────
+    //
+    // set_task_output and clear_task_output need NO entry, and that is worth
+    // stating rather than leaving as an absence: set_task_output's properties
+    // (task_id, contract) and required list (task_id, contract) match the
+    // original byte-for-byte, and clear_task_output's (task_id, required
+    // task_id) do too. Our `contract` property declares no nested rule schema
+    // where the original declares a deep one -- this test compares neither
+    // types nor nested shapes (see its own docblock), and set_task_input's own
+    // ported `contract` already set that precedent in Task 7, so there is
+    // nothing here to waive.
+    //
+    // The blessing CASCADE those two tools trigger is not recorded here either:
+    // it belongs to the tools that DO the cascading, set_task_input and
+    // remove_task_input, whose entries are above. set_task_output/
+    // clear_task_output resetting their OWN task's blessing is exactly what the
+    // original does (it overwrites the whole contract object, `confirmed:
+    // false` and all -- see the original's own TDE-818 comment on that line),
+    // so that half of the reset is a faithful port, not a divergence.
+
+    'confirm_contract' => [
+        // DEFERRED, and all three are capability gaps fixed BY SCHEMA rather
+        // than by choice:
+        //  - contract_type: the original blesses either a task's OUTPUT
+        //    contract or the contract on ONE INPUT EDGE ("output" | "input",
+        //    default "output"). tasker_task_edges has NO blessing column at
+        //    all -- D5a Task 2 fixed its columns as exactly id, public_id,
+        //    tenant_id, source_task_id, target_task_id, expected_type,
+        //    contract, created_at -- so there is nothing for the "input"
+        //    branch to write to. Output-only here.
+        //  - source_task_id: only meaningful WITH contract_type: "input" (it
+        //    picks which edge, when a task has several). The original itself
+        //    ignores it entirely for "output", so ignoring it costs nothing
+        //    the "input" gap has not already cost.
+        //  - confirmed_by: who confirmed it, default "human". tasker_tasks has
+        //    no confirmed_by/confirmed_at pair; the blessing is one boolean
+        //    (D5a Task 2). Ignoring it loses the ATTRIBUTION of a confirmation
+        //    that did happen, never the identity of what was confirmed.
+        //
+        // NOT SEMANTIC, and specifically because contract_type is NOT silently
+        // ignored the way an undeclared property normally is. Core forwards
+        // every tool argument into the synthesized request (its
+        // InputSchemaValidator enforces `required` only), so a caller asking to
+        // bless an INPUT contract would otherwise have got the task's OUTPUT
+        // contract blessed instead -- a wrong-row mutation on the
+        // highest-trust act on this surface, and the same failure mode the
+        // milestone `index` trio was FIXED for in D1b Task 12b rather than
+        // waived. TaskerPlugin::confirmContract() therefore 400s any
+        // contract_type that is not "output" (absent/empty still means
+        // "output", exactly as on the original), which keeps this entry a
+        // plain, visible capability gap: the old shape is refused, never
+        // honoured as something else. See
+        // testConfirmContractRoute400sOnAContractTypeItCannotHonour().
+        'missing' => ['contract_type', 'source_task_id', 'confirmed_by'],
+        'reason' => 'DEFERRED, three capability gaps fixed by SCHEMA and not by choice: contract_type\'s "input" '
+            . 'branch blesses the contract on one input EDGE, and tasker_task_edges has no blessing column at all '
+            . '(D5a Task 2 fixed its columns); source_task_id only selects which edge, so it is meaningless without '
+            . 'that branch and the original itself ignores it for "output"; confirmed_by has no confirmed_by/'
+            . 'confirmed_at columns to land in -- the blessing here is one boolean, so attribution is lost, never the '
+            . 'identity of what was confirmed. NOT semantic, deliberately: contract_type is REFUSED with a 400 rather '
+            . 'than silently treated as "output" (core forwards undeclared arguments into the request, so the silent '
+            . 'path was real), because blessing the wrong contract is the wrong-row mutation class the milestone '
+            . 'index trio was fixed for. Absent or empty still means "output", exactly as on the original.',
     ],
 ];
