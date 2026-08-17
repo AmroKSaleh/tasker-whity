@@ -41,7 +41,9 @@ final class FlowBuildPlaybook
         5. Use update_flow_context afterwards for shared background, goals or
            constraints that apply to every task in the flow — merge is the
            default and non-destructive; pass replace: true only to discard
-           the existing context on purpose.
+           the existing context on purpose. An omitted context makes no
+           change at all, even with replace: true — to actually clear it,
+           you must pass context: {} explicitly alongside replace: true.
         TEXT;
     }
 }
