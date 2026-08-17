@@ -1203,7 +1203,12 @@ final class TaskEdgesApiHandler
      * changes — nothing in this plugin moves a flow between projects (see
      * {@see \Tasker\Api\FlowsApiHandler::updateContext()}, the only writer of
      * a flow row after creation, which touches context and step_list_open
-     * only).
+     * only). {@see self::recomputeFlowOrder()} now derives it AGAIN, for itself,
+     * rather than being handed this one — the same reasoning one level down: a
+     * helper whose writes are confined to a project it was TOLD about is only as
+     * confined as its least careful caller, and the duplicated lookup is one
+     * indexed primary-key read inside a transaction that already holds the
+     * lock.
      *
      * A flow that no longer exists re-stamps NOTHING and returns quietly: the
      * only way to get here with one is a delete_flow committing between the
@@ -1211,6 +1216,17 @@ final class TaskEdgesApiHandler
      * cleared every member's flow_step on its way out
      * ({@see \Tasker\Api\FlowsApiHandler::delete()}), so there is genuinely
      * nothing left to repair.
+     *
+     * THE CALLER MUST HAVE OU-CHECKED $flowId FIRST (WHOLE-BRANCH REVIEW FIX).
+     * This method takes no `?int $callerOuId` and neither it nor
+     * {@see self::recomputeFlowOrder()} applies an OU predicate anywhere: the
+     * re-stamp is keyed on (tenant_id, flow_id, project_id), so anyone who can
+     * name a flow id can re-stamp every one of its members. Today's only caller
+     * ({@see \Tasker\Api\FlowsApiHandler::recompute()}) calls flowVisible()
+     * before this, which is what keeps that safe — but that was a property of
+     * one call site rather than a stated precondition, and a second caller
+     * cannot be expected to infer it from a method that never mentions OUs.
+     * It is stated now: OU-CHECK THE FLOW BEFORE CALLING THIS.
      *
      * @throws FlowCycleException when the flow's own members form a cycle —
      *         reachable ONLY through direct, validation-bypassing writes (see
@@ -1241,12 +1257,14 @@ final class TaskEdgesApiHandler
 
     /**
      * The project $flowId belongs to, or null when no such flow exists in
-     * $tenantId — {@see self::restampFlowOrder()}'s lock target.
+     * $tenantId — {@see self::restampFlowOrder()}'s lock target, and (whole-branch
+     * review fix) {@see self::recomputeFlowOrder()}'s own member/stamp SCOPE.
      *
-     * Tenant-scoped only, deliberately: its one caller's own caller has
-     * already OU-checked the flow (FlowsApiHandler::recompute() calls
-     * flowVisible() first), and this lookup exists to name a row to LOCK, not
-     * to decide what the caller may see.
+     * Tenant-scoped only, deliberately: every path that reaches it has already
+     * OU-checked the flow or the task the flow was derived from (see
+     * restampFlowOrder()'s own stated precondition), and this lookup exists to
+     * name a row to LOCK and a project to CONFINE writes to, not to decide what
+     * the caller may see.
      */
     private function projectIdOfFlow(int $tenantId, int $flowId): ?int
     {
@@ -1287,6 +1305,23 @@ final class TaskEdgesApiHandler
      * stamp guard for a member arriving mid-window (only for one LEAVING,
      * via the `rowCount() !== 1` check on the stamp UPDATE below).
      *
+     * EVERY QUERY HERE IS CONFINED TO THE FLOW'S OWN PROJECT (WHOLE-BRANCH
+     * REVIEW FIX, D5a), which is defence in depth on the OU boundary rather
+     * than a behaviour change: both the member SELECT and the stamp UPDATE used
+     * to be keyed on (tenant_id, flow_id) alone — neither project- nor
+     * OU-scoped — so a member living in ANOTHER project, and therefore possibly
+     * another OU, would have been re-stamped by any caller who could name this
+     * flow. {@see \Tasker\Api\TasksApiHandler::moveToProject()} now refuses to
+     * create such a member (it was the one reachable route to one), so on a
+     * healthy database `AND project_id = :project_id` excludes nothing. It is
+     * here for the two ways that premise can still be broken — a direct
+     * database write, and a future membership path written by someone who has
+     * not read moveToProject()'s guard — because the cost of being wrong is a
+     * WRITE outside the caller's OU scope, and the plan treats that boundary as
+     * a hard fail-closed line. A stray member is simply not stamped (its
+     * flow_step goes stale, which recompute_flow_steps can repair once the
+     * membership is fixed) instead of being written to from outside its scope.
+     *
      * A thrown {@see FlowCycleException} can still be rolled back alongside
      * whatever else the caller's transaction wrote (the edge upsert/delete
      * in this class's own two public methods) — this method never begins or
@@ -1305,11 +1340,22 @@ final class TaskEdgesApiHandler
      */
     private function recomputeFlowOrder(int $tenantId, int $flowId): void
     {
+        // The project every query below is confined to -- see this method's own
+        // docblock. A flow that no longer exists has no project and nothing
+        // left to stamp; restampFlowOrder() documents that same quiet return
+        // for its own copy of this lookup.
+        $projectId = $this->projectIdOfFlow($tenantId, $flowId);
+        if ($projectId === null) {
+            return;
+        }
+
         $members = $this->db->prepare(
-            'SELECT id FROM tasker_tasks WHERE tenant_id = :tenant_id AND flow_id = :flow_id'
+            'SELECT id FROM tasker_tasks
+             WHERE tenant_id = :tenant_id AND flow_id = :flow_id AND project_id = :project_id'
         );
         $members->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
         $members->bindValue(':flow_id', $flowId, PDO::PARAM_INT);
+        $members->bindValue(':project_id', $projectId, PDO::PARAM_INT);
         $members->execute();
         /** @var list<int> $taskIds */
         $taskIds = array_map('intval', $members->fetchAll(PDO::FETCH_COLUMN));
@@ -1341,17 +1387,19 @@ final class TaskEdgesApiHandler
         foreach ($sorted['positions'] as $taskId => $step) {
             $stamp = $this->db->prepare(
                 'UPDATE tasker_tasks SET flow_step = :flow_step, updated_at = CURRENT_TIMESTAMP
-                 WHERE id = :id AND tenant_id = :tenant_id AND flow_id = :flow_id'
+                 WHERE id = :id AND tenant_id = :tenant_id AND flow_id = :flow_id AND project_id = :project_id'
             );
             $stamp->bindValue(':flow_step', $step, PDO::PARAM_INT);
             $stamp->bindValue(':id', $taskId, PDO::PARAM_INT);
             $stamp->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
             $stamp->bindValue(':flow_id', $flowId, PDO::PARAM_INT);
+            $stamp->bindValue(':project_id', $projectId, PDO::PARAM_INT);
             $stamp->execute();
 
             if ($stamp->rowCount() !== 1) {
                 throw new \RuntimeException(
-                    "Task {$taskId} could not be re-stamped -- it no longer belongs to flow {$flowId}"
+                    "Task {$taskId} could not be re-stamped -- it no longer belongs to flow {$flowId} "
+                    . "in project {$projectId}"
                 );
             }
         }

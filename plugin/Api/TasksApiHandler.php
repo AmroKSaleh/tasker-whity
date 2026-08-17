@@ -805,11 +805,48 @@ final class TasksApiHandler
      * landedInBacklog (true whenever the Backlog substitute above actually
      * fired, i.e. the caller's own requested section was not used).
      *
-     * Flows and cross-project I/O edges — the original's OTHER documented
-     * move_task side effects (unlinked from any flow, cross-project I/O
-     * edges dropped) — do not exist in this backend at all (D1/D1b never
-     * ported flows), so there is nothing to unlink or drop; the tool
-     * description says so rather than implying either happened.
+     * A FLOW MEMBER IS REFUSED OUTRIGHT (422) — D5a whole-branch review,
+     * CRITICAL. When this method was written flows did not exist in this
+     * backend, so "unlinked from any flow" (the original's own documented
+     * move_task side effect) had nothing to unlink; D5a made flows real and
+     * this UPDATE still names six columns, none of them flow_id/flow_step. The
+     * result was reachable with two ordinary tool calls — name_flow, then
+     * move_task — and broke three things, worsening:
+     *
+     *   1. The flow gained a member outside its own project, contradicting the
+     *      premise {@see \Tasker\Api\TaskEdgesApiHandler}'s docblock states
+     *      ("a flow's members are always its project's tasks") — which is the
+     *      premise its project-row lock's SUFFICIENCY argument rests on.
+     *   2. {@see \Tasker\Api\TaskEdgesApiHandler::setInput()}/removeInput()
+     *      lock the TARGET TASK's project; restampFlowOrder() locks the FLOW's
+     *      project. With one member living elsewhere those are different rows,
+     *      so the two writers stop serialising AT ALL and the member-join race
+     *      recomputeFlowOrder() exists to close silently reopens.
+     *   3. recomputeFlowOrder() is keyed on (tenant_id, flow_id) — neither
+     *      project- nor OU-scoped — so an OU-restricted caller who can see
+     *      flow F could re-stamp flow_step/updated_at on a task in a SIBLING
+     *      OU: a WRITE across the OU boundary the plan treats as a hard
+     *      fail-closed line.
+     *
+     * REFUSAL, not a silent detach-and-re-stamp. It mirrors
+     * {@see \Tasker\Api\FlowsApiHandler::name()}'s own established precedent
+     * for a task that already belongs to another flow — refuse, naming the
+     * flow, and tell the caller to delete_flow first — and it costs ONE guard
+     * and no new lock. Clearing flow_id and re-stamping the flow the task left
+     * would instead need {@see \Tasker\Api\TaskEdgesApiHandler::lockProject()}
+     * on TWO projects plus a lock-ordering rule this slice does not have, and
+     * a deadlock is a worse failure than a 422 the caller can act on.
+     *
+     * CROSS-PROJECT I/O EDGES ARE NOT COVERED BY THIS GUARD, and that is
+     * stated rather than left to be discovered: an UNFLOWED task can carry
+     * edges too, and moving it leaves those edges joining two tasks in
+     * DIFFERENT projects — a state
+     * {@see \Tasker\Api\TaskEdgesApiHandler::setInput()}'s own 422 says cannot
+     * be created through that route (the original drops such edges on move).
+     * Deciding between dropping them and refusing the move as well is a
+     * behavioural choice about a read surface (get_task_connections), not part
+     * of the locking invariant this fix restores, so it is deliberately left
+     * alone here rather than settled in passing.
      *
      * KNOWN, RECORDED, NOT FIXED HERE: a 404 ("Task not found") can still be
      * returned AFTER a fully committed move, if the re-read via
@@ -842,6 +879,22 @@ final class TasksApiHandler
             return Response::error(
                 'task_id is already in the target project; for a same-project move use update_task or move_task_to_group',
                 422
+            );
+        }
+
+        // A FLOW STEP CANNOT LEAVE ITS FLOW'S PROJECT -- see this method's own
+        // docblock for the three invariants a silent move broke. Placed AFTER
+        // both 404s and the same-project 422 so no previously-answered call
+        // changes its answer: an invisible task or target still 404s
+        // indistinguishably, and a same-project no-op still reports itself as
+        // one, whether or not the task happens to be flowed.
+        $flow = $this->flowOfTask($tenantId, $taskId);
+        if ($flow !== null) {
+            return Response::error(
+                'task_id is step ' . ($flow['step'] ?? '?') . ' of flow "' . $flow['name'] . '" and cannot be moved out of '
+                . 'that flow\'s project; delete_flow that flow first (its tasks return to the board), then move the task',
+                422,
+                ['flowId' => $flow['id'], 'flowName' => $flow['name'], 'flowStep' => $flow['step']]
             );
         }
 
@@ -919,6 +972,55 @@ final class TasksApiHandler
         $task['landedInBacklog']   = $sectionId !== $resolvedSectionId;
 
         return Response::json(['data' => $task], 200);
+    }
+
+    /**
+     * The flow $taskId belongs to — its id, name and the task's own step
+     * number — or null when the task is not a flow member at all. The one
+     * input to {@see self::moveToProject()}'s flow refusal, which needs the
+     * NAME (a caller told only "this task is in a flow" cannot find the flow to
+     * delete) as well as the fact.
+     *
+     * ONE query rather than reading flow_id off the row {@see self::findVisible()}
+     * already fetched and then looking the name up separately: findVisible()
+     * feeds seven callers and getOne()'s public payload, and widening its
+     * SELECT for one guard's benefit is how a shared read grows columns nobody
+     * can account for. This is also the only place in this class that touches
+     * tasker_flows at all.
+     *
+     * TENANT-SCOPED ONLY, deliberately, and safe here for the same reason
+     * {@see \Tasker\Api\TaskEdgesApiHandler::projectIdOfFlow()} is: the caller
+     * has ALREADY passed findVisible() on this exact task, and a flow's members
+     * are always its own project's tasks — the very invariant the refusal this
+     * feeds exists to keep true — so the flow is in the caller's scope whenever
+     * the task is. It answers "is this task locked into a flow", never "may the
+     * caller see this flow".
+     *
+     * @return array{id: int, name: string, step: int|null}|null
+     */
+    private function flowOfTask(int $tenantId, int $taskId): ?array
+    {
+        $stmt = $this->db->prepare(
+            'SELECT f.id, f.name, t.flow_step
+             FROM tasker_tasks t
+             JOIN tasker_flows f ON f.id = t.flow_id AND f.tenant_id = :tenant_id_f
+             WHERE t.id = :id AND t.tenant_id = :tenant_id'
+        );
+        $stmt->bindValue(':id', $taskId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id', $tenantId, PDO::PARAM_INT);
+        $stmt->bindValue(':tenant_id_f', $tenantId, PDO::PARAM_INT);
+        $stmt->execute();
+
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($row)) {
+            return null;
+        }
+
+        return [
+            'id' => (int) $row['id'],
+            'name' => (string) $row['name'],
+            'step' => $row['flow_step'] !== null ? (int) $row['flow_step'] : null,
+        ];
     }
 
     /**

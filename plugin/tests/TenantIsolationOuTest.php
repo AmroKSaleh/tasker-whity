@@ -2429,6 +2429,77 @@ final class TenantIsolationOuTest extends TestCase
         self::assertSame(9, (int) $row['short_id'], 'a failed move must leave the task with its ORIGINAL short_id');
     }
 
+    /**
+     * WHOLE-BRANCH REVIEW FIX (D5a, CRITICAL): move_task used to move a FLOW
+     * MEMBER out of its flow's project and leave `flow_id`/`flow_step`
+     * pointing at the flow it just left — reachable with two ordinary tool
+     * calls (name_flow, then move_task), no concurrency and no direct database
+     * write. That state breaks the premise the whole slice's locking argument
+     * rests on ("a flow's members are always its project's tasks", see
+     * TaskEdgesApiHandler's own docblock): setInput()/removeInput() lock the
+     * TARGET TASK's project while restampFlowOrder() locks the FLOW's project,
+     * so once one member lives elsewhere the two writers lock different rows
+     * and stop serialising against each other at all. Worse, it puts a
+     * cross-OU write within reach: recomputeFlowOrder()'s member SELECT and
+     * stamp UPDATE are keyed on (tenant_id, flow_id), so an OU-restricted
+     * caller who can see flow F could re-stamp a task in a SIBLING OU.
+     *
+     * Refused outright, mirroring FlowsApiHandler::name()'s own established
+     * "refuse rather than silently steal" precedent for a task that already
+     * belongs to another flow. The alternative — clearing flow_id and
+     * re-stamping the old flow — needs lockProject() on TWO projects plus a
+     * lock-ordering rule this slice does not have.
+     *
+     * THE POSITIVE CONTROL IS PART OF THIS TEST, not a separate one: a guard
+     * that refused EVERY move would satisfy the 422 half perfectly, so an
+     * unflowed task in the same fixture has to still move.
+     */
+    public function testMoveToProjectRefusesAFlowMemberAndStillMovesAnUnflowedTask(): void
+    {
+        $sourceProjectId = $this->makeProjectDirect(7, null, 'Flow Locked Source', 'FLS');
+        $sourceSectionId = $this->makeSectionDirect(7, $sourceProjectId);
+        $targetProjectId = $this->makeProjectDirect(7, null, 'Flow Locked Target', 'FLT');
+        $this->makeSectionDirect(7, $targetProjectId);
+
+        $step     = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'A flow step');
+        $unflowed = $this->makeTaskDirect(7, $sourceProjectId, $sourceSectionId, 'Loose board work');
+
+        $flows  = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode(
+            $flows->name(7, null, $sourceProjectId, 'Cannot be raided', [$step], null, false, 2)->getBody(),
+            true
+        )['data']['id'];
+
+        $handler = new TasksApiHandler($this->pdo);
+        $refused = $handler->moveToProject(7, null, $step, $targetProjectId, null);
+
+        self::assertSame(422, $refused->getStatusCode(), 'a flow member may not be moved out of its flow\'s project');
+        $body = (string) $refused->getBody();
+        self::assertStringContainsString('Cannot be raided', $body, 'the refusal must NAME the flow, so the caller knows what to delete');
+        self::assertStringContainsString('delete_flow', $body, 'and must say how to proceed');
+
+        // NOTHING moved and NOTHING was detached: the task is still in its own
+        // project, still a member of the flow, still carrying its step number.
+        $row = $this->pdo
+            ->query("SELECT project_id, flow_id, flow_step FROM tasker_tasks WHERE id = {$step}")
+            ->fetch(PDO::FETCH_ASSOC);
+        self::assertSame($sourceProjectId, (int) $row['project_id'], 'a refused move must leave the task in its ORIGINAL project');
+        self::assertSame($flowId, (int) $row['flow_id'], 'a refused move must leave the task in its flow');
+        self::assertSame(1, (int) $row['flow_step'], 'a refused move must leave its step number intact');
+
+        // POSITIVE CONTROL: the guard is about flow membership, not about
+        // move_task. An unflowed task in the very same project still moves.
+        self::assertSame(
+            200,
+            $handler->moveToProject(7, null, $unflowed, $targetProjectId, null)->getStatusCode(),
+            'an UNFLOWED task must still move -- otherwise the guard above proves nothing'
+        );
+        self::assertSame(
+            $targetProjectId,
+            (int) $this->pdo->query("SELECT project_id FROM tasker_tasks WHERE id = {$unflowed}")->fetchColumn()
+        );
+    }
+
     // ==================== TaskerPlugin::moveTask() route (D1b Task 12c) ====================
     //
     // Full ROUTE-level dispatch (via registerOusContainer(), same as the
