@@ -15,6 +15,7 @@ use Tasker\Api\MilestonesApiHandler;
 use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
+use Tasker\Api\TaskEdgesApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Migrations\AddTaskerProjectPrefixUnique;
 use Tasker\Migrations\AddTaskerTaskFlowAndContractColumns;
@@ -6887,5 +6888,383 @@ final class TenantIsolationOuTest extends TestCase
         $request->user = (object) ['profile_id' => self::CALLER_ID];
 
         self::assertSame(404, $plugin->buildNewFlow($request)->getStatusCode());
+    }
+
+    // ── D5a Task 7: set_task_input / remove_task_input ───────────────────────
+    //
+    // The brief's own Step 1 test code (verbatim below, through
+    // testSetInputRejects404ForASiblingOusTaskAndSucceedsInItsOwn) covers
+    // setInput() only. Two gaps found while implementing this task, both
+    // supplied here rather than worked around silently (see the task-7-report
+    // for the full writeup):
+    //
+    //  1. The brief's own requirement #1 says the fully-unflowed skip-restamp
+    //     path "is the case most likely to be missed... test that path
+    //     explicitly" -- but no test in the brief's Step 1 code actually
+    //     asserts flow_step stays untouched when neither task is in a flow.
+    //     testSetInputAllowsAnEdgeBetweenTwoUnflowedTasksAndStampsNothing()
+    //     below is that missing test.
+    //  2. remove_task_input has NO test at all in the brief's Step 1 code,
+    //     despite the brief's own requirement #4 calling its DELETE-body-
+    //     emptying hazard out by name as "the case most likely to be missed"
+    //     for THIS route and citing a real shipped bug from the previous
+    //     slice. Everything from testRemoveInputDeletesTheEdgeAndRestampsFlowOrder
+    //     onward supplies that missing coverage.
+
+    public function testSetInputUpsertsTheEdgeAndRestampsFlowOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Wire', 'WIR');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flowId = (int) json_decode($flows->name(7, null, $projectId, 'Wired', [$a, $b], null, false, 2)->getBody(), true)['data']['id'];
+
+        // Independent at creation: order is by task id.
+        self::assertSame(1, (int) $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$a}")->fetchColumn());
+
+        // Now make B depend on A -- order must be re-stamped WITHOUT calling recompute_flow_steps.
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $b, $a, 'markdown', ['rules' => [['label' => 'Non-empty']]], false)->getStatusCode());
+
+        self::assertSame(1, (int) $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$a}")->fetchColumn());
+        self::assertSame(2, (int) $this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$b}")->fetchColumn());
+    }
+
+    public function testSetInputRefusesAnEdgeThatWouldCloseACycle(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Loopy', 'LOO');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $b, $a, null, null, false);
+
+        $refused = $edges->setInput(7, null, $a, $b, null, null, false);
+        self::assertSame(422, $refused->getStatusCode());
+        self::assertStringContainsString('cycle', strtolower((string) $refused->getBody()));
+
+        self::assertSame(1, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn(),
+            'a refused edge must not be written');
+    }
+
+    public function testSetInputRefusesACrossProjectEdge(): void
+    {
+        $mine  = $this->makeProjectDirect(7, null, 'Here', 'HER');
+        $other = $this->makeProjectDirect(7, null, 'There', 'THE');
+        $a = $this->makeTaskDirect(7, $mine,  $this->makeSectionDirect(7, $mine),  'A');
+        $b = $this->makeTaskDirect(7, $other, $this->makeSectionDirect(7, $other), 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        self::assertSame(422, $edges->setInput(7, null, $b, $a, null, null, false)->getStatusCode());
+    }
+
+    public function testReplaceAllDropsTheOtherInboundEdges(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Replace', 'RPL');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'C');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $c, $a, null, null, false);
+        $edges->setInput(7, null, $c, $b, null, null, true);   // replace_all
+
+        $sources = $this->pdo->query("SELECT source_task_id FROM tasker_task_edges WHERE target_task_id = {$c}")->fetchAll(\PDO::FETCH_COLUMN);
+        self::assertSame([$b], array_map('intval', $sources));
+    }
+
+    public function testSetInputRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'Sib', 'SB3');
+        $sibTask    = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'Sib');
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'Own', 'OW3');
+        $ownSection = $this->makeSectionDirect(7, $ownProject);
+        $p = $this->makeTaskDirect(7, $ownProject, $ownSection, 'P');
+        $q = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Q');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        self::assertSame(404, $edges->setInput(7, 2, $sibTask, $p, null, null, false)->getStatusCode());
+        self::assertSame(200, $edges->setInput(7, 2, $q, $p, null, null, false)->getStatusCode());
+    }
+
+    /**
+     * GAP FOUND IN THE BRIEF (requirement #1's own words: "Edges are legal
+     * between tasks that are in NO flow... Test that path explicitly; it is
+     * the case most likely to be missed") -- yet nothing in the brief's own
+     * Step 1 test code actually asserts flow_step is left alone when neither
+     * endpoint is in a flow. Both A and B here are created with no name_flow
+     * call at all, so flow_id is NULL on both; the edge must still succeed,
+     * and neither task may acquire a flow_step from thin air.
+     */
+    public function testSetInputAllowsAnEdgeBetweenTwoUnflowedTasksAndStampsNothing(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Unflowed', 'UNF');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $b, $a, null, null, false)->getStatusCode());
+
+        self::assertSame(1, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn());
+        self::assertNull($this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$a}")->fetchColumn());
+        self::assertNull($this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$b}")->fetchColumn());
+        self::assertNull($this->pdo->query("SELECT flow_id FROM tasker_tasks WHERE id = {$a}")->fetchColumn());
+        self::assertNull($this->pdo->query("SELECT flow_id FROM tasker_tasks WHERE id = {$b}")->fetchColumn());
+    }
+
+    public function testSetInputRejects422WhenTaskIdAndSourceTaskIdAreTheSame(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Self', 'SLF');
+        $a = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'A');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        $refused = $edges->setInput(7, null, $a, $a, null, null, false);
+        self::assertSame(422, $refused->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn());
+    }
+
+    /**
+     * Proves the cycle check is a GENUINE graph-reachability test, not a
+     * narrow "is there already a direct reverse edge" shortcut: A -> B -> C
+     * exist (none of the three ever joined a flow), and closing the loop
+     * with C -> A must still be refused, even though C and A are not
+     * directly connected today. See TaskEdgesApiHandler::assertNoCycleAround()'s
+     * own docblock for why this has to hold regardless of flow membership.
+     */
+    public function testSetInputRefusesAnIndirectCycleAcrossThreeUnflowedTasks(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Chain', 'CHN');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'C');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $b, $a, null, null, false)->getStatusCode()); // A -> B
+        self::assertSame(200, $edges->setInput(7, null, $c, $b, null, null, false)->getStatusCode()); // B -> C
+
+        $refused = $edges->setInput(7, null, $a, $c, null, null, false); // C -> A closes the loop
+        self::assertSame(422, $refused->getStatusCode());
+        self::assertStringContainsString('cycle', strtolower((string) $refused->getBody()));
+        self::assertSame(2, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn(),
+            'the refused third edge must not be written');
+    }
+
+    // ── remove_task_input: entirely missing from the brief's own Step 1 ──────
+
+    public function testRemoveInputDeletesTheEdgeAndRestampsFlowOrder(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'Unwire', 'UNW');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        $c = $this->makeTaskDirect(7, $projectId, $sectionId, 'C');
+
+        $flows = new FlowsApiHandler($this->pdo);
+        $flows->name(7, null, $projectId, 'Unwired', [$a, $b, $c], null, false, 2);
+        // Independent at creation: id order.
+        self::assertSame([1, 2, 3], $this->flowSteps($a, $b, $c));
+
+        // C -> A (the highest-id task feeds the lowest): order must flip to
+        // put A last, WITHOUT calling recompute_flow_steps.
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        self::assertSame(200, $edges->setInput(7, null, $a, $c, null, null, false)->getStatusCode());
+        self::assertSame([3, 1, 2], $this->flowSteps($a, $b, $c), 'A must now sort AFTER C');
+
+        // Removing that edge must re-stamp back to plain id order, again
+        // WITHOUT calling recompute_flow_steps.
+        self::assertSame(200, $edges->removeInput(7, null, $a, $c)->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn());
+        self::assertSame([1, 2, 3], $this->flowSteps($a, $b, $c), 'removing the edge must revert the order');
+    }
+
+    /** @return list<int> flow_step for $a, $b, $c, in that order */
+    private function flowSteps(int $a, int $b, int $c): array
+    {
+        $stmt = $this->pdo->prepare(
+            'SELECT id, flow_step FROM tasker_tasks WHERE id IN (:a, :b, :c)'
+        );
+        $stmt->execute([':a' => $a, ':b' => $b, ':c' => $c]);
+        /** @var array<int, int> $byId */
+        $byId = [];
+        foreach ($stmt->fetchAll(PDO::FETCH_ASSOC) as $row) {
+            $byId[(int) $row['id']] = (int) $row['flow_step'];
+        }
+
+        return [$byId[$a], $byId[$b], $byId[$c]];
+    }
+
+    /**
+     * The remove-side counterpart of testSetInputAllowsAnEdgeBetweenTwoUnflowedTasksAndStampsNothing():
+     * removing an edge between two tasks that were never in any flow must
+     * succeed and touch no flow_step at all -- there is no flow to re-stamp.
+     */
+    public function testRemoveInputSkipsRestampWhenTasksAreUnflowed(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'UnwireLoose', 'UWL');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, null, $b, $a, null, null, false);
+
+        self::assertSame(200, $edges->removeInput(7, null, $b, $a)->getStatusCode());
+        self::assertSame(0, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn());
+        self::assertNull($this->pdo->query("SELECT flow_step FROM tasker_tasks WHERE id = {$b}")->fetchColumn());
+    }
+
+    public function testRemoveInputReturns404WhenNoSuchEdgeExists(): void
+    {
+        $projectId = $this->makeProjectDirect(7, null, 'NoEdge', 'NED');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $edges = new TaskEdgesApiHandler($this->pdo);
+
+        self::assertSame(404, $edges->removeInput(7, null, $b, $a)->getStatusCode());
+    }
+
+    /**
+     * Global constraint: every OU-boundary test pairs a sibling-OU 404 with a
+     * same-OU positive control.
+     */
+    public function testRemoveInputRejects404ForASiblingOusTaskAndSucceedsInItsOwn(): void
+    {
+        $this->makeOu(1, 7, null);
+        $this->makeOu(2, 7, 1);
+        $this->makeOu(3, 7, 1);
+
+        $sibProject = $this->makeProjectDirect(7, 3, 'SibRm', 'SRM');
+        $sibA = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'SibA');
+        $sibB = $this->makeTaskDirect(7, $sibProject, $this->makeSectionDirect(7, $sibProject), 'SibB');
+
+        $ownProject = $this->makeProjectDirect(7, 2, 'OwnRm', 'ORM');
+        $ownSection = $this->makeSectionDirect(7, $ownProject);
+        $p = $this->makeTaskDirect(7, $ownProject, $ownSection, 'P');
+        $q = $this->makeTaskDirect(7, $ownProject, $ownSection, 'Q');
+        $edges = new TaskEdgesApiHandler($this->pdo);
+        $edges->setInput(7, 2, $q, $p, null, null, false);
+
+        // taskVisible() 404s before ever consulting tasker_task_edges, so
+        // this must 404 regardless of whether an edge exists between them.
+        self::assertSame(404, $edges->removeInput(7, 2, $sibB, $sibA)->getStatusCode());
+        self::assertSame(200, $edges->removeInput(7, 2, $q, $p)->getStatusCode());
+    }
+
+    // ── D5a Task 7: route-level wiring, including the DELETE hazard ──────────
+
+    public function testSetTaskInputRouteWiresThroughAndRejectsANonObjectContract(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteWire', 'RTW');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+
+        $plugin = new TaskerPlugin();
+
+        $badContract = $this->hostRequest('POST', '/api/tasker/tasks/input', (string) json_encode([
+            'task_id' => $b, 'source_task_id' => $a, 'contract' => ['not', 'an', 'object'],
+        ]));
+        $badContract->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(422, $plugin->setTaskInput($badContract)->getStatusCode());
+
+        $good = $this->hostRequest('POST', '/api/tasker/tasks/input', (string) json_encode([
+            'task_id' => $b, 'source_task_id' => $a, 'expected_type' => 'markdown',
+        ]));
+        $good->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(200, $plugin->setTaskInput($good)->getStatusCode());
+    }
+
+    /**
+     * Global constraint (mutating-route rule): task_id and source_task_id
+     * must both be NAMED, never a fallback -- 400 on an absent one.
+     */
+    public function testSetTaskInputRoute400sWhenEitherIdentifierIsAbsent(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        // A REAL task_id, so the noSource case below fails on source_task_id's
+        // own absence rather than task_id resolving to a 404 first.
+        $projectId = $this->makeProjectDirect(7, null, 'RouteAbsent', 'RAB');
+        $taskId = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'T');
+
+        $plugin = new TaskerPlugin();
+
+        $noTask = $this->hostRequest('POST', '/api/tasker/tasks/input', (string) json_encode(['source_task_id' => $taskId]));
+        $noTask->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->setTaskInput($noTask)->getStatusCode());
+
+        $noSource = $this->hostRequest('POST', '/api/tasker/tasks/input', (string) json_encode(['task_id' => $taskId]));
+        $noSource->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->setTaskInput($noSource)->getStatusCode());
+    }
+
+    /**
+     * THE hazard the brief's own requirement #4 calls out by name: core
+     * empties a DELETE request's body and flattens every MCP argument into
+     * the query string instead. remove_task_input MUST read task_id AND
+     * source_task_id via identifierFromRequest() (body-then-query) -- a
+     * body-only read 400s on every real MCP call, which is exactly the
+     * mistake the brief says shipped once before and was only caught by
+     * smoke-testing the real transport. This test builds the request the
+     * SAME way the MCP transport does: an EMPTY body, both identifiers on
+     * the query string instead.
+     */
+    public function testRemoveTaskInputRouteReadsBothIdentifiersFromTheQueryStringLikeARealMcpDeleteCall(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        $projectId = $this->makeProjectDirect(7, null, 'RouteUnwire', 'RTU');
+        $sectionId = $this->makeSectionDirect(7, $projectId);
+        $a = $this->makeTaskDirect(7, $projectId, $sectionId, 'A');
+        $b = $this->makeTaskDirect(7, $projectId, $sectionId, 'B');
+        (new TaskEdgesApiHandler($this->pdo))->setInput(7, null, $b, $a, null, null, false);
+
+        $plugin = new TaskerPlugin();
+        // Empty body, exactly like a real MCP DELETE call -- both identifiers
+        // arrive only in the query string.
+        $request = $this->hostRequest('DELETE', "/api/tasker/tasks/input?task_id={$b}&source_task_id={$a}", '');
+        $request->user = (object) ['profile_id' => self::CALLER_ID];
+
+        $response = $plugin->removeTaskInput($request);
+        self::assertSame(200, $response->getStatusCode(), 'a body-only read would wrongly 400 here');
+        self::assertSame(0, (int) $this->pdo->query('SELECT COUNT(*) FROM tasker_task_edges')->fetchColumn());
+    }
+
+    public function testRemoveTaskInputRoute400sWhenEitherIdentifierIsAbsent(): void
+    {
+        $this->registerOusContainer();
+        $this->makeMembership(self::CALLER_ID, 7, null);
+        // A REAL task_id, so the noSource case below fails on source_task_id's
+        // own absence rather than task_id resolving to a 404 first.
+        $projectId = $this->makeProjectDirect(7, null, 'RouteAbsentRm', 'RBR');
+        $taskId = $this->makeTaskDirect(7, $projectId, $this->makeSectionDirect(7, $projectId), 'T');
+
+        $plugin = new TaskerPlugin();
+
+        $noSource = $this->hostRequest('DELETE', "/api/tasker/tasks/input?task_id={$taskId}", '');
+        $noSource->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->removeTaskInput($noSource)->getStatusCode());
+
+        $noTask = $this->hostRequest('DELETE', "/api/tasker/tasks/input?source_task_id={$taskId}", '');
+        $noTask->user = (object) ['profile_id' => self::CALLER_ID];
+        self::assertSame(400, $plugin->removeTaskInput($noTask)->getStatusCode());
     }
 }

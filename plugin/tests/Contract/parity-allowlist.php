@@ -65,6 +65,20 @@ declare(strict_types=1);
  * missing + 2 extra + 1 required for update_flow_context, 2 missing for
  * build_new_flow) — 22 -> 25 entries, 64 -> 75 divergences, 39 -> 42 shared
  * tools, semantic count unchanged at 4 (none of the three are semantic).
+ * D5a Task 7 ported set_task_input/remove_task_input (the I/O edges
+ * themselves) and added exactly ONE new entry, for remove_task_input's own
+ * `required` divergence: source_task_id is optional on the original (its
+ * absence means "remove every input edge") but REQUIRED here, since this
+ * plugin's mutating-route rule forbids a mutation from ever resolving its
+ * own target from a caller default and "every edge" is itself such a
+ * default. set_task_input needed NO entry at all — its property set
+ * (task_id, source_task_id, contract, expected_type, replace) and its
+ * required list (task_id, source_task_id) both match the original
+ * byte-for-byte. 25 -> 26 entries, 75 -> 76 divergences, 42 -> 43 shared
+ * tools, semantic count unchanged at 4 (not semantic — see the entry itself
+ * for why: the old shape 400s cleanly rather than silently doing something
+ * different, the same reasoning delete_flow's own `required` entry above
+ * already carries).
  *
  * D1b Task 12c closed move_task's SEMANTIC entry outright (a real port — see
  * moveTask()/moveToProject() — not a waiver) and opened one new ADDITIVE
@@ -615,5 +629,35 @@ return [
             . 'returns a STATIC playbook (FlowBuildPlaybook) with no seed to prime against, so there is nothing for '
             . 'it to do yet. project_id being optional (vs. the original\'s required) is us being more permissive, '
             . 'which the parity test does not flag.',
+    ],
+
+    // ── DEFERRED (continued, D5a Task 7) ─────────────────────────────────────
+    //
+    // set_task_input/remove_task_input wire and unwire the I/O edges
+    // themselves. set_task_input needs NO entry -- its property set and
+    // required list both match the original exactly. remove_task_input
+    // carries exactly one divergence, and it is a deliberate, stricter
+    // requirement rather than a capability gap silently ignored.
+
+    'remove_task_input' => [
+        // The original treats an ABSENT source_task_id as "remove every
+        // input edge on task_id" -- a genuine capability (bulk removal) that
+        // this backend does not implement: TaskEdgesApiHandler::removeInput()
+        // takes a plain `int $sourceTaskId`, never a nullable/absent one.
+        // This is NOT expressed as `missing` (a caller sending the original
+        // shape is not silently ignored) -- it is `required`: an old-shaped
+        // call (`{task_id}` alone) gets a clean 400 naming the missing field,
+        // never a silent, different action. Same reasoning as delete_flow's
+        // own `required => ['flow_id']` entry above: this plugin's
+        // mutating-route rule forbids a mutation from ever resolving its own
+        // target from a caller default, and "every input edge" is itself
+        // such a default -- there is no way to honour the original's absent-
+        // source_task_id form without guessing which edges the caller meant.
+        'required' => ['source_task_id'],
+        'reason' => 'DEFERRED (deliberate, stricter requirement, not a silent gap): the original treats an absent '
+            . 'source_task_id as "remove every input edge on task_id"; this plugin\'s mutating-route rule forbids a '
+            . 'mutation from resolving its own target from a caller default, and "every edge" is itself such a '
+            . 'default, so source_task_id is required here and an old-shaped call 400s cleanly instead of silently '
+            . 'doing something different. Bulk removal (omit source_task_id) is not implemented.',
     ],
 ];

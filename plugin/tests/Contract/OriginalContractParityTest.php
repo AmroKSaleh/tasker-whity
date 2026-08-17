@@ -67,12 +67,13 @@ final class OriginalContractParityTest extends TestCase
      * the gap cannot drift unnoticed in either direction — porting a tool must
      * come with a deliberate edit here, and so must losing one.
      *
-     * 143 tools live on the original; 42 of them exist here; 101 do not.
+     * 143 tools live on the original; 44 of them exist here; 99 do not.
      * D5a Task 5 ported name_flow/list_flows/delete_flow (107 -> 104). D5a
      * Task 6 ported get_flow_context/update_flow_context/build_new_flow
-     * (104 -> 101).
+     * (104 -> 101). D5a Task 7 ported set_task_input/remove_task_input
+     * (101 -> 99).
      */
-    private const EXPECTED_UNPORTED_COUNT = 101;
+    private const EXPECTED_UNPORTED_COUNT = 99;
 
     /** The original's full live surface: 131 snapshotted + 12 known live-only names. */
     private const EXPECTED_ORIGINAL_SURFACE_SIZE = 143;

@@ -15,6 +15,7 @@ use Tasker\Api\ProjectsApiHandler;
 use Tasker\Api\SectionsApiHandler;
 use Tasker\Api\SessionApiHandler;
 use Tasker\Api\TaskDiscussionsApiHandler;
+use Tasker\Api\TaskEdgesApiHandler;
 use Tasker\Api\TasksApiHandler;
 use Tasker\Domain\FlowBuildPlaybook;
 use Tasker\Migrations\AddTaskerProjectPrefixUnique;
@@ -1416,6 +1417,73 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                         200 => ['description' => 'The playbook, grounded to the resolved project'],
                         400 => ['description' => 'project_id looks like a short id but is malformed'],
                         404 => ['description' => 'project_id was supplied but not found, or omitted with no default project set'],
+                    ],
+                ],
+            ],
+            // ==================== Task edges / I/O (D5a Task 7) ====================
+            [
+                'method' => 'POST',
+                'path' => '/api/tasker/tasks/input',
+                'handler' => [$this, 'setTaskInput'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'set_task_input',
+                    'summary' => 'Wire an I/O edge: task_id (the CONSUMER) receives source_task_id\'s (the '
+                        . 'PRODUCER) output as input. Upserts on the (source_task_id, task_id) pair, and re-stamps '
+                        . 'the owning flow\'s step order in the same transaction. Refused if it would close a '
+                        . 'dependency cycle.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id', 'source_task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31) -- the CONSUMER.'],
+                            'source_task_id' => ['type' => 'string', 'description' => 'Upstream task whose output this task consumes (the PRODUCER for this edge).'],
+                            'contract' => [
+                                'type' => 'object',
+                                'description' => 'A quality contract for this input. Must be a JSON OBJECT (not a string or array).',
+                            ],
+                            'expected_type' => ['type' => 'string', 'description' => 'Optional coarse type hint for this input.'],
+                            'replace' => [
+                                'type' => 'boolean',
+                                'description' => 'If true, replace ALL of task_id\'s other inbound edges with just this one. Default false (upsert only this source\'s edge).',
+                            ],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'The upserted edge'],
+                        400 => ['description' => 'task_id or source_task_id is missing or looks like a short id but is malformed'],
+                        404 => ['description' => 'task_id or source_task_id not found in the caller\'s tenant or OU scope'],
+                        422 => ['description' => 'task_id and source_task_id are the same task, belong to different projects, contract is not a JSON object, or the edge would close a dependency cycle'],
+                    ],
+                ],
+            ],
+            [
+                'method' => 'DELETE',
+                'path' => '/api/tasker/tasks/input',
+                'handler' => [$this, 'removeTaskInput'],
+                'requiredRole' => null,
+                'requiredPermission' => 'tasker_task:edit',
+                'schema' => [
+                    'operationId' => 'remove_task_input',
+                    'summary' => 'Remove the I/O edge feeding task_id (the CONSUMER) from source_task_id (the '
+                        . 'PRODUCER), and re-stamp the owning flow\'s step order in the same transaction. '
+                        . 'source_task_id is REQUIRED here -- see parity-allowlist.php for why this differs from '
+                        . 'the original\'s "omit to remove every input edge" form.',
+                    'tags' => ['tasker'],
+                    'request' => [
+                        'type' => 'object',
+                        'required' => ['task_id', 'source_task_id'],
+                        'properties' => [
+                            'task_id' => ['type' => 'string', 'description' => 'Task UUID or short ID (e.g. TDE-31) -- the CONSUMER.'],
+                            'source_task_id' => ['type' => 'string', 'description' => 'The upstream source whose edge to remove.'],
+                        ],
+                    ],
+                    'responses' => [
+                        200 => ['description' => 'Removed'],
+                        400 => ['description' => 'task_id or source_task_id is missing or looks like a short id but is malformed'],
+                        404 => ['description' => 'task_id or source_task_id not found in the caller\'s tenant or OU scope, or no such input edge exists'],
                     ],
                 ],
             ],
@@ -4372,6 +4440,178 @@ final class TaskerPlugin implements PluginInterface, PluginRequirementsInterface
                 'playbook'  => FlowBuildPlaybook::text(),
             ],
         ], 200);
+    }
+
+    /**
+     * POST /api/tasker/tasks/input — the original's set_task_input (D5a Task
+     * 7). task_id (the consumer) and source_task_id (the producer) are BOTH
+     * resolved HERE via {@see IdentifierResolver}, which is OU-scoped -- a
+     * task outside the caller's tenant/OU scope 404s before
+     * {@see \Tasker\Api\TaskEdgesApiHandler::setInput()} is ever reached,
+     * which ALSO re-checks both via its own taskInfo() (defence in depth,
+     * the same layering {@see self::nameFlow()} applies to its own task_ids).
+     *
+     * NEITHER identifier falls back to a caller default: this plugin's
+     * mutating-route rule (see {@see self::deleteFlow()}'s own docblock for
+     * the same rule stated identically) forbids a mutation from ever
+     * guessing its own target, so an absent task_id OR source_task_id is a
+     * plain 400, never a silent fall-through.
+     *
+     * `contract` must be a genuine JSON OBJECT -- the SAME
+     * {@see self::isJsonObject()} 422 {@see self::nameFlow()}/
+     * {@see self::updateProjectContext()} already use, not a second
+     * validation convention. `replace` maps onto
+     * {@see \Tasker\Api\TaskEdgesApiHandler::setInput()}'s own `$replaceAll`
+     * parameter -- named `replace` here (not `replace_all`) specifically so
+     * this property matches the original's own set_task_input schema
+     * byte-for-byte, needing no parity-allowlist entry at all.
+     *
+     * @param array<string, string> $params
+     */
+    public function setTaskInput(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        $decoded = json_decode($request->getBody(), true);
+        if (!is_array($decoded)) {
+            return Response::error('Request body must be a JSON object', 400);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default -- see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'source_task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        $taskForm = IdentifierResolver::classify($rawTaskId);
+        if ($taskForm === 'empty') {
+            return Response::error('task_id is required', 400);
+        }
+        if ($taskForm === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+        $targetTaskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($targetTaskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $rawSourceTaskId = $this->identifierFromRequest($request, 'source_task_id');
+        $sourceForm = IdentifierResolver::classify($rawSourceTaskId);
+        if ($sourceForm === 'empty') {
+            return Response::error('source_task_id is required', 400);
+        }
+        if ($sourceForm === 'malformed_short_id') {
+            return Response::error('source_task_id looks like a short id but is malformed', 400);
+        }
+        $sourceTaskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawSourceTaskId);
+        if ($sourceTaskId === null) {
+            return Response::error('Source task not found', 404);
+        }
+
+        $contract = null;
+        if (array_key_exists('contract', $decoded) && $decoded['contract'] !== null) {
+            if (!self::isJsonObject($decoded['contract'])) {
+                return Response::error('contract must be a JSON object', 422);
+            }
+            /** @var array<string, mixed> $contract */
+            $contract = $decoded['contract'];
+        }
+
+        $expectedType = null;
+        if (array_key_exists('expected_type', $decoded) && $decoded['expected_type'] !== null) {
+            if (!is_string($decoded['expected_type'])) {
+                return Response::error('expected_type must be a string', 400);
+            }
+            $trimmedType = trim($decoded['expected_type']);
+            $expectedType = $trimmedType !== '' ? $trimmedType : null;
+        }
+
+        $replaceAll = $this->paramBool($request, 'replace', false);
+
+        return (new TaskEdgesApiHandler($pdo))
+            ->setInput($tenantId, $ou['ouId'], $targetTaskId, $sourceTaskId, $expectedType, $contract, $replaceAll);
+    }
+
+    /**
+     * DELETE /api/tasker/tasks/input — the original's remove_task_input (D5a
+     * Task 7).
+     *
+     * MUST read BOTH identifiers via {@see self::identifierFromRequest()}
+     * (body-then-query), never the body alone -- core empties a DELETE
+     * request's body and flattens every MCP argument into the query string
+     * instead (see {@see self::identifierFromRequest()}'s own docblock). A
+     * body-only read here would 400 on every real MCP call, exactly the
+     * mistake this slice's own brief calls out as having shipped once before
+     * and only caught by smoke-testing the real transport.
+     *
+     * source_task_id is REQUIRED here, UNLIKE the original (which treats an
+     * absent source_task_id as "remove every input edge"): this plugin's
+     * mutating-route rule forbids a mutation from resolving its own target
+     * from a caller default, and there is no "every edge" default to fall
+     * back to that is not itself a guess about which edges the caller meant.
+     * See `parity-allowlist.php`'s own `remove_task_input` entry for this
+     * divergence, recorded rather than silently narrowed.
+     *
+     * @param array<string, string> $params
+     */
+    public function removeTaskInput(Request $request, array $params = []): Response
+    {
+        $tenantId = $this->requireTenantId();
+        if ($tenantId === null) {
+            return Response::error('Tenant context is required', 403);
+        }
+
+        $pdo = $this->resolvePdo();
+        $ou = $this->resolveCallerOu($pdo, $request, $tenantId);
+        if (!$ou['resolved']) {
+            return Response::error('Caller membership could not be resolved', 403);
+        }
+
+        // I5: a wrong-typed identifier is a 400, never a silent fall-through to
+        // the caller's default -- see wrongTypedIdentifierError().
+        $wrongTyped = $this->wrongTypedIdentifierError($request, 'task_id', 'source_task_id');
+        if ($wrongTyped !== null) {
+            return $wrongTyped;
+        }
+
+        $rawTaskId = $this->identifierFromRequest($request, 'task_id');
+        $taskForm = IdentifierResolver::classify($rawTaskId);
+        if ($taskForm === 'empty') {
+            return Response::error('task_id is required', 400);
+        }
+        if ($taskForm === 'malformed_short_id') {
+            return Response::error('task_id looks like a short id but is malformed', 400);
+        }
+        $targetTaskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawTaskId);
+        if ($targetTaskId === null) {
+            return Response::error('Task not found', 404);
+        }
+
+        $rawSourceTaskId = $this->identifierFromRequest($request, 'source_task_id');
+        $sourceForm = IdentifierResolver::classify($rawSourceTaskId);
+        if ($sourceForm === 'empty') {
+            return Response::error('source_task_id is required', 400);
+        }
+        if ($sourceForm === 'malformed_short_id') {
+            return Response::error('source_task_id looks like a short id but is malformed', 400);
+        }
+        $sourceTaskId = IdentifierResolver::resolveTask($pdo, $tenantId, $ou['ouId'], $rawSourceTaskId);
+        if ($sourceTaskId === null) {
+            return Response::error('Source task not found', 404);
+        }
+
+        return (new TaskEdgesApiHandler($pdo))->removeInput($tenantId, $ou['ouId'], $targetTaskId, $sourceTaskId);
     }
 
     /**
